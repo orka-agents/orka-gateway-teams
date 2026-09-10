@@ -120,9 +120,10 @@ fixtures do, and retain the narrowed `OutgoingTeamsMessage` contract.
 
 Authenticate transport before conversion, but transport verification does not
 validate all activity fields. #550 must ignore typing, edits/deletes, bot messages,
-unsupported conversations, and empty text. Use attachment text only; do not download
-attachments. Missing, wrong, or oversized fields return a safe `invalid` result
-using the declared reasons, without exposing raw input or credentials.
+unsupported conversations, and empty text. Use the activity’s text only; do not
+download attachments. Text-plus-attachment messages use the accompanying activity
+text, not attachment content. Missing, wrong, or oversized fields return a safe
+`invalid` result using the declared reasons, without exposing raw input or credentials.
 
 The wire discriminator is exactly `orka.gateway.v1`; unknown wire fields are not
 forward-compatible extensions. Bounds in `src/protocol/types.ts` are UTF-8 limits:
