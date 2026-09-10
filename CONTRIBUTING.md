@@ -1,8 +1,8 @@
 # Contributing to the offline Teams starter
 
 This is the offline foundation for [#549](https://github.com/orka-agents/orka/issues/549),
-not a deployable adapter. The converter belongs to
-[#550](https://github.com/orka-agents/orka/issues/550) and is still unimplemented.
+not a deployable adapter. The personal-message converter for
+[#550](https://github.com/orka-agents/orka/issues/550) is implemented as `convertActivity`.
 The bounded final/error formatter for [#551](https://github.com/orka-agents/orka/issues/551)
 is implemented here as `formatDelivery`.
 No credentials, Teams registration, sends, or cluster setup are needed.
@@ -16,10 +16,11 @@ npm ci
 npm run check
 ```
 
-`npm test` runs all runtime tests, including the real formatter and preview CLI.
-For focused formatter tests: `node --import tsx --test test/format.test.ts`.
+`npm test` runs all runtime tests, including the real converter, formatter and preview CLI.
+For focused tests: `node --import tsx --test test/convert.test.ts` or
+`node --import tsx --test test/format.test.ts`.
 `npm run typecheck` is also mandatory: `test/contracts.typecheck.ts` checks the
-public contracts and formatter compatibility, including one-card/no-ordinary-text
+public contracts and callable implementations, including non-message inputs and one-card/no-ordinary-text
 constraints, and is not run by the runtime test command. `npm run check` runs
 typecheck, runtime tests, and `npm run build`. Build output is in ignored `dist/`; optional preview files belong
 in ignored `bin/`. Do not commit binaries, credentials, or generated output.
@@ -28,7 +29,7 @@ in ignored `bin/`. Do not commit binaries, credentials, or generated output.
 
 `test/fixtures/incoming.ts` contains the executable SDK `MessageActivity`,
 `conversionContext`, and this independent expected wire event. It is a synthetic
-example, not output from a converter implementation:
+example; the real converter is tested against this independent expected value:
 
 ```json
 {
@@ -60,7 +61,7 @@ The prefix is literal; the hash is lowercase hexadecimal. Preserve identity case
 and content. Sender is not part of that event tuple: changing sender under an
 existing provider message identity is a conflicting replay, not a new event.
 The ID helper hashes already-validated identities; it does not validate raw
-activity fields or enforce their bounds. That validation remains #550's work.
+activity fields or enforce their bounds. `convertActivity` validates before calling it.
 
 ## Exact extension contracts
 
@@ -106,8 +107,10 @@ export type OutgoingTeamsMessage = IMessageActivityInput & {
 export type FormatDelivery = (delivery: Readonly<DeliveryRequest>) => OutgoingTeamsMessage;
 ```
 
-The converter still exports only a callable type signature. The formatter exports
-`formatDelivery: FormatDelivery`; use it on an already-validated `DeliveryRequest`:
+The converter exports `convertActivity: ConvertActivity`; see the
+[converter usage example](README.md#convert-a-verified-personal-message).
+The formatter exports `formatDelivery: FormatDelivery`; use it on an
+already-validated `DeliveryRequest`:
 
 ```ts
 import { formatDelivery } from './src/teams/format.js';
@@ -130,12 +133,55 @@ fixtures do, and retain the narrowed `OutgoingTeamsMessage` contract.
 
 ### Converter acceptance and caller replay
 
-Authenticate transport before conversion, but transport verification does not
-validate all activity fields. #550 must ignore typing, edits/deletes, bot messages,
-unsupported conversations, and empty text. Use the activity’s text only; do not
-download attachments. Text-plus-attachment messages use the accompanying activity
-text, not attachment content. Missing, wrong, or oversized fields return a safe
-`invalid` result using the declared reasons, without exposing raw input or credentials.
+Authenticate the provider request and enforce the intended app and tenant before
+conversion. SDK types and transport verification do not validate all activity fields.
+The converter requires exact `type: 'message'`, `channelId: 'msteams'` and
+`conversation.conversationType: 'personal'`. A supplied `isGroup` must be boolean;
+`true` excludes even a contradictory personal conversation. Notifications, joins,
+edits/deletes/undeletes and nonpersonal conversations are ignored. Any supplied
+nonempty `channelData.eventType` marks an unsupported event, not a new message;
+malformed discriminators return `invalid`. Personal `replyToId` is neither an edit
+marker nor an output `threadId`.
+
+Missing `from.role` is normal in documented personal-message payloads, as is a
+missing `conversation.tenantId`. An otherwise valid role-less message is an eligible
+**candidate**, not an attested human message. Explicit `bot`/`skill` roles,
+`from.type: 'bot'`, and matching `from.id`/`recipient.id` are excluded. Unknown or
+malformed supplied roles are invalid. No display-name, AAD-ID or ID-prefix heuristic
+establishes identity or humanity. `sender.id` is exactly `from.id`; Orka's stable-ID
+allowlist owns sender authorization. Recipient identity, if supplied, is validated
+and compared exactly for self detection. Missing recipient identity is allowed and
+is not affirmative human proof; unused recipient metadata is not validated.
+
+At least one of `channelData.tenant.id` and `conversation.tenantId` must be supplied.
+Either alone, or both matching, is valid. Every supplied claim is validated and must
+exactly equal configured `tenantId`; a matching claim cannot mask another malformed
+or conflicting claim. Missing or empty required identities yield `missing-identity`;
+supplied wrong types (including null) and malformed fields yield `invalid-field`;
+oversized fields yield `field-too-large`; well-formed tenant disagreements yield
+`tenant-mismatch`. Errors use only fixed reasons, never raw input or credentials.
+Unsupported activities can be ignored before their unused fields are examined.
+
+Required provider IDs (tenant, conversation, activity and sender), tenant claims,
+and the opaque reply-target key are nonempty and at most 256 UTF-8 bytes. They are
+preserved exactly: no case folding, UUID/prefix grammar, trimming, Unicode
+normalization or truncation. Boundary Unicode `White_Space` is rejected so Orka's
+normalization cannot change identity. Unlike JavaScript `trim()`, Go whitespace
+includes U+0085 (NEL), but not U+FEFF. NEL is also a forbidden Cc control.
+
+An optional display name must be a string of at most 256 UTF-8 bytes **before**
+trimming. Validate raw Unicode/controls first, trim boundary `White_Space`, then
+omit an empty label. Useful nonempty text is preserved exactly and bounded at
+64 KiB UTF-8; missing/empty/`White_Space`-only text is ignored. All consumed strings
+must have well-formed Unicode (no lone UTF-16 surrogates) and no Cc controls, with
+TAB/LF/CR allowed only in text. Format characters, including ZWJ and FEFF, remain
+valid; this is not a blanket category-C rejection.
+
+Only `activity.text` is consumed, even with attachments. Attachment-only messages
+are ignored; attachment contents and unrelated metadata are never inspected,
+extracted or downloaded. Accepted envelopes contain only the fixed protocol/event
+discriminators, stable event ID, account/context/sender, text and reply-target key.
+They omit timestamps, metadata, thread IDs, service URLs and conversation references.
 
 The wire discriminator is exactly `orka.gateway.v1`; unknown wire fields are not
 forward-compatible extensions. Bounds in `src/protocol/types.ts` are UTF-8 limits:
@@ -282,5 +328,6 @@ The starter follows Orka at `0c8ab6fb`:
 - [Normative adapter protocol and security contract](https://github.com/orka-agents/orka/blob/0c8ab6fb/docs/development/gateway-protocol-v1.md)
 
 [#549](https://github.com/orka-agents/orka/issues/549) tracks the unfinished broader
-gateway. [#550](https://github.com/orka-agents/orka/issues/550) remains converter work;
-this change addresses only the formatter in [#551](https://github.com/orka-agents/orka/issues/551).
+gateway. The bounded converter in [#550](https://github.com/orka-agents/orka/issues/550)
+and formatter in [#551](https://github.com/orka-agents/orka/issues/551) are implemented;
+transport, persistence, authentication and live Teams validation remain future work.
