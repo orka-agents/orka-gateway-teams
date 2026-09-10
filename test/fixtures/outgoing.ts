@@ -30,23 +30,31 @@ export const errorDelivery = {
   text: 'This request could not be completed.',
 } satisfies DeliveryRequest;
 
+// Synthetic protocol-bounded input large enough to exercise real card shortening.
+export const oversizedDelivery = {
+  ...finalDelivery,
+  deliveryId: 'delivery-fixture-oversized',
+  idempotencyId: 'idempotency-fixture-oversized',
+  text: 'Synthetic reply section\n\n- Review open issues\n- Run `npm test`\n\nこんにちは 🧑🏽‍💻 e\u0301\n\n'.repeat(400),
+} satisfies DeliveryRequest;
+
 const finalCard = {
   type: 'AdaptiveCard',
   version: '1.4',
-  fallbackText: 'Orka reply: project summary.',
+  fallbackText: 'Orka reply: Project summary - Review open issues - Run `npm test` こんにちは 🧑🏽‍💻',
   body: [
     { type: 'TextBlock', text: 'Orka reply', weight: 'Bolder', wrap: true },
-    { type: 'TextBlock', text: finalDelivery.text, wrap: true },
+    { type: 'TextBlock', text: 'Project summary\n\n- Review open issues\n- Run `npm test`\n\nこんにちは 🧑🏽‍💻', wrap: true },
   ],
 } satisfies IAdaptiveCard;
 
 const errorCard = {
   type: 'AdaptiveCard',
   version: '1.4',
-  fallbackText: 'Orka could not complete the request.',
+  fallbackText: 'Orka could not complete the request: This request could not be completed.',
   body: [
     { type: 'TextBlock', text: 'Orka could not complete the request', weight: 'Bolder', wrap: true },
-    { type: 'TextBlock', text: errorDelivery.text, wrap: true },
+    { type: 'TextBlock', text: 'This request could not be completed.', wrap: true },
   ],
 } satisfies IAdaptiveCard;
 
