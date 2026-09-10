@@ -8,6 +8,7 @@
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
+    "preview:card": "node --import tsx scripts/preview-card.ts",
     "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
