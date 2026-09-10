@@ -4,7 +4,7 @@ import { MAX_HTTP_BODY_BYTES, MAX_TEXT_BYTES } from '../src/protocol/types.js';
 import { MAX_OUTGOING_MESSAGE_BYTES } from '../src/teams/format.js';
 import { createExternalEventId } from '../src/teams/ids.js';
 import { personalMessage, conversionContext, expectedEvent } from './fixtures/incoming.js';
-import { finalDelivery, errorDelivery, finalMessage, errorMessage } from './fixtures/outgoing.js';
+import { finalDelivery, errorDelivery, oversizedDelivery, finalMessage, errorMessage } from './fixtures/outgoing.js';
 
 test('incoming fixture demonstrates the exact personal-chat wire fields', () => {
   assert.equal(expectedEvent.externalEventId, createExternalEventId({
@@ -58,8 +58,15 @@ test('expected replies are one readable card, not text plus card', () => {
   }
 });
 
+test('oversized delivery demonstrates a valid multibyte answer beyond the outgoing budget', () => {
+  const bytes = Buffer.byteLength(oversizedDelivery.text, 'utf8');
+  assert.ok(bytes > MAX_OUTGOING_MESSAGE_BYTES);
+  assert.ok(bytes <= MAX_TEXT_BYTES);
+  assert.match(oversizedDelivery.text, /こんにちは 🧑🏽‍💻 e\u0301/u);
+});
+
 test('fixture JSON round-trips preserve Unicode and do not mutate inputs', () => {
-  const fixtures = [expectedEvent, finalDelivery, errorDelivery, finalMessage, errorMessage];
+  const fixtures = [expectedEvent, finalDelivery, errorDelivery, oversizedDelivery, finalMessage, errorMessage];
   const before = structuredClone(fixtures);
   for (const fixture of fixtures) {
     assert.deepEqual(JSON.parse(JSON.stringify(fixture)), fixture);
