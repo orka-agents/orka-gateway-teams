@@ -2,8 +2,8 @@
 
 This repository is the first slice of
 [orka-agents/orka#549](https://github.com/orka-agents/orka/issues/549).
-It supplies protocol types, deterministic event IDs, a conversion contract,
-a working final/error card formatter, synthetic examples, and tests. It is not
+It supplies protocol types, deterministic event IDs, a personal-message converter,
+a bounded final/error card formatter, synthetic examples, and tests. It is not
 yet a running Teams gateway.
 There is no Teams listener, credential setup, Orka endpoint, or Kubernetes install.
 
@@ -21,14 +21,56 @@ Build output is written to ignored `dist/`.
 
 ## Contributor tasks
 
-- [#550](https://github.com/orka-agents/orka/issues/550): implement the
-  `ConvertActivity` contract in `src/teams/convert.ts`.
+- [#550](https://github.com/orka-agents/orka/issues/550): implemented by
+  `convertActivity` in `src/teams/convert.ts`, preserving the `ConvertActivity` contract.
 - [#551](https://github.com/orka-agents/orka/issues/551): implemented by
   `formatDelivery` in `src/teams/format.ts`, preserving the `FormatDelivery` contract.
 
-The converter remains type-only; the formatter is callable and tested.
+The converter and formatter are both callable and tested.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for input/output fixtures and ownership
 boundaries. The broader gateway work in #549 remains unfinished.
+
+## Convert a verified personal message
+
+```ts
+import { convertActivity } from './src/teams/convert.js';
+import { personalMessage, conversionContext } from './test/fixtures/incoming.js';
+
+// Offline synthetic example; a live caller must verify request, app and tenant first.
+const result = convertActivity(personalMessage, conversionContext);
+if (result.kind === 'accepted') {
+  const event = result.event;
+  // Candidate for Orka's stable sender-ID allowlist, not proof of a human sender.
+  // The caller durably stores this original event and its opaque replyTarget for replay.
+}
+```
+
+The pure converter accepts new Teams `message` activities in exact `personal`
+conversations. It ignores notifications, edits/deletes/undeletes, event-marked
+messages, groups/channels, explicit bots/skills, identifiable self messages, and
+empty/whitespace-only text. Missing account roles are legitimate; neither a
+missing role nor `role: 'user'` attests humanity. Sender authorization remains
+Orka's stable-ID allowlist using exact `from.id`, never display name, AAD ID, or
+ID-prefix heuristics. No authorization or network calls happen here.
+
+At least one tenant claim (`channelData.tenant.id` or `conversation.tenantId`) is
+required; every supplied claim must be well formed and exactly match configured
+`tenantId`. Required IDs and the opaque reply-target key are nonempty, at most
+256 UTF-8 bytes, and preserved without trimming or case/Unicode normalization.
+Identity boundary whitespace is rejected. Optional display labels are bounded
+before trimming; empty normalized labels are omitted. All consumed strings must
+have well-formed Unicode and no Cc controls, except TAB/LF/CR in text. Text is
+limited to 64 KiB UTF-8 and otherwise preserved exactly, including useful
+whitespace and emoji. Whitespace follows Unicode `White_Space` (not JS `trim()`);
+format characters such as ZWJ and FEFF are not blanket-rejected.
+
+Only activity text is used, even with attachments. The event omits provider URLs,
+timestamps, metadata and `threadId`, including when a personal message has
+`replyToId`. The caller owns durable original-envelope/reply-target replay; do not
+reconvert duplicates using refreshed labels or routing. No running gateway,
+transport authentication, storage or replay implementation is included.
+
+Focused converter tests: `node --import tsx --test test/convert.test.ts`.
 
 ## Format an already-validated delivery
 
@@ -103,8 +145,8 @@ the unused `@microsoft/teams.apps` server dependency is deferred to integration.
 
 ## Roadmap and safety
 
-The personal-chat converter comes next, followed by authenticated transport,
-durable routing and delivery, conformance, and live Teams validation.
+Authenticated transport, durable routing and delivery, conformance, and live
+Teams validation come next.
 Shared-chat multiplayer collaboration is a later milestone. Buzz is an experience
 reference, not a dependency or existing integration in this repository.
 
