@@ -163,8 +163,7 @@ still have a committed admission: retry the same original provider activity.
   rollback, DB restore/loss or target replacement require quiescing/reconciliation,
   not a claim of backup-safe replay.
 
-The next outbound slice uses the existing Telegram-compatible V1 outcome baseline;
-no Orka protocol PR or protocol reapproval gate is required for this inbound work.
+The next outbound slice uses the existing Telegram-compatible V1 outcome baseline.
 Live registration, provider sends and a full end-to-end demo remain unvalidated.
 
 ## Contributor tasks
@@ -401,5 +400,5 @@ Shared-chat multiplayer collaboration is a later milestone. Buzz is an experienc
 reference, not a dependency or existing integration in this repository.
 
 Orka requires idempotent delivery, including replay correlation. Provider recovery
-when Teams accepts a send but its response is lost is unresolved. This starter
+when Teams accepts a send but its response is lost is unresolved. This inbound slice
 advertises no capabilities and does not claim to solve that problem.

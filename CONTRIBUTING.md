@@ -485,8 +485,7 @@ integration must preserve those boundaries and add these remaining pieces:
   deduplication/routing state merely because automatic attempts have ended.
 - Teams accepting a send whose response is lost remains an uncertain-send case.
   The later sender must map journal outcomes to the existing Telegram-compatible
-  V1 response baseline, without inventing a provider receipt or blind resend. No
-  Orka protocol PR/reapproval gate is needed for the current inbound work. This
+  V1 response baseline, without inventing a provider receipt or blind resend. This
   slice advertises no capabilities or provider-recovery guarantee.
 
 Keep tenant/account, conversation/context, thread, and sender identities separate.
