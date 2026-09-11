@@ -4,7 +4,8 @@ This is the offline foundation for [#549](https://github.com/orka-agents/orka/is
 not a deployable adapter. The personal-message converter for
 [#550](https://github.com/orka-agents/orka/issues/550) is implemented as `convertActivity`.
 The bounded final/error formatter for [#551](https://github.com/orka-agents/orka/issues/551)
-is implemented here as `formatDelivery`.
+is implemented here as `formatDelivery`. A local SQLite delivery journal is also
+implemented; there is still no sender or delivery endpoint.
 No credentials, Teams registration, sends, or cluster setup are needed.
 
 ## Development and checks
@@ -16,7 +17,8 @@ npm ci
 npm run check
 ```
 
-`npm test` runs all runtime tests, including the real converter, formatter and preview CLI.
+`npm test` runs all runtime tests, including the real converter, formatter, preview
+CLI, and temporary-file/child-process journal tests.
 For focused tests: `node --import tsx --test test/convert.test.ts` or
 `node --import tsx --test test/format.test.ts`.
 `npm run typecheck` is also mandatory: `test/contracts.typecheck.ts` checks the
@@ -129,7 +131,8 @@ fixtures do, and retain the narrowed `OutgoingTeamsMessage` contract.
 |---|---|---|
 | #550 converter | supported-type checks, tenant/field validation, stable normalized event | auth, inbox, reply-target creation, network |
 | #551 formatter | final/error/empty text, wrapping, Unicode-safe truncation and 20 KiB message budget | destination, auth, send, retry, persistence |
-| Integration caller | request verification, app/tenant enforcement, persisted routing/envelope replay, endpoints and delivery ledger | asking a converter to create new replay keys |
+| Delivery journal | durable local claims, immutable identity/alias checks, fenced settlement and receipt replay | auth, routing, provider calls, retries, endpoints |
+| Integration caller | request verification, app/tenant enforcement, persisted routing/envelope replay, endpoints and journal-backed sending | asking a converter to create new replay keys |
 
 ### Converter acceptance and caller replay
 
@@ -285,6 +288,110 @@ The export omits the message envelope; JSON assertions and HTTP access to the
 designer do not establish visual rendering. Local card rendering is not live
 Teams compatibility validation.
 
+## Delivery journal contract
+
+Import these local types and functions from `src/delivery/journal.ts`:
+
+```ts
+import type { DeliveryRequest } from './src/protocol/types.js';
+
+export interface JournalScope { appId: string; tenantId: string }
+export interface DeliveryClaim { idempotencyId: string; attemptId: string }
+export type TerminalOutcome =
+  | { kind: 'delivered'; providerMessageId: string }
+  | { kind: 'rejected' }
+  | { kind: 'unknown' };
+export type DeliveryOutcome = TerminalOutcome | { kind: 'retryable' };
+export type BeginDeliveryResult =
+  | { kind: 'claimed'; claim: DeliveryClaim }
+  | { kind: 'inFlight' }
+  | { kind: 'conflict' }
+  | TerminalOutcome;
+export type SettlementResult = 'recorded' | 'unchanged' | 'stale';
+export interface DeliveryJournal {
+  begin(request: Readonly<DeliveryRequest>): BeginDeliveryResult;
+  settle(claim: Readonly<DeliveryClaim>, outcome: Readonly<DeliveryOutcome>): SettlementResult;
+  close(): void;
+}
+export function initializeDeliveryJournal(path: string, scope: Readonly<JournalScope>): void;
+export function openDeliveryJournal(path: string, scope: Readonly<JournalScope>): DeliveryJournal;
+```
+
+Use [the runnable synthetic example and operational limits](README.md#local-durable-delivery-journal).
+Initialization exclusively provisions a new store; never use it as a fallback for
+missing/corrupt storage on startup. Normal open requires the initialized main file
+and permanent ownership sidecar. A live owner is acquired **before** main database
+validation or recovery. Only then, after brand/schema/integrity/scope/row validation,
+are abandoned `sending` records changed to terminal `unknown` in one transaction.
+There is no automatic migration, repair, import, lease expiry, pruning or reset.
+
+`begin` validates the consumed known wire shape and hashes a versioned deterministic
+encoding with SHA-256. The digest includes app/tenant, protocol version, stable ID,
+origin, task/session references, kind, account/context/thread/reply key, complete
+text and sorted metadata. `deliveryId` is normalized to `idempotencyId` in that
+encoding, allowing a fresh delivery alias for the same immutable logical operation.
+Absent/empty metadata and absent/empty thread are equivalent. Removing a reference
+or changing useful whitespace, metadata values, Unicode composition or identity
+case is significant. Inputs are never mutated and canonical plaintext is never
+persisted. The caller still owns validated, immutable request snapshots and
+GatewayClass metadata policy; these internal checks are not transport validation.
+
+Both identifiers occupy one unique alias namespace. Resolving either to another
+logical stable ID, resolving the two to different operations, or changing the
+digest returns `conflict`, not a cached success. Compatible alias insertion and
+send reservation are committed atomically; a claim is returned only after COMMIT
+succeeds. A locked or failed write cannot leak a claim or partial admission.
+One main SQLite connection is used; no provider work occurs in a transaction.
+
+Required identities, scopes, reference components and provider receipts are
+nonempty, bounded to 256 UTF-8 bytes and preserved exactly. Boundary Unicode
+`White_Space`, Cc controls and lone surrogates are rejected, not repaired. Text
+permits empty strings and TAB/LF/CR, with the existing 64 KiB UTF-8 bound. Metadata
+permits up to 32 string entries: nonempty identity-like keys and string values of
+at most 256 UTF-8 bytes, without Cc controls or lone surrogates. Empty/whitespace
+metadata values are preserved. Optional fields must be omitted rather than set to
+`undefined` or `null`; explicit empty thread/metadata are supported. Partial refs,
+unknown keys, arrays, non-string values and accessor/non-data objects are refused.
+This journal neither persists routing references nor authorizes a destination.
+
+| Current state | `begin` | Matching current `settle` |
+|---|---|---|
+| New operation | Commit `sending`, return fresh claim | — |
+| `sending` | `inFlight` | Confirmed receipt → `delivered`; definite no-effect permanent rejection → `rejected`; definite no-effect temporary failure → `ready`; ambiguity → `unknown` |
+| `ready` | Commit `sending` with a new attempt | Identical `retryable` → `unchanged`; other result → `stale` |
+| `delivered`, `rejected`, `unknown` | Saved terminal outcome | Identical stored result → `unchanged`; any rewrite → `stale` |
+
+An old attempt always returns `stale` after rotation; it cannot overwrite the new
+attempt or make a terminal record ready. `settle` returns `recorded` only for a
+committed transition. **Only actual proof of no provider effect permits
+`retryable`.** A timeout, cancellation, generic 5xx, missing/invalid receipt or
+lease expiry is ambiguous, not retry permission. The future sender must prohibit
+hidden retries/redirect replay and must not manufacture receipt IDs. The example
+and process tests use explicitly synthetic IDs, not observed Teams receipts.
+
+`DeliveryJournalError.code` is one of `invalid-input`, `missing`, `exists`, `busy`,
+`scope-mismatch`, `unsupported-schema`, `corrupt`, `unavailable`, or `closed`.
+Messages are fixed and never interpolate request values. Native `Error.cause` is
+private diagnostic context, not a transport/log payload. Input rejection does not
+poison the handle; a database/integrity/file-identity failure does. After such a
+failure, close and investigate instead of retrying a provider call. `close` is
+idempotent, releases the main handle before the owner and never unlinks files;
+methods on a closed object fail without reopening.
+
+Tests use real SQLite files, external SQLite locks and child-process IPC milestones.
+SIGKILL after a committed claim recovers `unknown`; SIGKILL after receipt persistence
+replays the original synthetic ID. A failed same-process competing open must not
+release ownership to another process. Never use ordinary filesystem reads/closes
+on a live SQLite main/ownership file in its owning process: this can release POSIX
+locks. Privacy-byte checks close journals first. Raw live-file copying/backup is
+unsupported; restored or rolled-back history is not duplicate-safe. Filesystem
+power-loss guarantees and operator backup discipline are not proved by SIGKILL tests.
+No binaries, DB files or production fault-injection hooks belong in the repository.
+
+These are **local domain outcomes**, not V1 delivery responses or an
+`idempotentDelivery` capability. The journal blocks ambiguous redrive but cannot
+recover a lost Teams receipt or atomically commit SQLite and a remote send.
+
 ## Future integration boundaries
 
 These are requirements for later integration, not features of this starter:
@@ -301,9 +408,11 @@ These are requirements for later integration, not features of this starter:
   durable admission is not task completion. This starter implements none of these.
 - Resolve an opaque routing key to persisted private provider routing; do not ask
   the formatter to select destinations or make network calls.
-- Maintain a durable delivery ledger idempotent by **either** `deliveryId` or
-  `idempotencyId`. A replay must return the original provider message correlation
-  without another send. A stable ID or process-local map alone is insufficient.
+- Integrate the local delivery journal with an authenticated sender. Its aliases
+  bind **both** `deliveryId` and `idempotencyId`; confirmed receipt replay returns
+  the original provider message correlation without another send. A stable ID or
+  process-local map alone is insufficient, and ambiguous outcomes still cannot
+  supply a lost provider correlation.
 - Account for the 15-second delivery call budget, ten attempts, 24-hour default
   event/delivery expiry, and retention that covers manual retries as well as the
   automatic window (Orka's default terminal retention is 30 days). Do not discard
@@ -330,4 +439,5 @@ The starter follows Orka at `0c8ab6fb`:
 [#549](https://github.com/orka-agents/orka/issues/549) tracks the unfinished broader
 gateway. The bounded converter in [#550](https://github.com/orka-agents/orka/issues/550)
 and formatter in [#551](https://github.com/orka-agents/orka/issues/551) are implemented;
-transport, persistence, authentication and live Teams validation remain future work.
+transport, ingress/routing persistence, journal-backed sending, authentication
+and live Teams validation remain future work.
