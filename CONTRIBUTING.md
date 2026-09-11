@@ -35,25 +35,33 @@ in ignored `bin/`. Do not commit binaries, credentials, or generated output.
 ## Optional packaging gates
 
 See [the deployment runbook](docs/deployment.md#scoped-verification) for exact
-prerequisites and kindctl commands. Use the locked Node 24.2.0 toolchain:
+prerequisites and kindctl commands. Select Node 24.2.0 on `PATH` using your local
+toolchain manager (`node --version` must report `v24.2.0`). From this adapter
+worktree, set and export `KINDCTL` to the absolute path of the canonical wrapper in
+your Orka checkout; replace the example path below. The deployment runner requires
+an existing executable file and validates its scoped kubeconfig path and context
+before cluster access.
 
 ```sh
-PATH=/home/tng/.local/share/mise/installs/node/24.2.0/bin:/usr/local/bin:/usr/bin:/bin npm run check
-PATH=/home/tng/.local/share/mise/installs/node/24.2.0/bin:/usr/local/bin:/usr/bin:/bin npm run test:container
-PATH=/home/tng/.local/share/mise/installs/node/24.2.0/bin:/usr/local/bin:/usr/bin:/bin /home/tng/workspace/orka/.agents/skills/kindctl/bin/kindctl exec --tag deployment -- npm run test:deployment
+npm run check
+npm run test:container
+export KINDCTL=/absolute/path/to/orka/.agents/skills/kindctl/bin/kindctl
+"$KINDCTL" exec --tag deployment -- npm run test:deployment
 ```
 
 The two smoke commands fail if prerequisites are absent; neither is part of default
 `npm test`. Docker acceptance builds/runs the actual image and pinned proxy.
 Deployment acceptance uses real Kustomize, server dry-run against installed Gateway
 CRDs and synthetic Pods/PVC/TLS/restarts. It creates only a new owned namespace and
-never installs Orka, touches global kubeconfig, or deletes the coordinator's cluster.
+never installs Orka, touches global kubeconfig, or deletes the operator's cluster.
 
 `test/deployment-ownership.test.ts` is offline behavioral coverage for failed or
 incomplete termination proof. The real deployment fixture seeds receipts only via
 the public journal API after all owners are stopped, and refuses owner-file
 mutation/restoration while any Pod/container/controller could still own the store.
 A CLI exit or successful scale/delete acknowledgement alone is not that proof.
+`test/deployment-processes.test.ts` also runs offline, covering required wrapper
+configuration, bounded log capture and all-follower cleanup after failures.
 Fixture code uses a file subPath mount and explicit completion markers; a projected
 ConfigMap symlink must not silently skip its main-module guard. Never turn fixture
 routing or fault injection into production configuration.

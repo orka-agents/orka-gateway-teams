@@ -420,10 +420,13 @@ Azure credentials, the controller ledger, or adapter storage.
 ## Scoped verification
 
 Default `npm test` / `npm run check` require **no Docker or Kubernetes**. Node
-24.2.0 and OpenSSL are the tested local toolchain. Two additional gates are explicit:
+24.2.0 and OpenSSL are the tested local toolchain. Select Node 24.2.0 on `PATH`
+using your local toolchain manager; `node --version` must report `v24.2.0`.
+Two additional gates are explicit:
 
 ```sh
-PATH=/home/tng/.local/share/mise/installs/node/24.2.0/bin:/usr/local/bin:/usr/bin:/bin npm run test:container
+npm run check
+npm run test:container
 ```
 
 `test:container` builds the image and runs the actual locked app/proxy with private
@@ -431,12 +434,15 @@ synthetic fixtures. It requires a local Linux Docker daemon, bridge access and
 host UID1000, and fails if prerequisites are missing.
 
 From this adapter worktree, the separately owned local kind cluster uses tag
-`deployment`. Its coordinator owns creation/deletion. Never use global kubeconfig,
+`deployment`. Its operator owns creation/deletion. Never use global kubeconfig,
 never delete the cluster here, and never install Orka/Go merely for this gate.
-Use the canonical wrapper (absolute path) for every cluster operation:
+Set and export the required `KINDCTL` to the absolute path of the canonical wrapper
+in your Orka checkout (replace the example path). Use it from this adapter worktree
+for every cluster operation:
 
 ```sh
-/home/tng/workspace/orka/.agents/skills/kindctl/bin/kindctl load --tag deployment orka-gateway-teams:local
+export KINDCTL=/absolute/path/to/orka/.agents/skills/kindctl/bin/kindctl
+"$KINDCTL" load --tag deployment orka-gateway-teams:local
 ```
 
 The proxy digest must also be available. With this Docker/kind combination, a
@@ -447,12 +453,15 @@ unchanged:
 ```sh
 docker pull nginxinc/nginx-unprivileged@sha256:442753882674b49ae2c1de83ed67896131c0777f56df5005e356e62bc3f7e7ce
 docker tag nginxinc/nginx-unprivileged@sha256:442753882674b49ae2c1de83ed67896131c0777f56df5005e356e62bc3f7e7ce nginxinc/nginx-unprivileged:stable-alpine
-/home/tng/workspace/orka/.agents/skills/kindctl/bin/kindctl load --tag deployment nginxinc/nginx-unprivileged:stable-alpine
-PATH=/home/tng/.local/share/mise/installs/node/24.2.0/bin:/usr/local/bin:/usr/bin:/bin /home/tng/workspace/orka/.agents/skills/kindctl/bin/kindctl exec --tag deployment -- npm run test:deployment
+"$KINDCTL" load --tag deployment nginxinc/nginx-unprivileged:stable-alpine
+"$KINDCTL" exec --tag deployment -- npm run test:deployment
 ```
 
-The deployment runner requires that scoped cluster, Node24.2.0, kubectl/Kustomize,
-OpenSSL, both images and the three existing Orka Gateway CRDs; it **fails**, never
+The deployment runner rejects missing, relative or non-executable `KINDCTL` before
+running any command. It verifies that the current kubeconfig path and context match
+that wrapper's `deployment` scope before cluster access. It requires that scoped
+cluster, Node24.2.0, kubectl/Kustomize, OpenSSL, both images and the three existing
+Orka Gateway CRDs; it **fails**, never
 silently skips, if prerequisites are absent. It creates a new uniquely labelled
 synthetic namespace only after proving it absent/empty. It never creates a real
 Gateway/Agent/controller; Orka examples receive server dry-run schema validation

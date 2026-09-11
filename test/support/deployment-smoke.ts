@@ -4,10 +4,10 @@ import assert from 'node:assert/strict';
 import { execFile, spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { request } from 'node:https';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { DeliveryRequest } from '../../src/protocol/types.js';
@@ -45,7 +45,6 @@ interface Result { code: number; stdout: string; stderr: string }
 interface Settings { env: Record<string, string>; delivery: DeliveryRequest; receipt: string }
 const image = 'orka-gateway-teams:local';
 const nginxImage = 'nginxinc/nginx-unprivileged:stable-alpine@sha256:442753882674b49ae2c1de83ed67896131c0777f56df5005e356e62bc3f7e7ce';
-const wrapper = '/home/tng/workspace/orka/.agents/skills/kindctl/bin/kindctl';
 const ownerLabel = 'teams.orka.ai/deployment-smoke';
 let stage = 'preflight';
 let privateValues: string[] = [];
@@ -62,6 +61,80 @@ function ok(result: Result): string { assert.equal(result.code, 0); return resul
 function items(text: string): Resource[] { return text.split('\n').filter(Boolean).map((line) => JSON.parse(line) as Resource); }
 function hasKey(value: unknown, key: string): boolean {
   return value !== null && typeof value === 'object' && (Object.hasOwn(value, key) || Object.values(value).some((child) => hasKey(child, key)));
+}
+
+export async function checkDeploymentScope(env: NodeJS.ProcessEnv, run = command): Promise<void> {
+  const wrapper = env.KINDCTL;
+  if (typeof wrapper !== 'string' || !isAbsolute(wrapper)) throw new Error('absolute executable KINDCTL required');
+  assert.equal(statSync(wrapper).isFile(), true); accessSync(wrapper, constants.X_OK);
+  assert.equal(process.version, 'v24.2.0');
+  assert.equal(env.KUBECONFIG === ok(await run(wrapper, ['path', '--tag', 'deployment'])), true);
+  assert.equal(ok(await run('kubectl', ['config', 'current-context'])) === ok(await run(wrapper, ['kubectl', '--tag', 'deployment', 'config', 'current-context'])), true);
+}
+
+export interface LogFollower { child: ChildProcess; done: Promise<Result> }
+export function captureLogFollower(child: ChildProcess): LogFollower {
+  const stdout: Buffer[] = []; const stderr: Buffer[] = [];
+  let failed = false; let overflow = false;
+  const done = new Promise<Result>((resolve) => {
+    for (const [stream, chunks, limit] of [[child.stdout!, stdout, 1024 * 1024], [child.stderr!, stderr, 65536]] as const) {
+      let bytes = 0;
+      stream.on('data', (chunk: Buffer) => {
+        if (overflow || chunk.length === 0) return;
+        if (bytes + chunk.length > limit) {
+          overflow = true;
+          try { child.kill('SIGTERM'); } catch { failed = true; }
+          return; // Discard subsequent bytes even if SIGTERM does not stop the child.
+        }
+        bytes += chunk.length; chunks.push(Buffer.from(chunk));
+      });
+    }
+    child.on('error', () => { failed = true; });
+    // Only close proves stdio completion, including after an error or process exit.
+    child.once('close', (code) => resolve({ code: failed || overflow ? -1 : code ?? -1,
+      stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString() }));
+  });
+  return { child, done };
+}
+export async function finishLogFollowers(logFollowers: LogFollower[], abort: boolean,
+  scan = safeOutput, timeout = 10000): Promise<void> {
+  let failed = false;
+  const signaled = new Set<LogFollower>();
+  const stopAll = () => {
+    for (const follower of logFollowers) {
+      if (signaled.has(follower) || follower.child.exitCode !== null || follower.child.signalCode !== null) continue;
+      signaled.add(follower);
+      try { if (!follower.child.kill('SIGTERM')) failed = true; } catch { failed = true; }
+    }
+  };
+  if (abort) stopAll();
+  // Concurrent bounded waits: one failed follower must not delay signaling the rest.
+  await Promise.all([...logFollowers].map(async (follower) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Promise.race([follower.done, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('log follower termination unconfirmed')), timeout);
+      })]);
+      // Keep timed-out/rejected followers tracked for a later cleanup attempt.
+      logFollowers.splice(logFollowers.indexOf(follower), 1);
+      scan(result.stdout + result.stderr); if (!abort) ok(result);
+    } catch {
+      failed = true; stopAll();
+    } finally { clearTimeout(timer); }
+  }));
+  if (failed) throw new Error('log follower cleanup failed or termination unconfirmed');
+}
+
+export function captureForwardOutput(child: ChildProcess): { text: string; overflow: boolean } {
+  const output = { text: '', overflow: false };
+  const capture = (chunk: Buffer) => {
+    if (output.overflow) return;
+    const text = chunk.toString();
+    if (Buffer.byteLength(output.text) + Buffer.byteLength(text) > 65536) { output.overflow = true; return; }
+    output.text += text;
+  };
+  child.stdout!.on('data', capture); child.stderr!.on('data', capture);
+  return output;
 }
 
 // File-based helpers run in synthetic Pods using the actual image, outside /app.
@@ -100,15 +173,13 @@ async function smoke(): Promise<void> {
     'deploy/orka/gateway.yaml', 'deploy/orka/gatewaybinding.yaml']) {
     stage = `missing packaging artifact: ${path}`; assert.equal(existsSync(path), true);
   }
-  stage = 'requires Node 24.2.0 and kindctl exec --tag deployment with scoped kubeconfig';
-  assert.equal(process.version, 'v24.2.0');
-  assert.equal(process.env.KUBECONFIG === ok(await command(wrapper, ['path', '--tag', 'deployment'])), true);
+  stage = 'requires absolute executable KINDCTL, Node 24.2.0 and kindctl exec --tag deployment with scoped kubeconfig';
+  await checkDeploymentScope(process.env);
   const kubectl = async (args: string[], input?: string, timeout?: number) => {
     const result = await command('kubectl', args, input, timeout);
     // JSON Secret create responses stay private. Callers never print child output.
     safeOutput(result.stderr); return result;
   };
-  assert.equal(ok(await kubectl(['config', 'current-context'])) === ok(await command(wrapper, ['kubectl', '--tag', 'deployment', 'config', 'current-context'])), true);
   stage = 'requires reachable scoped cluster, loaded images, OpenSSL and Gateway CRDs';
   ok(await kubectl(['get', 'nodes', '-o', 'name'])); ok(await command('openssl', ['version']));
   for (const name of ['gatewayclasses.gateway.orka.ai', 'gateways.gateway.orka.ai', 'gatewaybindings.gateway.orka.ai']) {
@@ -266,32 +337,12 @@ async function smoke(): Promise<void> {
       }
     }
   };
-  const logFollowers: { child: ChildProcess; done: Promise<Result> }[] = [];
+  const logFollowers: LogFollower[] = [];
   const followLogs = (podName: string, containerName: string) => {
     const child = spawn('kubectl', ['logs', '--follow', '-n', namespace, podName, '-c', containerName], { stdio: ['ignore', 'pipe', 'pipe'] });
-    let stdout = ''; let stderr = '';
-    const done = new Promise<Result>((resolve) => {
-      child.stdout!.on('data', (chunk: Buffer) => { stdout += chunk.toString(); if (stdout.length > 1024 * 1024) child.kill('SIGTERM'); });
-      child.stderr!.on('data', (chunk: Buffer) => { stderr += chunk.toString(); if (stderr.length > 65536) child.kill('SIGTERM'); });
-      child.once('error', () => resolve({ code: -1, stdout, stderr }));
-      // close follows stdio completion; exit alone could miss final shutdown bytes.
-      child.once('close', (code) => resolve({ code: code ?? -1, stdout, stderr }));
-    });
-    logFollowers.push({ child, done });
+    logFollowers.push(captureLogFollower(child));
   };
-  const finishLogs = async (abort: boolean) => {
-    for (const follower of logFollowers) {
-      if (abort && follower.child.exitCode === null && follower.child.signalCode === null) follower.child.kill('SIGTERM');
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        const result = await Promise.race([follower.done, new Promise<never>((_, reject) => {
-          timer = setTimeout(() => { follower.child.kill('SIGTERM'); reject(new Error('log follower termination unconfirmed')); }, 10000);
-        })]);
-        safeOutput(result.stdout + result.stderr); if (!abort) ok(result);
-      } finally { clearTimeout(timer); }
-    }
-    logFollowers.length = 0;
-  };
+  const finishLogs = (abort: boolean) => finishLogFollowers(logFollowers, abort);
   const stopRuntime = async () => {
     await ownedNamespace(); await logsSafe();
     ok(await kubectl(['scale', '-n', namespace, 'deployment/teams', '--replicas=0']));
@@ -310,7 +361,7 @@ async function smoke(): Promise<void> {
     return pods[0]!;
   };
   let forward: ChildProcess | undefined;
-  let forwardOutput = '';
+  let forwardOutput = { text: '', overflow: false };
   const stopForward = async () => {
     if (!forward) return;
     const child = forward; forward = undefined;
@@ -320,19 +371,18 @@ async function smoke(): Promise<void> {
         child.once('exit', () => { clearTimeout(timer); resolve(); }); child.kill('SIGTERM');
       });
     }
-    safeOutput(forwardOutput);
+    safeOutput(forwardOutput.text); assert.equal(forwardOutput.overflow, false);
   };
   const startForward = async (podName: string): Promise<[number, number]> => {
-    await stopForward(); forwardOutput = '';
+    await stopForward();
     forward = spawn('kubectl', ['port-forward', '-n', namespace, `pod/${podName}`, ':8443', ':8444', '--address=127.0.0.1'], { stdio: ['ignore', 'pipe', 'pipe'] });
-    forward.stdout!.on('data', (chunk: Buffer) => { forwardOutput += chunk.toString(); });
-    forward.stderr!.on('data', (chunk: Buffer) => { forwardOutput += chunk.toString(); });
+    forwardOutput = captureForwardOutput(forward);
     forward.on('error', () => {});
     const deadline = performance.now() + 15000;
     while (true) {
-      assert.equal(forwardOutput.length < 65536, true);
-      const publicPort = /127\.0\.0\.1:(\d+) -> 8443/u.exec(forwardOutput)?.[1];
-      const privatePort = /127\.0\.0\.1:(\d+) -> 8444/u.exec(forwardOutput)?.[1];
+      assert.equal(!forwardOutput.overflow && forwardOutput.text.length < 65536, true);
+      const publicPort = /127\.0\.0\.1:(\d+) -> 8443/u.exec(forwardOutput.text)?.[1];
+      const privatePort = /127\.0\.0\.1:(\d+) -> 8444/u.exec(forwardOutput.text)?.[1];
       if (publicPort && privatePort) return [Number(publicPort), Number(privatePort)];
       assert.equal(performance.now() < deadline && forward.exitCode === null, true); await sleep(100);
     }
@@ -357,7 +407,7 @@ async function smoke(): Promise<void> {
     namespaceUID = ns.metadata.uid; await ownedNamespace();
     writeFileSync(join(directory, 'ownership.json'), JSON.stringify({ namespace, namespaceUID, owner }), { mode: 0o600 });
     assert.equal((await get('pods,deployments.apps,replicasets.apps,statefulsets.apps,daemonsets.apps,jobs.batch,cronjobs.batch,persistentvolumeclaims,secrets,services')).items.length, 0);
-    console.log(`SCOPE ${namespace} (new owned synthetic namespace; coordinator cluster retained)`);
+    console.log(`SCOPE ${namespace} (new owned synthetic namespace; operator cluster retained)`);
     stage = 'server dry-run against actual Kubernetes and installed Orka CRD schemas';
     for (const object of [...runtime, pvc, prepare, init, ...orka]) {
       const value = mark(object); if (value.kind === 'GatewayClass') delete value.metadata.namespace;
@@ -450,7 +500,7 @@ async function smoke(): Promise<void> {
     console.log('PASS missing-owner refusal with independent all-owner termination proof; new Pod UID/remount preserves receipt and private modes; fixture values absent from all retained Pod logs');
     complete = true;
   } finally {
-    await stopForward(); await finishLogs(!complete);
+    try { await stopForward(); } finally { await finishLogs(!complete); }
     if (complete && namespaceUID && !heldOwner) {
       stage = 'owned synthetic cleanup (never production retirement)';
       await proveStopped();
