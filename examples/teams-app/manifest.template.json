@@ -1,0 +1,35 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.30/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.30",
+  "version": "1.0.0",
+  "id": "REQUIRED_TEAMS_PACKAGE_GUID",
+  "developer": {
+    "name": "REQUIRED_OPERATOR_NAME",
+    "websiteUrl": "REQUIRED_OPERATOR_SUPPORT_HTTPS_URL",
+    "privacyUrl": "REQUIRED_OPERATOR_PRIVACY_HTTPS_URL",
+    "termsOfUseUrl": "REQUIRED_OPERATOR_TERMS_HTTPS_URL"
+  },
+  "name": {
+    "short": "Orka personal assistant",
+    "full": "Orka personal task assistant"
+  },
+  "description": {
+    "short": "Send personal text requests to an operator-managed Orka agent.",
+    "full": "Send personal text requests to an operator-managed Orka agent and receive replies. Access is limited to explicitly authorized senders and conversations. Group chats, channels, calling and file transfer are not supported."
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#FFFFFF",
+  "bots": [
+    {
+      "botId": "REQUIRED_BOT_OAUTH_CLIENT_GUID",
+      "scopes": ["personal"],
+      "isNotificationOnly": false,
+      "supportsFiles": false,
+      "supportsCalling": false,
+      "supportsVideo": false
+    }
+  ]
+}

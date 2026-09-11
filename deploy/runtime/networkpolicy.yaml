@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: teams-ingress
+  namespace: orka-system
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: orka-gateway-teams
+  policyTypes: [Ingress]
+  ingress:
+    # Public frontend path only; port access is not provider authentication.
+    # Narrow sources to the operator's actual ingress topology if supported.
+    - ports:
+        - {protocol: TCP, port: 8443}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: orka-system
+          podSelector:
+            matchLabels:
+              orka.ai/network-role: controller
+      ports:
+        - {protocol: TCP, port: 8444}

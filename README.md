@@ -8,8 +8,11 @@ The existing ingress-only mode remains available. Pure converter/formatter APIs,
 separate storage APIs, synthetic examples and tests are also included.
 
 Local readiness means initialized listeners/stores, not validated live provider
-credentials. Kubernetes installation, live registration, live Teams/Orka execution
-and a deployment demo remain separate work; local fixtures do not prove them.
+credentials. [Kubernetes packaging and a gated setup guide](docs/deployment.md) are
+available: a single-replica persistent app, pinned TLS proxy, separate provisioning
+Jobs, Orka examples and a personal-only Teams manifest template. Live registration,
+trusted identity discovery, live Teams/Orka execution and a deployment demo remain
+separate work; synthetic container/Kubernetes fixtures do not prove them.
 
 ## Local development
 
@@ -22,6 +25,19 @@ npm run check
 
 Individual commands: `npm test`, `npm run typecheck`, `npm run build`.
 Build output is written to ignored `dist/`.
+
+## Deployment packaging
+
+Start with the [deployment runbook and prerequisite STOP gate](docs/deployment.md).
+`deploy/kustomization.yaml` renders runtime resources only; storage preparation,
+initialization and Orka objects have separate lifecycles. Keep the PVC, permanent
+owner, Gateway UID and Orka dedup ledger across normal pauses/restarts. No Orka or
+public ingress controller is installed by this package.
+
+`npm run test:container` and `npm run test:deployment` are explicit optional gates;
+the latter must run through the documented worktree-scoped kindctl wrapper.
+Default `npm test` requires neither Docker nor Kubernetes. Put customizations,
+operator-supplied icons and the final Teams ZIP under ignored `bin/`.
 
 ## Run durable ingress
 
@@ -507,8 +523,8 @@ imports or legacy HttpPlugin are used.
 ## Roadmap and safety
 
 Journal-backed Teams sending and authenticated V1 endpoints are implemented in
-opt-in full mode. Live Teams/Orka registration, deployment and end-to-end validation
-remain separate. Shared-chat multiplayer collaboration is a later milestone. Buzz
+opt-in full mode. Deployment packaging is available; live Teams/Orka registration,
+trusted bootstrap bindings and end-to-end validation remain separate. Shared-chat multiplayer collaboration is a later milestone. Buzz
 is an experience reference, not a dependency or existing integration here.
 
 Orka requires idempotent delivery, including replay correlation. Confirmed receipts

@@ -1,0 +1,42 @@
+# OPTIONAL, separately authorized storage-admin action. Never a runtime initContainer.
+# Refuses an existing child directory. Do not retry/repair/adopt existing data.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: teams-prepare
+  namespace: orka-system
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: prepare
+          image: orka-gateway-teams:local
+          imagePullPolicy: IfNotPresent
+          command: [/bin/sh, -ec]
+          args:
+            - 'umask 077; mkdir -m 0700 /storage/teams; chown 1000:1000 /storage/teams'
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN]
+          resources:
+            requests: {cpu: 25m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 32Mi}
+          volumeMounts:
+            - {name: state, mountPath: /storage}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: state
+          persistentVolumeClaim: {claimName: teams-state}
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 8Mi}

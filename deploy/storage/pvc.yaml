@@ -1,0 +1,14 @@
+# Separate lifecycle: ordinary runtime cleanup MUST retain this claim and bytes.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: teams-state
+  namespace: orka-system
+spec:
+  accessModes: [ReadWriteOnce]
+  volumeMode: Filesystem
+  resources:
+    requests:
+      storage: 2Gi
+  # Select an operator-approved local filesystem StorageClass if no suitable default.
+  # RWO is NOT exclusive process ownership; RWOP needs a supporting CSI driver.
