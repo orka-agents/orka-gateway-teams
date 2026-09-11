@@ -67,7 +67,6 @@ export async function checkDeploymentScope(env: NodeJS.ProcessEnv, run = command
   const wrapper = env.KINDCTL;
   if (typeof wrapper !== 'string' || !isAbsolute(wrapper)) throw new Error('absolute executable KINDCTL required');
   assert.equal(statSync(wrapper).isFile(), true); accessSync(wrapper, constants.X_OK);
-  assert.equal(process.version, 'v24.2.0');
   assert.equal(env.KUBECONFIG === ok(await run(wrapper, ['path', '--tag', 'deployment'])), true);
   assert.equal(ok(await run('kubectl', ['config', 'current-context'])) === ok(await run(wrapper, ['kubectl', '--tag', 'deployment', 'config', 'current-context'])), true);
 }
@@ -174,6 +173,7 @@ async function smoke(): Promise<void> {
     stage = `missing packaging artifact: ${path}`; assert.equal(existsSync(path), true);
   }
   stage = 'requires absolute executable KINDCTL, Node 24.2.0 and kindctl exec --tag deployment with scoped kubeconfig';
+  assert.equal(process.version, 'v24.2.0');
   await checkDeploymentScope(process.env);
   const kubectl = async (args: string[], input?: string, timeout?: number) => {
     const result = await command('kubectl', args, input, timeout);

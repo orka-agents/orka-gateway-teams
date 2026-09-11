@@ -60,6 +60,17 @@ for (const scenario of ['matching', 'wrong kubeconfig', 'wrong context', 'wrappe
   });
 }
 
+test('offline scope checks do not inherit the deployment smoke runtime pin', async () => {
+  const version = Object.getOwnPropertyDescriptor(process, 'version')!;
+  const env = { KINDCTL: process.execPath, KUBECONFIG: '/synthetic/scoped.kubeconfig' };
+  try {
+    // Simulate the version boundary only; this does not test another installed runtime.
+    Object.defineProperty(process, 'version', { value: 'v24.3.0', configurable: true });
+    await checkDeploymentScope(env, async (_binary, args) => ({ code: 0,
+      stdout: args[0] === 'path' ? env.KUBECONFIG : 'kind-owned-deployment', stderr: '' }));
+  } finally { Object.defineProperty(process, 'version', version); }
+});
+
 // Owned process event/stdio boundary. No uncontrolled daemon or Kubernetes failure injection.
 function ownedProcess(stop: 'close' | 'hang' | 'throw' = 'close') {
   const child = new ChildProcess(); const stdout = new PassThrough(); const stderr = new PassThrough();
