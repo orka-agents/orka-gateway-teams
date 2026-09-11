@@ -103,20 +103,31 @@ test('network-loss cancellation drains before close; restart sends byte-identica
   await retried.promise; assert.equal(bodies.length, 2); assert.equal(bodies[1], bodies[0]);
 });
 
-test('serial runtime preserves Retry-After through stop/restart instead of using shorter polling or backoff', async (t) => {
-  const auth = await authFixture(t); const arrived = deferred<void>(); const retried = deferred<void>(); let requests = 0;
+test('serial runtime preserves a persisted retry schedule through stop/restart instead of using shorter polling or backoff', { timeout: 10000 }, async (t) => {
+  const auth = await authFixture(t); const arrived = deferred<void>(); const requests: number[] = [];
   const upstream = await httpsFixture(t, (req, res) => {
+    requests.push(Date.now());
     req.resume(); req.on('end', () => {
-      requests++;
-      if (requests === 1) { res.writeHead(503, { 'Retry-After': '3' }); res.end(); arrived.resolve(); }
-      else { res.writeHead(202); res.end(JSON.stringify({ status: 'accepted', eventId: 'orka-1', state: 'Queued' })); retried.resolve(); }
+      res.writeHead(202); res.end(JSON.stringify({ status: 'accepted', eventId: 'orka-1', state: 'Queued' })); arrived.resolve();
     });
   });
   const { config, own } = storage(t, upstream.baseUrl, upstream.ca);
+  // Server res.end() is not a client-observed hint or a committed retry. Seed the
+  // schedule explicitly; ingress-relay tests cover real HTTPS hints racing abort.
+  const scheduledAt = Date.now(); const dueTime = scheduledAt + 3000;
+  const store = openIngressStore(config.dbPath, config.scope, { now: () => scheduledAt });
+  try {
+    assert.equal(store.admit(expectedEvent, { serviceUrl: 'https://teams-service.example.invalid/', channelId: 'msteams',
+      bot: { id: '28:fixture-app', role: 'bot' },
+      conversation: { id: expectedEvent.contextId, conversationType: 'personal', tenantId: scope.tenantId } }).kind, 'accepted');
+    const claim = store.claim(); assert.ok(claim); assert.equal(store.retry(claim, 3000), true);
+  } finally { store.close(); }
   let runtime = own(await startIngressRuntime(config, auth.dependencies));
-  assert.equal((await post(runtime.port, auth.token())).status, 200); await arrived.promise; await sleep(100); await runtime.stop();
+  await runtime.stop();
   runtime = own(await startIngressRuntime(config, auth.dependencies));
-  await sleep(1400); assert.equal(requests, 1); await retried.promise; assert.equal(requests, 2);
+  await arrived.promise; await runtime.stop();
+  assert.equal(requests.length, 1);
+  assert.ok(requests[0]! >= dueTime, `request at ${requests[0]} preceded persisted due time ${dueTime}`);
 });
 
 test('fatal store failure stops listener/relay, rejects done and releases ownership only after drain', async (t) => {
