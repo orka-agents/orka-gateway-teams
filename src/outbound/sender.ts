@@ -21,19 +21,25 @@ export function createProviderSender(acquireToken: () => Promise<string | undefi
   const work = new Set<Promise<unknown>>();
   const io = new Set<Promise<unknown>>();
   const aborts = new Set<() => void>();
+  const tokenWaiters = new Set<(value: string | undefined) => void>();
   let tokenWork: Promise<string | undefined> | undefined;
   let stopped = false;
   let stopping: Promise<void> | undefined;
 
-  function token(): Promise<string | undefined> {
+  function token(): void {
     if (!tokenWork) {
       // The public SDK acquisition cannot be cancelled. Share AND drain the
       // original work, never a caller's deadline race or a growing retry queue.
       const pending = Promise.resolve().then(() => stopped ? undefined : acquireToken()).catch(() => undefined);
       tokenWork = pending; io.add(pending);
-      void pending.then(() => { io.delete(pending); if (tokenWork === pending) tokenWork = undefined; });
+      // Only this continuation belongs to the stalled promise. Completed callers
+      // remove their waiters so their bodies do not live as long as acquisition.
+      void pending.then((value) => {
+        io.delete(pending); tokenWork = undefined;
+        const waiting = [...tokenWaiters]; tokenWaiters.clear();
+        for (const ready of waiting) ready(value);
+      });
     }
-    return tokenWork;
   }
 
   function send(route: Readonly<ReplyRoute>, message: Readonly<OutgoingTeamsMessage>, context: DeliveryContext = {}): Promise<ProviderResult> {
@@ -56,7 +62,7 @@ export function createProviderSender(acquireToken: () => Promise<string | undefi
       let finished = false; let handedOff = false;
       const finish = (outcome: ProviderResult) => {
         if (finished) return;
-        finished = true; clearTimeout(timer); aborts.delete(abort); context.signal?.removeEventListener('abort', abort);
+        finished = true; tokenWaiters.delete(onToken); clearTimeout(timer); aborts.delete(abort); context.signal?.removeEventListener('abort', abort);
         resolve(outcome);
       };
       const abort = () => {
@@ -65,7 +71,7 @@ export function createProviderSender(acquireToken: () => Promise<string | undefi
       };
       const timer = setTimeout(abort, Math.max(1, Math.ceil(deadline - performance.now())));
       aborts.add(abort); context.signal?.addEventListener('abort', abort, { once: true });
-      void token().then((value) => {
+      const onToken = (value: string | undefined) => {
         if (finished) return;
         // A timer alone is insufficient: synchronous SQLite/token work can
         // exhaust the budget before the event loop gets to run that timer.
@@ -90,7 +96,8 @@ export function createProviderSender(acquireToken: () => Promise<string | undefi
           }, () => finish({ kind: 'unknown' })).catch(() => finish({ kind: 'unknown' }));
           io.add(pending); void pending.then(() => io.delete(pending));
         } catch { finish({ kind: 'unknown' }); }
-      });
+      };
+      tokenWaiters.add(onToken); token();
     });
     work.add(result); void result.then(() => work.delete(result));
     return result;

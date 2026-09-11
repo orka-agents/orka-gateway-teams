@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { fork } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { Agent } from 'node:https';
 import { createServer } from 'node:http';
@@ -144,6 +145,26 @@ test('single-flight uncancellable token work survives caller deadlines but canno
     assert.equal(calls, 0); assert.equal(acquisitions, 1);
     assert.deepEqual(await sender.send(route, finalMessage), { kind: 'retryable' });
   } finally { gate.resolve(token()); await sender.stop(); }
+});
+
+test('completed token waiters release their bodies while shared acquisition remains unresolved', { timeout: 10000 }, async (t) => {
+  const child = fork(new URL('./support/outbound-token-retention.ts', import.meta.url), {
+    execArgv: ['--expose-gc', '--import', 'tsx'], stdio: ['ignore', 'ignore', 'inherit', 'ipc'],
+  });
+  const exited = new Promise<number | null>((resolve) => child.once('exit', (code) => resolve(code)));
+  t.after(async () => { if (child.exitCode === null) child.kill('SIGKILL'); await exited; });
+  type Sample = { bodyBytes: number; acquisitions: number; posts: number; tokenSettled: boolean;
+    after1000: number; after2000: number; afterDrain: number; postsAfterDrain: number };
+  const sample = await new Promise<Sample>((resolve, reject) => {
+    child.once('message', (value) => resolve(value as Sample));
+    child.once('error', () => reject(new Error('Retention fixture failed to start.')));
+    child.once('exit', () => reject(new Error('Retention fixture exited before reporting.')));
+  });
+  assert.equal(await exited, 0); assert.equal(sample.bodyBytes, 20480);
+  assert.equal(sample.acquisitions, 1); assert.equal(sample.posts, 0); assert.equal(sample.tokenSettled, false);
+  // Allow a small, fixed Buffer-accounting margin, not growth per completed call.
+  assert.ok(sample.after1000 <= 4 * sample.bodyBytes && sample.after2000 <= 4 * sample.bodyBytes, JSON.stringify(sample));
+  assert.ok(sample.afterDrain <= 4 * sample.bodyBytes); assert.equal(sample.postsAfterDrain, 0);
 });
 
 test('a live caller may share pending acquisition without reviving an expired caller', async (t) => {
