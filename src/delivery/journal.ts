@@ -248,7 +248,10 @@ function regularFile(path: string): Stats {
 }
 
 function sameFile(path: string, expected: Stats): void {
-  const actual = regularFile(path);
+  let actual: Stats;
+  try { actual = regularFile(path); } catch (error) {
+    throw new DeliveryJournalError('unavailable', { cause: error });
+  }
   if (actual.dev !== expected.dev || actual.ino !== expected.ino) throw new DeliveryJournalError('unavailable');
 }
 

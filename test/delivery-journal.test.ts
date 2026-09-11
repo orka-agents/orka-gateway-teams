@@ -675,6 +675,43 @@ for (const replace of ['main', 'owner'] as const) {
   });
 }
 
+for (const file of ['main', 'owner'] as const) {
+  for (const mode of ['directory', 'symlink', 'hard-link', 'missing'] as const) {
+    for (const action of ['begin', 'settle'] as const) {
+      test(`live ${file} path ${mode} on ${action} reports unavailable and permanently poisons the handle`, (t) => {
+        const s = store(t); s.initialize(); const journal = s.open(); const started = claim(journal);
+        const target = file === 'main' ? s.path : `${s.path}.owner.sqlite`;
+        const retired = `${target}.retired`;
+        // Change directory entries only: ordinary fd closes could release SQLite's POSIX locks.
+        if (mode === 'hard-link') linkSync(target, retired);
+        else renameSync(target, retired);
+        try {
+          if (mode === 'directory') mkdirSync(target);
+          if (mode === 'symlink') symlinkSync(retired, target);
+          assert.throws(() => action === 'begin'
+            ? journal.begin(errorDelivery)
+            : journal.settle(started, { kind: 'delivered', providerMessageId: 'unrecorded-fixture' }), (error: unknown) => {
+            assert.ok(error instanceof DeliveryJournalError);
+            assert.equal(error.code, 'unavailable');
+            if (mode === 'missing') assert.ok(error.cause instanceof Error && 'code' in error.cause && error.cause.code === 'ENOENT');
+            else assert.ok(error.cause instanceof DeliveryJournalError && error.cause.code === 'invalid-input');
+            return true;
+          });
+        } finally {
+          if (mode === 'hard-link') rmSync(retired);
+          else {
+            if (mode !== 'missing') rmSync(target, { recursive: true, force: true });
+            renameSync(retired, target);
+          }
+        }
+        // Even with the original inode back at its path, this handle must not resume.
+        assert.throws(() => journal.begin(errorDelivery), errorCode('unavailable'));
+        assert.throws(() => journal.settle(started, { kind: 'retryable' }), errorCode('unavailable'));
+      });
+    }
+  }
+}
+
 test('a missing ownership file is never silently recreated by normal open', (t) => {
   const s = store(t); s.initialize();
   rmSync(`${s.path}.owner.sqlite`);
