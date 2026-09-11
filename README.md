@@ -3,7 +3,8 @@
 This repository is the first slice of
 [orka-agents/orka#549](https://github.com/orka-agents/orka/issues/549).
 It supplies protocol types, deterministic event IDs, a personal-message converter,
-a bounded final/error card formatter, synthetic examples, and tests. It is not
+a bounded final/error card formatter, a local durable delivery journal,
+synthetic examples, and tests. It is not
 yet a running Teams gateway.
 There is no Teams listener, credential setup, Orka endpoint, or Kubernetes install.
 
@@ -68,7 +69,7 @@ Only activity text is used, even with attachments. The event omits provider URLs
 timestamps, metadata and `threadId`, including when a personal message has
 `replyToId`. The caller owns durable original-envelope/reply-target replay; do not
 reconvert duplicates using refreshed labels or routing. No running gateway,
-transport authentication, storage or replay implementation is included.
+transport authentication, ingress storage or ingress replay implementation is included.
 
 Focused converter tests: `node --import tsx --test test/convert.test.ts`.
 
@@ -101,6 +102,103 @@ may be abbreviated even when the card body fits unchanged.
 
 Focused formatter tests: `node --import tsx --test test/format.test.ts`.
 Run `npm run check` for type contracts, all runtime tests, and the build.
+
+## Local durable delivery journal
+
+`src/delivery/journal.ts` exports `initializeDeliveryJournal`,
+`openDeliveryJournal`, `DeliveryJournalError`, and their local TypeScript types.
+Initialization is an explicit first-provisioning action, **not** startup fallback.
+Normal open requires an intact, initialized store for the exact app and tenant.
+It never initializes, adopts, migrates, deletes, resets or expires records.
+
+Run this offline synthetic example from the repository root:
+
+```bash
+node --import tsx --input-type=module <<'JS'
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { initializeDeliveryJournal, openDeliveryJournal } from './src/delivery/journal.ts';
+import { finalDelivery } from './test/fixtures/outgoing.ts';
+
+const directory = mkdtempSync(join(tmpdir(), 'teams-journal-example-'));
+const path = join(directory, 'delivery.sqlite');
+const scope = { appId: 'app-fixture', tenantId: finalDelivery.accountId };
+let journal;
+try {
+  initializeDeliveryJournal(path, scope); // Only for this new synthetic store.
+  journal = openDeliveryJournal(path, scope);
+  const result = journal.begin(finalDelivery);
+  assert.equal(result.kind, 'claimed');
+  if (result.kind !== 'claimed') throw new Error('Expected synthetic claim');
+  // Synthetic receipt only: no Teams send happened in this example.
+  const receipt = { kind: 'delivered', providerMessageId: 'provider-fixture-1' };
+  assert.equal(journal.settle(result.claim, receipt), 'recorded');
+  journal.close();
+  journal = openDeliveryJournal(path, scope);
+  assert.deepEqual(journal.begin({ ...finalDelivery, deliveryId: 'fresh-alias' }), receipt);
+  console.log('Synthetic receipt replayed without another claim.');
+} finally {
+  journal?.close();
+  rmSync(directory, { recursive: true, force: true }); // Synthetic temp files only.
+}
+JS
+```
+
+A `claimed` result is a durable reservation, not authorization or provider
+acceptance. Only a successful committed claim permits the later caller to attempt
+one send. Duplicates return `inFlight`, a saved terminal result, or `conflict` for
+changed immutable input. Confirmed `delivered` receipts replay their exact provider
+ID; `rejected` and `unknown` are permanent. Startup converts abandoned `sending`
+records to `unknown`, **never to resend permission**. No clock, PID timeout, or
+lease expiry reclaims them. `retryable` settlement requires actual proof of **no
+provider effect**; timeout, cancellation, a generic 5xx, or an invalid/missing
+receipt is not proof. The later sender must prohibit hidden SDK retries and
+redirect replay; none of that sender behavior is implemented here.
+
+### Journal operational limits
+
+- One configured process, one app+tenant, one intact/current database on a trusted
+  normal filesystem-backed persistent volume. No HA or shared/network-filesystem
+  guarantee. Operationally enforce a single instance; separate copies are not
+  coordinated.
+- Use an absolute path with an existing parent directory. Final-path symlinks,
+  directories and hard-linked main/ownership files are refused; parent-directory
+  symlinks resolve to the same owner. Created files have mode `0600`.
+- Ownership is a permanent `<path>.owner.sqlite` sidecar with an exclusive SQLite
+  transaction held for the handle's lifetime. The OS releases the lock on process
+  death. Never unlink or replace it, even after close. A missing sidecar also makes
+  normal open fail. No stale-lock deletion is needed.
+- Built-in `node:sqlite` emits its expected experimental warning on Node 24.2.0;
+  do not globally suppress warnings. The journal uses one main connection,
+  `DELETE` rollback journaling, `synchronous=EXTRA`, foreign keys and nonblocking
+  busy handling, with required settings read back. Extension loading is disabled.
+  DELETE avoids the bundled SQLite WAL-reset path; EXTRA also syncs rollback
+  journal deletion's directory. Existing WAL stores are refused, not converted.
+- Missing, unsupported, wrong-scope or corrupt stores fail closed. Database errors
+  poison the current handle; close it and investigate. Reopening cannot make an
+  ambiguous provider result safely resendable. Failed initialization leaves its
+  files present instead of deleting or silently resetting them.
+- Storage loss, rollback to an older backup, copying/restoring a journal or deliberate
+  tampering can erase deduplication history. They are **not duplicate-safe redrive**.
+  Backup discipline belongs to the operator; raw live-file copying is unsupported.
+  Do not open/read/close either live SQLite file with ordinary filesystem APIs in
+  the owning process: closing such a descriptor can release SQLite's POSIX locks.
+- Scope, opaque IDs, versioned request digests, attempt/state and confirmed provider
+  IDs are retained indefinitely. No full requests, text, metadata, routing records
+  or credentials are stored. Digests support equality checks, not anonymization.
+  Callers must not put secrets in identifiers or receipts. There is no TTL, reset,
+  deletion or reconciliation API; growth and storage monitoring are operator work.
+
+These outcomes are local domain states, **not new V1 response statuses**. This is
+not a sender, authentication boundary, human attestation, transport deadline
+implementation, or capability claim. Teams acceptance with a lost response remains
+uncertain; blocking a resend does not recover an unknown provider correlation.
+See [CONTRIBUTING.md](CONTRIBUTING.md#delivery-journal-contract) for the API contract.
+
+Focused journal tests:
+`node --import tsx --test test/delivery-journal.test.ts test/delivery-journal-process.test.ts`.
 
 ## Card preview
 
@@ -145,8 +243,8 @@ the unused `@microsoft/teams.apps` server dependency is deferred to integration.
 
 ## Roadmap and safety
 
-Authenticated transport, durable routing and delivery, conformance, and live
-Teams validation come next.
+Authenticated transport, durable routing, journal-backed sending, conformance,
+and live Teams validation come next.
 Shared-chat multiplayer collaboration is a later milestone. Buzz is an experience
 reference, not a dependency or existing integration in this repository.
 
