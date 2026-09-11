@@ -9,9 +9,9 @@ import type { OutgoingHttpHeaders } from 'node:http';
 import { request } from 'node:https';
 import { isIP } from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { DeliveryRequest } from '../../src/protocol/types.js';
 
 const image = 'orka-gateway-teams:local';
@@ -134,6 +134,33 @@ function https(ca: Buffer, port: number, path: string, options: {
     else if (options.partial) req.write('first');
     else req.end(options.body);
   });
+}
+
+export async function checkMissingOwner(directory: string, containerName: string,
+  launch: () => Promise<Result>, execute: (args: string[]) => Promise<Result>): Promise<void> {
+  const stopped = async (expectedExit: boolean): Promise<boolean> => {
+    try {
+      const result = await execute(['inspect', '--format',
+        '{{.State.Status}} {{.State.Running}} {{.State.Restarting}} {{.State.ExitCode}}', containerName]);
+      const state = result.stdout.trim();
+      return result.code === 0 && (expectedExit ? state === 'exited false false 1' : /^exited false false \d+$/u.test(state));
+    } catch { return false; }
+  };
+  renameSync(join(directory, 'delivery.sqlite.owner.sqlite'), join(directory, 'owner.held'));
+  let safeToRestore = false;
+  try {
+    const result = await launch();
+    safeToRestore = result.code === 1 && await stopped(true);
+    assert.equal(safeToRestore, true);
+  } finally {
+    if (!safeToRestore) {
+      // A client exit (including 1) is not a container exit. Only this owned
+      // fixture may be stopped, and a stop acknowledgment alone is not proof.
+      try { await execute(['stop', '--time', '15', containerName]); } catch { /* Inspect still decides whether restoration is safe. */ }
+      safeToRestore = await stopped(false);
+    }
+    if (safeToRestore) renameSync(join(directory, 'owner.held'), join(directory, 'delivery.sqlite.owner.sqlite'));
+  }
 }
 
 async function smoke(): Promise<void> {
@@ -312,9 +339,8 @@ async function smoke(): Promise<void> {
     };
     await replay(); await stop(app); modes();
     stage = 'missing permanent owner refuses image startup';
-    renameSync(join(data, 'delivery.sqlite.owner.sqlite'), join(data, 'owner.held'));
-    try { assert.equal((await run(['run', '--rm', ...appArgs], env)).code, 1); }
-    finally { renameSync(join(data, 'owner.held'), join(data, 'delivery.sqlite.owner.sqlite')); }
+    const missingOwner = `${owned}-missing-owner`; containers.push(missingOwner);
+    await checkMissingOwner(data, missingOwner, () => run(['run', '--name', missingOwner, ...appArgs], env), (args) => run(args));
     stage = 'receipt and 0600 persistence across restart/remount';
     const restarted = `${owned}-restarted`; await start(restarted, appArgs, env);
     const restartDeadline = performance.now() + 15000;
@@ -351,16 +377,22 @@ async function smoke(): Promise<void> {
     let cleaned = true;
     for (const name of containers.reverse()) if ((await docker(['rm', '-f', name])).code !== 0) cleaned = false;
     if (network && (await docker(['network', 'rm', owned])).code !== 0) cleaned = false;
-    if (cleaned) rmSync(directory, { recursive: true, force: true });
-    else { stage = 'owned fixture cleanup incomplete'; throw new Error('Cleanup failed'); }
+    const heldOwner = existsSync(join(data, 'owner.held'));
+    if (cleaned && !heldOwner) rmSync(directory, { recursive: true, force: true });
+    else {
+      stage = heldOwner ? 'held owner and private fixtures retained: termination was not confirmed' : 'owned fixture cleanup incomplete';
+      throw new Error('Cleanup failed');
+    }
   }
 }
 
-try {
-  const mode = process.argv[2];
-  if (mode?.startsWith('fixture-')) await fixture(mode);
-  else { assert.equal(mode, undefined); await smoke(); }
-} catch {
-  // Never print Error objects, child stderr, HTTP payloads, settings, keys or assertions' actual/expected values.
-  console.error(`Container smoke failed at: ${stage}`); process.exitCode = 1;
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  try {
+    const mode = process.argv[2];
+    if (mode?.startsWith('fixture-')) await fixture(mode);
+    else { assert.equal(mode, undefined); await smoke(); }
+  } catch {
+    // Never print Error objects, child stderr, HTTP payloads, settings, keys or assertions' actual/expected values.
+    console.error(`Container smoke failed at: ${stage}`); process.exitCode = 1;
+  }
 }
