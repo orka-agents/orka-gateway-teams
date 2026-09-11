@@ -185,7 +185,7 @@ function validateStore(db: DatabaseSync, scope: Readonly<IngressScope>): void {
   try { actualScope = validateScope(decode(rows[0].value)); } catch { throw new IngressStoreError('corrupt'); }
   if (!encode(actualScope).equals(encode(scope))) throw new IngressStoreError('scope-mismatch');
   try {
-    integer(rows[0].last_now, 0, Number.MAX_SAFE_INTEGER - MAX_REPLAY_WINDOW_MS);
+    const lastNow = integer(rows[0].last_now, 0, Number.MAX_SAFE_INTEGER - MAX_REPLAY_WINDOW_MS);
     for (const row of db.prepare('SELECT * FROM routes').iterate()) {
       storedIdentity(row.reply_target); validateRoute(decode(row.body));
       if (digest(row.body as Uint8Array) !== row.digest ||
@@ -193,7 +193,7 @@ function validateStore(db: DatabaseSync, scope: Readonly<IngressScope>): void {
     }
     for (const row of db.prepare('SELECT * FROM inbox').iterate()) {
       const key = storedIdentity(row.external_event_id); const replyTarget = storedIdentity(row.reply_target);
-      integer(row.received, 0, Number.MAX_SAFE_INTEGER - MAX_REPLAY_WINDOW_MS);
+      integer(row.received, 0, lastNow);
       integer(row.deadline, Number(row.received) + 1, Number(row.received) + MAX_REPLAY_WINDOW_MS);
       integer(row.next_attempt); integer(row.attempt);
       if (![row.fingerprint, row.body_digest].every((hash) => typeof hash === 'string' && /^[0-9a-f]{64}$/u.test(hash)) ||

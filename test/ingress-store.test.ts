@@ -241,6 +241,36 @@ for (const regression of [false, true]) {
   });
 }
 
+for (const state of ['pending', 'forwarding', 'blocked', 'terminal']) {
+  test(`startup rejects last_now preceding ${state} admission without recovery`, (t) => {
+    const { path } = fixture(t); const store = openIngressStore(path, scope, { now: () => 1000 });
+    try {
+      store.admit(expectedEvent, route);
+      if (state !== 'pending') {
+        const claim = store.claim()!;
+        if (state === 'blocked') store.block(claim, 'conflict');
+        else if (state === 'terminal') store.complete(claim, receipt);
+      }
+    } finally { store.close(); }
+    const raw = new DatabaseSync(path);
+    const before = raw.prepare('SELECT * FROM inbox').get()!;
+    try {
+      assert.equal(before.state, state); assert.equal(before.received, 1000);
+      assert.equal(raw.prepare('SELECT last_now FROM scope').get()?.last_now, 1000);
+      raw.exec('UPDATE scope SET last_now=992');
+      assert.equal(raw.prepare('PRAGMA integrity_check').get()?.integrity_check, 'ok');
+    } finally { raw.close(); }
+    assert.throws(() => {
+      const reopened = openIngressStore(path, scope, { now: () => 999 }); reopened.close();
+    }, code('corrupt'));
+    const after = new DatabaseSync(path);
+    try {
+      assert.deepEqual(after.prepare('SELECT * FROM inbox').get(), before);
+      assert.equal(after.prepare('SELECT last_now FROM scope').get()?.last_now, 992);
+    } finally { after.close(); }
+  });
+}
+
 test('corrupt UTF8, changed body digest, invalid route bytes and schema are refused before recovery', (t) => {
   for (const sql of [
     "UPDATE inbox SET body=x'ff'", "UPDATE inbox SET body=CAST('{}' AS BLOB)",
