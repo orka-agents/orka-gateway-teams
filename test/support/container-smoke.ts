@@ -81,10 +81,13 @@ async function fixture(mode: string): Promise<void> {
     let calls = 0;
     for (const port of [3978, 3979]) {
       const server = createServer((req, res) => {
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
         if (req.url === '/count') { res.end(JSON.stringify({ calls })); return; }
         if (req.url?.startsWith('/fail')) { calls++; req.socket.destroy(); return; }
         if (req.url === '/redirect') { res.writeHead(302, { Location: 'http://127.0.0.1:3979/unchanged' }); res.end(); return; }
         if (req.url === '/stream-response') {
+          res.setHeader('Content-Type', 'text/plain; charset=utf-8');
           res.write('first'); const timer = setTimeout(() => res.end('last'), 3000);
           res.once('close', () => clearTimeout(timer)); return;
         }
@@ -110,7 +113,8 @@ async function plaintextStatus(port: number): Promise<number> {
   });
 }
 
-interface HttpResult { status: number; body: string; location?: string; firstByteMs: number }
+interface HttpResult { status: number; body: string; location?: string; firstByteMs: number;
+  isJSON?: boolean; isPlainText?: boolean; noSniff?: boolean }
 function https(ca: Buffer, port: number, path: string, options: {
   method?: string; headers?: OutgoingHttpHeaders; body?: string; slow?: boolean; partial?: boolean;
 } = {}): Promise<HttpResult> {
@@ -127,6 +131,9 @@ function https(ca: Buffer, port: number, path: string, options: {
         if (bytes > 4096) done({ status: 0, body: '', firstByteMs }); else body += chunk.toString();
       });
       res.on('end', () => done({ status: res.statusCode ?? 0, body, firstByteMs,
+        isJSON: res.headers['content-type'] === 'application/json; charset=utf-8',
+        isPlainText: res.headers['content-type'] === 'text/plain; charset=utf-8',
+        noSniff: res.headers['x-content-type-options'] === 'nosniff',
         ...(res.headers.location === undefined ? {} : { location: res.headers.location }) }));
     });
     req.on('error', () => done({ status: 0, body: '', firstByteMs }));
@@ -360,6 +367,7 @@ async function smoke(): Promise<void> {
     stage = 'unchanged private URI/auth and no redirect rewriting';
     const path = `/echo?synthetic=${secrets[3]}`;
     const echoed = await https(ca, privatePort, path, { headers: auth });
+    assert.equal(echoed.isJSON && echoed.noSniff, true);
     const echo = JSON.parse(echoed.body) as { path: string; authorizationMatches: boolean; connection: string; version: string };
     assert.equal(echo.path === path && echo.authorizationMatches, true);
     assert.equal(echo.connection, 'close'); assert.equal(echo.version, '1.1');
@@ -367,6 +375,7 @@ async function smoke(): Promise<void> {
     assert.equal(redirect.location, 'http://127.0.0.1:3979/unchanged');
     stage = 'no request/response buffering or transparent upstream retry';
     const streaming = await https(ca, privatePort, '/stream-response'); assert.equal(streaming.body, 'firstlast'); assert.equal(streaming.firstByteMs < 1500, true);
+    assert.equal(streaming.isPlainText && streaming.noSniff, true);
     const partial = await https(ca, privatePort, '/stream-request', { method: 'POST', headers: { 'Content-Length': 100000 }, partial: true });
     assert.equal(partial.status, 200); assert.equal(partial.firstByteMs < 1500, true);
     assert.equal((await https(ca, privatePort, `/fail?synthetic=${secrets[3]}`, { method: 'POST', headers: auth, body: secrets[3]! })).status, 502);
