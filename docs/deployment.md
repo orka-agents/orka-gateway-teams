@@ -175,6 +175,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: teams
+  namespace: orka-system
 spec:
   template:
     spec:
