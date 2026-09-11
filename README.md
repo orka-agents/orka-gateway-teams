@@ -1,12 +1,15 @@
-# Orka Teams gateway — offline contributor starter
+# Orka Teams gateway — durable inbound slice
 
-This repository is the first slice of
-[orka-agents/orka#549](https://github.com/orka-agents/orka/issues/549).
-It supplies protocol types, deterministic event IDs, a personal-message converter,
-a bounded final/error card formatter, a local durable delivery journal,
-synthetic examples, and tests. It is not
-yet a running Teams gateway.
-There is no Teams listener, credential setup, Orka endpoint, or Kubernetes install.
+This repository implements the **inbound-only** slice of
+[orka-agents/orka#549](https://github.com/orka-agents/orka/issues/549): an authenticated
+Teams personal-message receiver, durable SQLite inbox/private reply routes, and a
+serial HTTPS relay to Orka. It also supplies the pure converter, bounded card
+formatter, separate delivery journal, synthetic examples, and tests.
+
+This is **not a full Gateway-ready adapter**. There are no `/v1/health`,
+`/v1/capabilities`, or `/v1/deliveries` endpoints, capability advertisements, Teams
+sends, or Kubernetes installation. Normal Orka dispatch/readiness needs the later
+outbound slice. Local tests are not live Teams/Orka execution or a complete demo.
 
 ## Local development
 
@@ -19,6 +22,144 @@ npm run check
 
 Individual commands: `npm test`, `npm run typecheck`, `npm run build`.
 Build output is written to ignored `dist/`.
+
+## Run durable ingress
+
+Build with `npm ci && npm run build`. Node 24 is required (`node:sqlite` currently
+emits an experimental warning). Configure through environment variables; the CLI
+does not automatically load `.env`. Never put credentials on command lines, in
+source, or in committed files. Use a secret manager/Kubernetes Secrets for serve.
+
+### Required configuration
+
+| Variable | Meaning |
+|---|---|
+| `TEAMS_APP_ID` | Exact application/client GUID |
+| `TEAMS_TENANT_ID` | Exact tenant GUID; no `common`/multi-tenant inference |
+| `ORKA_BASE_URL` | HTTPS base URL, including any installation base path |
+| `ORKA_GATEWAY_NAMESPACE`, `ORKA_GATEWAY_NAME` | Stable target Gateway |
+| `INGRESS_DB` | Absolute new/existing ingress DB path; existing private parent directory |
+| `TEAMS_CLIENT_SECRET` | Required for serve; no implicit managed identity fallback |
+| `ORKA_BEARER_TOKEN` | Required adapter-to-Orka bearer for ingress POST only |
+| `TEAMS_RECIPIENT_IDS` | Required JSON array of exact allowed bot recipient IDs |
+| `TEAMS_SERVICE_URLS` | Required JSON array of exact allowed HTTPS service base URLs |
+
+The first five rows (including both Gateway fields) suffice for `init`. Serve
+requires all rows. Lists contain 1–100 explicit entries; no wildcards, first-request
+learning, or inferred `28:` prefix. Obtain the bot recipient IDs and public-cloud
+service URLs from your trusted deployment configuration, not unverified requests.
+URL configuration normalizes hostname/encoding and adds a trailing slash; query,
+fragment, userinfo and nonstandard **service** ports are refused. Orka may use a
+custom HTTPS port. Incoming body and signed `serviceurl` must exactly match each
+other and a configured canonical URL, including path case and trailing slash;
+request input is never normalized/repaired to obtain a match.
+
+| Optional variable | Default / bounds |
+|---|---|
+| `ORKA_CA_FILE` | Absolute PEM CA-bundle path; otherwise system TLS trust |
+| `INGRESS_HOST` | `127.0.0.1`; explicit IPv4/IPv6 bind address |
+| `INGRESS_PORT` | `3978`; integer 1–65535 |
+| `INGRESS_MAX_PENDING` | `1000`; 1 through max records, includes blocked/forwarding bodies |
+| `INGRESS_MAX_RECORDS` | `100000`; 1–100000, includes terminal tombstones/routes |
+| `INGRESS_REPLAY_WINDOW_MS` | `86400000` (24h); 1–604800000 (7d) |
+
+With the nonsecret scope configured, explicitly provision **once**:
+
+```bash
+npm run init:ingress
+```
+
+Then supply the remaining serve configuration and run:
+
+```bash
+npm start
+```
+
+Equivalent direct commands are `node dist/ingress/main.js init` and
+`node dist/ingress/main.js serve`. Initialization refuses an existing file. Serve
+requires an existing intact database for exactly the configured scope; it never
+initializes, migrates, resets, or adopts one. Missing/invalid config, storage,
+CA file, or listener binding causes a fixed safe error and nonzero exit. SIGINT
+and SIGTERM stop admission, abort outbound I/O, await all in-flight SDK/admission
+and relay settlement, then close the store. Storage failures stop the runtime,
+not an infinite network-retry loop.
+
+Expose only `POST /api/messages` through externally managed HTTPS. The default
+listener is loopback HTTP, not a public TLS terminator. Configure your proxy with
+bounded headers/body/deadlines, no request-body/auth-header access logs, and no
+redirect/retry rewriting. Preserve authorization and original JSON. There are
+no unauthenticated readiness endpoints. Orka TLS certificate/hostname checks stay
+enabled; a custom CA changes trust roots, not verification. The receiver makes no
+Teams/Graph/OAuth sends or token acquisition calls. No unused Orka-to-adapter token
+is configured until authenticated outbound endpoints exist.
+
+### Authentication and admission
+
+The pinned SDK public HTTP adapter invokes the **SDK-registered** route only after
+supplemental verification. SDK JWT verification must also pass before its awaited
+raw callback runs; the default activity/OAuth pipeline is not dispatched. Auth
+bypass is explicitly false and cloud explicitly public, regardless of SDK env
+variables. SDK logger/children discard every argument even under debug settings.
+Only fixed lifecycle/error categories are logged; no activities, JWTs, credentials,
+SDK error objects, sender labels, or request URLs are logged or echoed.
+
+Supplemental `jsonwebtoken` RS256 verification uses the actual selected RSA JWK,
+which must endorse `msteams`; exact issuer `https://api.botframework.com`, exact
+app-ID audience (no aliases/arrays), finite required `exp`/`nbf`, SDK-compatible
+300-second tolerance, and an exact signed `serviceurl` are enforced. Public keys
+come only from `https://login.botframework.com/v1/.well-known/keys`: five-minute
+cache, single-flight fetch, five-second deadline, 2 MiB document/1024-key limits,
+ambiguous-kid rejection and failure cooldown. Unknown kids do not refresh a live
+cache; legitimate key rotation can therefore backpressure authentication for up
+to five minutes. There is no CLI test-JWKS URL or cloud/auth override.
+
+HTTP accepts at most 256 KiB of uncompressed UTF-8 JSON and 16 KiB headers, with
+absolute ten-second connection/request-processing deadlines and fixed parser
+errors. SDK key I/O may outlive that transport deadline; late callbacks are fenced
+from admission and tracked/drained on shutdown. Do not hard-kill graceful shutdown
+merely because the client-facing deadline has elapsed.
+
+The original body must identify the configured recipient, tenant and service URL
+before conversion. JWT `appid`/`tid` are not body identity. The converter remains
+the authoritative supported-personal-message filter; exact `from.id` remains
+Orka's sender-allowlist candidate, not proof of humanity. Unsupported authenticated
+activities explicitly return 200 ignored without storage. Invalid/wrong-scope
+input gets 4xx. New event + minimal reply route commit atomically before 200;
+duplicates reuse the saved original envelope/key, conflicts return 409, and
+capacity/storage failures return 503. A disconnected or timed-out client may
+still have a committed admission: retry the same original provider activity.
+
+### Inbox retention and operational limits
+
+- Separate schema/database from the delivery journal; one local-filesystem owner,
+  no HA/network-filesystem support. Keep an intact/current persistent volume.
+  Ingress uses its main SQLite connection's lifetime EXCLUSIVE lock, DELETE
+  journal, EXTRA synchronization and private files. Do not read/open/close the
+  live SQLite file through ordinary filesystem APIs in the owning process.
+- Pending, forwarding and quarantined records contain **normalized text**, sender
+  identity/optional label and the original envelope. Minimal private routes retain
+  service URL, bot ID and personal conversation/tenant. Full raw activities,
+  headers, tokens and credentials are never persisted. Protect the DB as private
+  user content; don't put secrets into IDs or messages.
+- A validated Orka 202 receipt is durable admission, **not Task completion**. Its
+  accepted/duplicate/rejected/deadLettered outcome logically removes the active
+  payload, retaining digest/receipt/tombstone/route indefinitely. Logical removal
+  is not forensic erasure. Retain routes for late/manual outbound retries.
+- Each record captures an absolute replay deadline. Expiry or clock regression
+  quarantines and preserves its body; no automatic redrive, pruning, reset or
+  deletion exists. Capacity produces backpressure before ACK. Monitor disk,
+  process exit, 503s and retained-record growth; quarantine requires operator
+  investigation, not database deletion.
+- Network ambiguity retries the **same stored original event/key**, serially,
+  with exponential backoff and unshortened Retry-After. Keep configured backend,
+  Gateway **UID**, and Orka dedup ledger stable. Orka retention must exceed the
+  replay window. V1 has no expected-UID fence here: Gateway recreation, ledger
+  rollback, DB restore/loss or target replacement require quiescing/reconciliation,
+  not a claim of backup-safe replay.
+
+The next outbound slice uses the existing Telegram-compatible V1 outcome baseline;
+no Orka protocol PR or protocol reapproval gate is required for this inbound work.
+Live registration, provider sends and a full end-to-end demo remain unvalidated.
 
 ## Contributor tasks
 
@@ -68,8 +209,9 @@ format characters such as ZWJ and FEFF are not blanket-rejected.
 Only activity text is used, even with attachments. The event omits provider URLs,
 timestamps, metadata and `threadId`, including when a personal message has
 `replyToId`. The caller owns durable original-envelope/reply-target replay; do not
-reconvert duplicates using refreshed labels or routing. No running gateway,
-transport authentication, ingress storage or ingress replay implementation is included.
+reconvert duplicates for relay using refreshed labels or routing. The receiver's
+candidate conversion is reconciled atomically by the inbox; relay uses only the
+saved original envelope/key. See [durable ingress](#run-durable-ingress).
 
 Focused converter tests: `node --import tsx --test test/convert.test.ts`.
 
@@ -236,15 +378,19 @@ The structure is informed by Microsoft's
 and its inspected upstream
 [echo example](https://github.com/microsoft/teams.ts/tree/main/examples/echo)
 ([source](https://github.com/microsoft/teams.ts/blob/main/examples/echo/src/index.ts)).
-They are references, not setup instructions for this offline repository. No
-binary app icons, monorepo configuration, listener, or authentication bypass
-were copied. This slice uses `@microsoft/teams.api` and `@microsoft/teams.cards`;
-the unused `@microsoft/teams.apps` server dependency is deferred to integration.
+They are references, not provisioning instructions. No binary app icons,
+monorepo configuration, or authentication bypass were copied. API/cards/apps/common
+are pinned at `2.0.16`. The receiver was checked against the public source at
+[tag v2.0.16](https://github.com/microsoft/teams.ts/tree/8b017065c7dd2c8aec29be80c68086afbcf97bbd),
+including `App.initialize`, `App.server.onRequest`, `IHttpServerAdapter`, service
+JWT validation, public cloud configuration and `ILogger.child`. No private SDK
+imports or legacy HttpPlugin are used.
 
 ## Roadmap and safety
 
-Authenticated transport, durable routing, journal-backed sending, conformance,
-and live Teams validation come next.
+Journal-backed Teams sending, authenticated outbound V1 endpoints, conformance,
+and live Teams validation come next. Authenticated inbound transport and durable
+routing/relay are implemented; they do not alone make a Gateway ready.
 Shared-chat multiplayer collaboration is a later milestone. Buzz is an experience
 reference, not a dependency or existing integration in this repository.
 

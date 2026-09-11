@@ -8,14 +8,20 @@
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/ingress/main.js serve",
+    "init:ingress": "node dist/ingress/main.js init",
     "preview:card": "node --import tsx scripts/preview-card.ts",
     "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
     "@microsoft/teams.api": "2.0.16",
-    "@microsoft/teams.cards": "2.0.16"
+    "@microsoft/teams.apps": "2.0.16",
+    "@microsoft/teams.cards": "2.0.16",
+    "@microsoft/teams.common": "2.0.16",
+    "jsonwebtoken": "9.0.2"
   },
   "devDependencies": {
+    "@types/jsonwebtoken": "9.0.10",
     "@types/node": "24.13.4",
     "tsx": "4.23.13",
     "typescript": "5.9.3"
