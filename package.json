@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/ingress/main.js serve",
+    "setup:capture": "node dist/setup/main.js",
     "init:ingress": "node dist/ingress/main.js init",
     "init:delivery": "node dist/ingress/main.js init-delivery",
     "preview:card": "node --import tsx scripts/preview-card.ts",
