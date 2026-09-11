@@ -3,7 +3,7 @@ import { X509Certificate } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { ConfigurationError, parseConfig, tlsVerificationEnabled } from './config.js';
+import { ConfigurationError, parseConfig, tlsVerificationEnabled, validateOutboundConfig, validateReceiverConfig } from './config.js';
 import type { ServeConfig } from './config.js';
 import { logIngress } from './logger.js';
 import { createOrkaClient } from './client.js';
@@ -11,16 +11,35 @@ import { initializeIngressStore, openIngressStore } from './store.js';
 import { relayOne } from './relay.js';
 import { startReceiver } from './server.js';
 import type { Receiver, ReceiverDependencies } from './server.js';
+import { initializeDeliveryJournal, openDeliveryJournal } from '../delivery/journal.js';
+import type { DeliveryJournal } from '../delivery/types.js';
+import { startOutboundServer } from '../outbound/server.js';
+import type { OutboundServer } from '../outbound/server.js';
 
-export interface IngressRuntime { port: number; done: Promise<void>; stop(): Promise<void> }
+export interface IngressRuntime { port: number; done: Promise<void>; stop(): Promise<void>; outboundPort?: number }
 export async function startIngressRuntime(config: ServeConfig, dependencies: ReceiverDependencies = {}): Promise<IngressRuntime> {
   if (!tlsVerificationEnabled()) throw new ConfigurationError();
+  const receiverConfig = validateReceiverConfig(config.receiver);
+  const outbound = config.outbound === undefined ? undefined : validateOutboundConfig(config.outbound, config.dbPath, config.bearerToken, receiverConfig);
   const client = createOrkaClient(config.scope, { bearerToken: config.bearerToken,
     ...(config.caFile === undefined ? {} : { ca: readCaBundle(config.caFile) }) });
   const store = openIngressStore(config.dbPath, config.scope, { policy: config.policy });
-  let receiver: Receiver;
-  try { receiver = await startReceiver(config.receiver, store, dependencies); }
-  catch { store.close(); throw new Error('Ingress startup failed'); }
+  const journalScope = { appId: store.scope.appId, tenantId: store.scope.tenantId };
+  let receiver: Receiver | undefined; let journal: DeliveryJournal | undefined; let api: OutboundServer | undefined; let ready = false;
+  try {
+    // Own both stores before binding either listener. Never reopen the exclusive inbox for routes.
+    if (outbound) journal = openDeliveryJournal(outbound.dbPath, journalScope);
+    receiver = await startReceiver(receiverConfig, outbound ? { scope: store.scope,
+      admit: (event, route) => ready ? store.admit(event, route) : { kind: 'full' } } : store, dependencies,
+      journal === undefined ? undefined : { journal, getRoute: (key) => store.getRoute(key) });
+    if (outbound) api = await startOutboundServer(outbound, receiver.outbound!, journalScope, () => ready);
+    ready = true;
+  } catch {
+    await Promise.allSettled([api?.stop(), receiver?.stop()]);
+    try { journal?.close(); } finally { store.close(); }
+    throw new Error('Ingress startup failed');
+  }
+  const ownedReceiver = receiver;
   const abort = new AbortController(); let fatal = false; let closing: Promise<void> | undefined;
   let resolveDone!: () => void; let rejectDone!: (error: Error) => void;
   const done = new Promise<void>((resolve, reject) => { resolveDone = resolve; rejectDone = reject; });
@@ -38,19 +57,21 @@ export async function startIngressRuntime(config: ServeConfig, dependencies: Rec
 
   function stop(): Promise<void> {
     closing ??= (async () => {
-      abort.abort();
-      // No handle closes until both HTTP admission and network settlement finish.
-      const settled = await Promise.allSettled([receiver.stop(), relay]);
+      ready = false; abort.abort();
+      // HTTP intake, SDK/token/provider work and BOTH directions' settlement drain before either handle closes.
+      const settled = await Promise.allSettled([api?.stop(), ownedReceiver.stop(), relay]);
       if (settled.some((result) => result.status === 'rejected')) fatal = true;
+      try { journal?.close(); } catch { fatal = true; }
       try { store.close(); } catch { fatal = true; }
       if (fatal) { const error = new Error('Ingress storage failed'); rejectDone(error); throw error; }
       resolveDone();
     })();
     return closing;
   }
-  void receiver.failed.catch(() => { fatal = true; void stop().catch(() => {}); });
+  void ownedReceiver.failed.catch(() => { fatal = true; void stop().catch(() => {}); });
+  void api?.failed.catch(() => { fatal = true; void stop().catch(() => {}); });
   void relay.then(() => { if (fatal) void stop().catch(() => {}); });
-  return { port: receiver.port, done, stop };
+  return { port: ownedReceiver.port, done, stop, ...(api === undefined ? {} : { outboundPort: api.port }) };
 }
 
 function readCaBundle(path: string): Buffer {
@@ -71,9 +92,11 @@ async function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
   let runtime: IngressRuntime | undefined; let requestedStop = false;
   const shutdown = () => { requestedStop = true; if (runtime) void runtime.stop().catch(() => {}); };
   try {
-    if (args.length !== 1 || (args[0] !== 'init' && args[0] !== 'serve')) throw new ConfigurationError();
-    if (args[0] === 'init') {
-      const config = parseConfig(env, 'init'); initializeIngressStore(config.dbPath, config.scope);
+    if (args.length !== 1 || (args[0] !== 'init' && args[0] !== 'init-delivery' && args[0] !== 'serve')) throw new ConfigurationError();
+    if (args[0] === 'init' || args[0] === 'init-delivery') {
+      const config = parseConfig(env, args[0]);
+      if (args[0] === 'init') initializeIngressStore(config.dbPath, config.scope);
+      else initializeDeliveryJournal(config.dbPath, { appId: config.scope.appId, tenantId: config.scope.tenantId });
       logIngress('initialized'); return 0;
     }
     const config = parseConfig(env, 'serve');

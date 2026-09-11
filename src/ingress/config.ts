@@ -1,4 +1,5 @@
-import { isAbsolute } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
+import { realpathSync, statSync } from 'node:fs';
 import { isIP } from 'node:net';
 import { identity, validatePolicy } from './codec.js';
 import type { IngressPolicy, IngressScope } from './types.js';
@@ -10,15 +11,24 @@ export class ConfigurationError extends Error { constructor() { super('Invalid i
 // SDK auth flags do not override Node's process-wide TLS trust bypass.
 export function tlsVerificationEnabled(): boolean { return process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '0'; }
 export interface InitConfig { dbPath: string; scope: Readonly<IngressScope> }
-export interface ServeConfig extends InitConfig { receiver: ReceiverConfig; bearerToken: string; caFile?: string; policy: IngressPolicy }
-export function parseConfig(env: NodeJS.ProcessEnv, mode: 'init'): InitConfig;
+export interface OutboundConfig { dbPath: string; bearerToken: string; host: string; port: number }
+export interface ServeConfig extends InitConfig { receiver: ReceiverConfig; bearerToken: string; caFile?: string; policy: IngressPolicy; outbound?: OutboundConfig }
+export function parseConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'init-delivery'): InitConfig;
 export function parseConfig(env: NodeJS.ProcessEnv, mode: 'serve'): ServeConfig;
-export function parseConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'serve'): InitConfig | ServeConfig {
+export function parseConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'init-delivery' | 'serve'): InitConfig | ServeConfig {
   try {
     const scope = Object.freeze({ appId: guid(env.TEAMS_APP_ID), tenantId: guid(env.TEAMS_TENANT_ID),
       orkaBaseUrl: baseUrl(env.ORKA_BASE_URL), gatewayNamespace: component(env.ORKA_GATEWAY_NAMESPACE), gatewayName: component(env.ORKA_GATEWAY_NAME) });
+    if (mode === 'init-delivery') {
+      const dbPath = absolutePath(env.DELIVERY_DB);
+      if (env.INGRESS_DB !== undefined) validateStoragePaths(env.INGRESS_DB, dbPath);
+      return { dbPath, scope };
+    }
     const init = { dbPath: absolutePath(env.INGRESS_DB), scope };
-    if (mode === 'init') return init;
+    if (mode === 'init') {
+      if (env.DELIVERY_DB !== undefined) validateStoragePaths(init.dbPath, env.DELIVERY_DB);
+      return init;
+    }
     const receiver = validateReceiverConfig({ appId: scope.appId, tenantId: scope.tenantId,
       clientSecret: secret(env.TEAMS_CLIENT_SECRET), recipientIds: list(env.TEAMS_RECIPIENT_IDS).map(identity),
       serviceUrls: list(env.TEAMS_SERVICE_URLS).map((value) => baseUrl(value, true)),
@@ -27,7 +37,13 @@ export function parseConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'serve'): Ini
     if (!/^[A-Za-z0-9\-._~+/]+=*$/u.test(bearerToken)) fail();
     const policy = validatePolicy({ maxPending: number(env.INGRESS_MAX_PENDING, 1000),
       maxRecords: number(env.INGRESS_MAX_RECORDS, 100000), replayWindowMs: number(env.INGRESS_REPLAY_WINDOW_MS, 86400000) });
-    return { ...init, receiver, bearerToken, policy,
+    if (env.OUTBOUND_ENABLED !== undefined && !['true', 'false'].includes(env.OUTBOUND_ENABLED)) fail();
+    let outbound: OutboundConfig | undefined;
+    if (env.OUTBOUND_ENABLED === 'true') {
+      outbound = validateOutboundConfig({ dbPath: absolutePath(env.DELIVERY_DB), bearerToken: secret(env.ORKA_OUTBOUND_BEARER_TOKEN),
+        host: env.OUTBOUND_HOST ?? '127.0.0.1', port: number(env.OUTBOUND_PORT, 3979, 1, 65535) }, init.dbPath, bearerToken, receiver);
+    } else if (['DELIVERY_DB', 'ORKA_OUTBOUND_BEARER_TOKEN', 'OUTBOUND_HOST', 'OUTBOUND_PORT'].some((key) => env[key] !== undefined)) fail();
+    return { ...init, receiver, bearerToken, policy, ...(outbound === undefined ? {} : { outbound }),
       ...(env.ORKA_CA_FILE === undefined ? {} : { caFile: absolutePath(env.ORKA_CA_FILE) }) };
   } catch { throw new ConfigurationError(); }
 }
@@ -43,6 +59,37 @@ export function validateReceiverConfig(input: ReceiverConfig): ReceiverConfig {
     return Object.freeze({ appId: guid(input.appId), tenantId: guid(input.tenantId), clientSecret: secret(input.clientSecret),
       recipientIds: Object.freeze([...new Set(input.recipientIds.map(identity))]), serviceUrls: Object.freeze([...new Set(serviceUrls)]),
       host: input.host, port: input.port });
+  } catch { throw new ConfigurationError(); }
+}
+
+export function validateOutboundConfig(input: OutboundConfig, ingressPath: string, ingressToken: string, receiver: ReceiverConfig): OutboundConfig {
+  try {
+    const bearerToken = secret(input.bearerToken);
+    if (!/^[A-Za-z0-9._~+/-]+=*$/u.test(bearerToken) || bearerToken === ingressToken || !isIP(input.host) ||
+        !Number.isInteger(input.port) || input.port < 0 || input.port > 65535 ||
+        (input.port !== 0 && input.port === receiver.port && input.host === receiver.host)) fail();
+    const dbPath = absolutePath(input.dbPath); validateStoragePaths(ingressPath, dbPath);
+    return Object.freeze({ dbPath, bearerToken, host: input.host, port: input.port });
+  } catch { throw new ConfigurationError(); }
+}
+
+/** Metadata-only preflight: never open/close an ordinary fd on a live SQLite inode. */
+function validateStoragePaths(ingressPath: string, deliveryPath: string): void {
+  try {
+    const canonical = (input: string) => {
+      const path = absolutePath(input); return join(realpathSync(dirname(path)), basename(path));
+    };
+    const ingress = canonical(ingressPath); const delivery = canonical(deliveryPath);
+    const paths = [ingress, delivery, `${delivery}.owner.sqlite`].flatMap((path) =>
+      [path, `${path}-journal`, `${path}-wal`, `${path}-shm`]);
+    const names = new Set<string>(); const inodes = new Set<string>();
+    for (const path of paths) {
+      const stamp = statSync(path, { throwIfNoEntry: false });
+      const name = stamp ? realpathSync(path) : path;
+      const inode = stamp ? `${stamp.dev}:${stamp.ino}` : undefined;
+      if (names.has(name) || (inode !== undefined && inodes.has(inode))) fail();
+      names.add(name); if (inode !== undefined) inodes.add(inode);
+    }
   } catch { throw new ConfigurationError(); }
 }
 

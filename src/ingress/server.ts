@@ -2,6 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { App } from '@microsoft/teams.apps';
 import { PUBLIC } from '@microsoft/teams.api';
 import type { Activity, CloudEnvironment } from '@microsoft/teams.api';
+import type { Token } from '@microsoft/teams.common/http';
+import type { DeliveryJournal } from '../delivery/types.js';
+import { createDeliveryDispatcher } from '../outbound/dispatcher.js';
+import { createProviderSender } from '../outbound/sender.js';
+import type { ProviderPost } from '../outbound/sender.js';
+import type { DeliveryDispatcher } from '../outbound/types.js';
 import { convertActivity } from '../teams/convert.js';
 import { createStrictAuth } from './auth.js';
 import { NativeAdapter } from './http-adapter.js';
@@ -11,11 +17,13 @@ import type { ReceiverConfig } from './config.js';
 import type { AdmissionResult, IngressStore, ReplyRoute } from './types.js';
 import type { EventEnvelope } from '../protocol/types.js';
 
-export interface ReceiverDependencies { sdkCloud?: CloudEnvironment; fetchKeys?: (url: string, options: RequestInit) => Promise<Response> }
+export interface ReceiverDependencies { sdkCloud?: CloudEnvironment; fetchKeys?: (url: string, options: RequestInit) => Promise<Response>;
+  botToken?: Token; providerPost?: ProviderPost }
 export interface AdmissionSink { readonly scope: IngressStore['scope'];
   admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>): AdmissionResult | Promise<AdmissionResult> }
-export interface Receiver { port: number; stop(): Promise<void>; failed: Promise<never> }
-export async function startReceiver(input: ReceiverConfig, sink: AdmissionSink, dependencies: ReceiverDependencies = {}): Promise<Receiver> {
+export interface ReceiverOutbound { journal: DeliveryJournal; getRoute: (key: string) => ReplyRoute | undefined }
+export interface Receiver { port: number; stop(): Promise<void>; failed: Promise<never>; outbound?: DeliveryDispatcher }
+export async function startReceiver(input: ReceiverConfig, sink: AdmissionSink, dependencies: ReceiverDependencies = {}, outbound?: ReceiverOutbound): Promise<Receiver> {
   const config = validateReceiverConfig(input);
   if (sink.scope.appId !== config.appId || sink.scope.tenantId !== config.tenantId) throw new Error('Invalid receiver configuration');
   const recipients = new Set(config.recipientIds); const services = new Set(config.serviceUrls);
@@ -64,12 +72,30 @@ export async function startReceiver(input: ReceiverConfig, sink: AdmissionSink, 
       return { status: 503 };
     }
   };
+  let dispatcher: DeliveryDispatcher | undefined; let stopping: Promise<void> | undefined;
+  const stop = () => stopping ??= (async () => { await Promise.all([adapter.stop(), dispatcher?.stop()]); })();
   try {
+    if (outbound) {
+      // Constructor clientSecret takes precedence over its token option. Tests
+      // replace only this SAME App's public factory; production retains the SDK factory.
+      if (dependencies.botToken !== undefined) app.api.http.token = dependencies.botToken;
+      const sender = createProviderSender(async () => {
+        try {
+          const factory = app.api.http.token;
+          const value = typeof factory === 'function' ? await factory({}) : factory;
+          if (typeof value === 'string') return value;
+          const text: unknown = value?.toString();
+          return typeof text === 'string' ? text : undefined;
+        } catch { return undefined; }
+      }, dependencies.providerPost === undefined ? {} : { post: dependencies.providerPost });
+      dispatcher = createDeliveryDispatcher({ journal: outbound.journal, getRoute: outbound.getRoute,
+        scope: { appId: config.appId, tenantId: config.tenantId }, serviceUrls: config.serviceUrls, recipientIds: config.recipientIds, sender });
+    }
     await app.initialize();
     if (!tlsVerificationEnabled()) throw new ConfigurationError();
-    const port = await adapter.listen(config.host, config.port); return { port, failed, stop: () => adapter.stop() };
+    const port = await adapter.listen(config.host, config.port); return { port, failed, stop, ...(dispatcher === undefined ? {} : { outbound: dispatcher }) };
   } catch (error) {
-    await adapter.stop(); throw error instanceof ConfigurationError ? error : new Error('Ingress startup failed');
+    await stop(); throw error instanceof ConfigurationError ? error : new Error('Ingress startup failed');
   }
 }
 

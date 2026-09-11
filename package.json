@@ -10,6 +10,7 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/ingress/main.js serve",
     "init:ingress": "node dist/ingress/main.js init",
+    "init:delivery": "node dist/ingress/main.js init-delivery",
     "preview:card": "node --import tsx scripts/preview-card.ts",
     "check": "npm run typecheck && npm test && npm run build"
   },

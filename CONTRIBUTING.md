@@ -1,11 +1,11 @@
-# Contributing to the Teams inbound slice
+# Contributing to the Teams gateway
 
-This is the runnable **inbound-only** foundation for
-[#549](https://github.com/orka-agents/orka/issues/549), not a full Gateway-ready
-adapter. `convertActivity` ([#550](https://github.com/orka-agents/orka/issues/550)),
+This is the runnable personal-message request/reply runtime for
+[#549](https://github.com/orka-agents/orka/issues/549), with ingress-only mode still
+available. `convertActivity` ([#550](https://github.com/orka-agents/orka/issues/550)),
 `formatDelivery` ([#551](https://github.com/orka-agents/orka/issues/551)), the separate
-delivery journal, SDK-authenticated raw receiver, durable inbox/routes and HTTPS
-Orka relay are implemented. Teams sends and outbound V1 endpoints are not.
+delivery journal, SDK-authenticated raw receiver, durable inbox/routes, HTTPS
+Orka relay and opt-in authenticated V1 Teams sending are implemented.
 No live credentials, Teams registration, provider sends or cluster setup are
 needed for development/tests. Running serve requires explicit configured secrets;
 see [configuration and provisioning](README.md#run-durable-ingress).
@@ -21,7 +21,8 @@ npm run check
 
 `npm test` runs all runtime tests, including the real converter, formatter, preview
 CLI, temporary-file/child-process journal tests, and real HTTP/RSA/JWKS/SQLite/HTTPS
-ingress tests. OpenSSL is required for ephemeral local test TLS certificates;
+ingress/outbound tests, including registered-SDK input through V1 reply and durable
+receipt replay. OpenSSL is required for ephemeral local test TLS certificates;
 private keys are never checked in or printed. Tests do not call live Teams/Orka.
 For focused tests: `node --import tsx --test test/convert.test.ts` or
 `node --import tsx --test test/format.test.ts`.
@@ -195,7 +196,7 @@ fixtures do, and retain the narrowed `OutgoingTeamsMessage` contract.
 | #551 formatter | final/error/empty text, wrapping, Unicode-safe truncation and 20 KiB message budget | destination, auth, send, retry, persistence |
 | Delivery journal | durable local claims, immutable identity/alias checks, fenced settlement and receipt replay | auth, routing, provider calls, retries, endpoints |
 | Ingress receiver/inbox/relay | request verification, app/tenant/recipient enforcement, durable original event + route, Orka admission | sender authorization, provider sends, outbound capabilities |
-| Future outbound caller | authenticated V1 endpoints and journal-backed Teams sending | changing original ingress replay keys |
+| Outbound listener/dispatcher/sender | separate bearer boundary, bounded V1 requests, journal-backed send/receipt replay | changing original ingress replay keys, recovering lost provider receipts |
 
 ### Converter acceptance and caller replay
 
@@ -429,8 +430,8 @@ An old attempt always returns `stale` after rotation; it cannot overwrite the ne
 attempt or make a terminal record ready. `settle` returns `recorded` only for a
 committed transition. **Only actual proof of no provider effect permits
 `retryable`.** A timeout, cancellation, generic 5xx, missing/invalid receipt or
-lease expiry is ambiguous, not retry permission. The future sender must prohibit
-hidden retries/redirect replay and must not manufacture receipt IDs. The example
+lease expiry is ambiguous, not retry permission. The integrated sender prohibits
+hidden retries/redirect replay and never manufactures receipt IDs. The example
 and process tests use explicitly synthetic IDs, not observed Teams receipts.
 
 `DeliveryJournalError.code` is one of `invalid-input`, `missing`, `exists`, `busy`,
@@ -452,41 +453,89 @@ unsupported; restored or rolled-back history is not duplicate-safe. Filesystem
 power-loss guarantees and operator backup discipline are not proved by SIGKILL tests.
 No binaries, DB files or production fault-injection hooks belong in the repository.
 
-These are **local domain outcomes**, not V1 delivery responses or an
-`idempotentDelivery` capability. The journal blocks ambiguous redrive but cannot
-recover a lost Teams receipt or atomically commit SQLite and a remote send.
+These are **local domain outcomes**, not new V1 delivery statuses. The dispatcher
+maps them to the Telegram-compatible response/capability baseline. The journal
+blocks ambiguous redrive but cannot recover a lost Teams receipt or atomically
+commit SQLite and a remote send.
 
-## Future integration boundaries
+## Full-runtime boundaries and tests
 
-Inbound authentication/admission/relay are implemented above. Later outbound
-integration must preserve those boundaries and add these remaining pieces:
+See [full-mode configuration, API and limits](README.md#enable-the-full-requestreply-runtime).
+Keep these ownership boundaries intact:
 
-- Keep both verification layers enabled, enforce original body scope before
-  conversion, and preserve durable admission before ACK. Never substitute an
-  in-memory inbox for persisted original-envelope replay.
-- Use separate directional credentials: adapter-to-Orka ingress and
-  Orka-to-adapter requests use different Secrets. Never log credentials or embed
-  them in events, Tasks, delivery records, cards, or reply-target keys.
-- Configured gateway transport requires HTTPS. Authenticate all adapter endpoints:
-  `GET /v1/health`, `GET /v1/capabilities`, and `POST /v1/deliveries`.
-  Normalized ingress goes to `POST /api/v1/gateways/{namespace}/{name}/events`;
-  durable admission is not task completion. The ingress POST client is implemented;
-  health/capabilities/deliveries and provider sends are not.
-- Resolve an opaque routing key to persisted private provider routing; do not ask
-  the formatter to select destinations or make network calls.
-- Integrate the local delivery journal with an authenticated sender. Its aliases
-  bind **both** `deliveryId` and `idempotencyId`; confirmed receipt replay returns
-  the original provider message correlation without another send. A stable ID or
-  process-local map alone is insufficient, and ambiguous outcomes still cannot
-  supply a lost provider correlation.
-- Account for the 15-second delivery call budget, ten attempts, 24-hour default
-  event/delivery expiry, and retention that covers manual retries as well as the
-  automatic window (Orka's default terminal retention is 30 days). Do not discard
-  deduplication/routing state merely because automatic attempts have ended.
-- Teams accepting a send whose response is lost remains an uncertain-send case.
-  The later sender must map journal outcomes to the existing Telegram-compatible
-  V1 response baseline, without inventing a provider receipt or blind resend. This
-  slice advertises no capabilities or provider-recovery guarantee.
+- `startReceiver(config, sink, dependencies?, outbound?)` preserves the SDK-only
+  ingress route. Optional `outbound` is `{ journal, getRoute }`; optional returned
+  `receiver.outbound` is the journal-backed `DeliveryDispatcher`, never a raw sender
+  or token. `receiver.stop()` is idempotent and drains intake and the dispatcher.
+- The receiver privately resolves the SAME App's PUBLIC `app.api.http.token` as a
+  string, StringLike or `TokenFactory({})`, safely handling missing/throwing values.
+  Do not import protected token managers, create a second App, or expose tokens.
+  Ingress-only mode does not create a sender or acquire a bot token.
+- `ReceiverDependencies.botToken` (public SDK `Token`) and `providerPost` are
+  trusted **library-test-only** seams, alongside the existing auth fixtures. An
+  explicit test token is assigned to `app.api.http.token` after construction,
+  since constructor `clientSecret` wins over its token option. The closure still
+  always reads that public property. CLI never supplies either seam; never add
+  cloud/JWKS/token/proxy bypass environment variables.
+- `startOutboundServer({host, port, bearerToken}, dispatcher, scope, isReady)`
+  returns `{port, stop, failed}`. It owns a separate native HTTP listener, exact
+  bearer-authenticated V1 paths, 256 KiB body / 16 KiB header limits, a ten-second
+  absolute connection/request budget, remaining nine-second dispatch budget and
+  32-handler preclaim backpressure. Auth precedes body/readiness. Safe responses
+  reconstruct only V1 fields, never SDK errors, text, references or headers.
+- Full `startIngressRuntime` keeps `.port`, `.stop()` and `.done`, adding optional
+  `.outboundPort`. It validates config/TLS/CA/path aliases, opens BOTH stores before
+  binding either listener, passes the owned inbox's `getRoute`, binds receiver then
+  API, marks ready, then starts the unchanged serial relay. Never reopen the live
+  exclusive inbox for routes. Failed second-store/bind startup drains and releases
+  resources without initialization, deletion, reset or forwarding.
+- Either storage poison marks unready and stops both directions. API fatal signals
+  follow response finish/disconnect, not the failed write itself. Abort intake,
+  provider and relay work, drain SDK authentication, bot-token work and settlement,
+  THEN close both stores. Token acquisition is uncancellable through the public
+  SDK API; one shared acquisition may outlive callers and hold shutdown pending,
+  but its late continuation cannot POST.
+- `snapshotDelivery` / `decodeDelivery` enforce external shape and Unicode/bounds
+  without changing journal fingerprints. Claims and saved terminal outcomes precede
+  current-route checks. New sends validate current allowlists, tenant/account,
+  conversation/context, personal/nonthread scope; metadata is not routing.
+- `createProviderSender` uses a fresh public SDK HTTP Client with the safe logger,
+  explicit resolved token, exact formatter bytes (whole message <=20 KiB), saved
+  HTTPS conversation URL and one POST. Preserve redirect=0, proxy=false, verified
+  TLS, body/response limits and strict raw receipt decoding. Once handed to POST,
+  invalid/non-2xx/lost responses or cancellation mean unknown unless a valid receipt
+  wins first. Commit receipt before delivered. No activity-ID injection or hidden
+  SDK enrichment/retry; unknown is never automatically resent/reset/repaired.
+- Distinct directional credentials belong in Secrets, never events, Tasks, journal
+  records, cards or reply keys. The local HTTP listeners need externally managed
+  HTTPS and restricted access; no body/header access logging. Preserve the existing
+  negative TLS tests and reject process-wide unsafe TLS settings in production.
+- The capability is Telegram-compatible suppression/replay, not remote exactly-once
+  or lost-receipt recovery. Retain routes/history beyond automatic attempts for
+  manual retries. Orka's delivery call budget is 15s, default attempts ten, default
+  expiry 24h and terminal retention 30d; neither store prunes its durable history.
+  Keep one process/current local PV and stable backend/Gateway UID/dedup ledger.
+
+Focused integration checks:
+
+```bash
+node --import tsx --test test/outbound-*.test.ts
+npm run check
+```
+
+Use real SQLite and native HTTP/HTTPS, the shared ephemeral TLS fixture and actual
+SDK verification/client transport. The trusted provider test wrapper may map the
+intended saved HTTPS URL to loopback while asserting URL, body, auth and transport
+flags; production never performs that mapping. Runtime tests cover full request/reply,
+near-20 KiB wire output, aliases/conflicts/current policy, restart, caller cancellation,
+late tokens, two-store ownership/unwind and fatal-after-flush. Observe actual client
+receipt/committed state with bounded condition barriers, not fixture `res.end()` plus
+an arbitrary sleep. Never print synthetic keys/tokens or commit fixture databases.
+
+The production route model has no `conformance` alias. Orka's complete conformance
+checker hardcodes mock identities; it needs an appropriate mock fixture and has not
+been run against this production runtime. Wire fixtures and saved-route integration
+are not live Teams/Orka, live token-service, network-filesystem or power-cut validation.
 
 Keep tenant/account, conversation/context, thread, and sender identities separate.
 Sender authorization uses Teams `from.id`, not email, display name, or another user
@@ -506,5 +555,6 @@ The starter follows Orka at `0c8ab6fb`:
 gateway. The bounded converter in [#550](https://github.com/orka-agents/orka/issues/550)
 and formatter in [#551](https://github.com/orka-agents/orka/issues/551) are implemented;
 inbound authentication, transport and ingress/routing persistence are implemented.
-Journal-backed Teams sending, authenticated outbound endpoints, full conformance
-and live Teams validation remain future work.
+Journal-backed Teams sending and authenticated outbound endpoints are implemented
+in opt-in full mode. Full conformance and live Teams/deployment validation remain
+separate work.

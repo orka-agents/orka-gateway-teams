@@ -1,15 +1,15 @@
-# Orka Teams gateway — durable inbound slice
+# Orka Teams gateway
 
-This repository implements the **inbound-only** slice of
+This repository implements the personal-message request/reply runtime for
 [orka-agents/orka#549](https://github.com/orka-agents/orka/issues/549): an authenticated
-Teams personal-message receiver, durable SQLite inbox/private reply routes, and a
-serial HTTPS relay to Orka. It also supplies the pure converter, bounded card
-formatter, separate delivery journal, synthetic examples, and tests.
+Teams receiver, durable SQLite inbox/private reply routes, serial HTTPS relay to
+Orka, and opt-in authenticated V1 endpoints with journal-backed Teams sends.
+The existing ingress-only mode remains available. Pure converter/formatter APIs,
+separate storage APIs, synthetic examples and tests are also included.
 
-This is **not a full Gateway-ready adapter**. There are no `/v1/health`,
-`/v1/capabilities`, or `/v1/deliveries` endpoints, capability advertisements, Teams
-sends, or Kubernetes installation. Normal Orka dispatch/readiness needs the later
-outbound slice. Local tests are not live Teams/Orka execution or a complete demo.
+Local readiness means initialized listeners/stores, not validated live provider
+credentials. Kubernetes installation, live registration, live Teams/Orka execution
+and a deployment demo remain separate work; local fixtures do not prove them.
 
 ## Local development
 
@@ -95,9 +95,9 @@ certificate and the complete bundle are validated before opening the inbox or
 binding. Empty, malformed, truncated or partly valid bundles fail configuration.
 `NODE_TLS_REJECT_UNAUTHORIZED=0` is refused at startup and on incoming requests,
 including changes while authentication is in flight; the runtime never resets or
-silently overrides that environment setting. The receiver makes no
-Teams/Graph/OAuth sends or token acquisition calls. No unused Orka-to-adapter token
-is configured until authenticated outbound endpoints exist.
+silently overrides that environment setting. In ingress-only mode the receiver
+makes no Teams/Graph/OAuth sends or bot-token acquisition calls. Outbound sending
+requires the explicit full-mode configuration below.
 
 ### Authentication and admission
 
@@ -163,8 +163,120 @@ still have a committed admission: retry the same original provider activity.
   rollback, DB restore/loss or target replacement require quiescing/reconciliation,
   not a claim of backup-safe replay.
 
-The next outbound slice uses the existing Telegram-compatible V1 outcome baseline.
-Live registration, provider sends and a full end-to-end demo remain unvalidated.
+## Enable the full request/reply runtime
+
+Provision both databases explicitly; do not delete/reset one to make startup pass.
+With the nonsecret app/tenant/Orka/Gateway scope above and an absolute `DELIVERY_DB`
+path configured, run once:
+
+```bash
+npm run init:delivery
+```
+
+This is `node dist/ingress/main.js init-delivery`. It requires no credentials or
+listener and does not require `INGRESS_DB`; if supplied, that path must be distinct.
+It provisions the unchanged app+tenant delivery journal and permanent ownership
+sidecar, refusing existing data. Provision ingress separately with `init:ingress`.
+
+Add these variables to the existing serve configuration and use the same `npm start`:
+
+| Variable | Full-mode requirement / default |
+|---|---|
+| `OUTBOUND_ENABLED` | Exactly `true` to enable; absent or `false` means ingress-only |
+| `DELIVERY_DB` | Absolute, separately provisioned journal path |
+| `ORKA_OUTBOUND_BEARER_TOKEN` | Required Orka-to-adapter bearer, **different** from `ORKA_BEARER_TOKEN` |
+| `OUTBOUND_HOST` | `127.0.0.1`; explicit IPv4/IPv6 bind address |
+| `OUTBOUND_PORT` | `3979`; integer 1–65535 |
+
+All outbound fields must be absent when disabled. Invalid booleans, partial config,
+identical directional tokens and path collisions (including canonical aliases and
+ownership/SQLite sidecars) fail closed, not silently fall back to ingress-only.
+Bearers are nonempty RFC6750-shaped values bounded at 8192 characters; do not log
+or put them on command lines. Both stores open before either listener binds. A
+second-store/listener failure unwinds ownership without deleting records or
+starting the relay. Ingress `.port` and `/api/messages` remain unchanged.
+
+### Authenticated V1 API
+
+The separate outbound listener accepts only these exact method/path pairs. All
+three require `Authorization: Bearer <secret>`; scheme casing is ignored, value
+casing is not. Duplicate/malformed/missing headers, Teams JWTs and crossed
+adapter-to-Orka credentials are denied before body processing or readiness checks.
+Expose this listener only through deployment-managed HTTPS with restricted network
+access. Do not publish either loopback HTTP listener directly to the Internet.
+
+- `GET /v1/health`: HTTP 200 with exactly `{"status":"ok"}` when locally ready.
+- `GET /v1/capabilities`: HTTP 200 with the following exact advertisement:
+
+```json
+{
+  "protocolVersion": "orka.gateway.v1",
+  "adapterName": "orka-gateway-teams",
+  "adapterVersion": "0.0.0",
+  "capabilities": {
+    "inboundText": true,
+    "outboundText": true,
+    "threads": false,
+    "senderIdentity": true,
+    "explicitSessions": false,
+    "idempotentDelivery": true
+  }
+}
+```
+
+- `POST /v1/deliveries`: strict V1 `DeliveryRequest`, uncompressed UTF-8 JSON only.
+  HTTP 200 domain results are `delivered` with the exact `providerMessageId`, or
+  `retryableError` / `nonRetryableError` with fixed safe messages. No provider error,
+  request text, header, metadata or task/session reference is echoed.
+- Until both listeners and stores initialize, health/capabilities and new claims
+  are unavailable (503). Invalid body is 400, body overflow 413, unsupported
+  encoding/media type 415; errors are fixed-safe `nonRetryableError` bodies.
+  Authentication failures are 401; unknown method/path pairs are 404, not aliases.
+
+Headers are bounded at 16 KiB, request bodies at 256 KiB, text at 64 KiB, identities
+at 256 UTF-8 bytes, metadata at 32 bounded entries. The absolute connection/request
+budget is ten seconds, including headers/body/token/provider work. Dispatch gets
+at most nine seconds and less when body/header receipt consumed the budget,
+reserving settlement margin. At most 32 delivery handlers are admitted; excess
+work gets HTTP 200 `retryableError` **before claiming**, not a provider attempt.
+
+The dispatcher first commits a claim or replays durable history, then resolves the
+saved opaque reply key through the already-owned inbox. Fresh sends must match
+current service/recipient allowlists, tenant/account, personal conversation/context
+and nonthread policy. Metadata/references never select a destination. Confirmed
+receipts replay even after routing policy changes; changed immutable input is a
+conflict. There is no production `conformance` routing shortcut. Orka's full
+conformance checker uses hardcoded mock identities and must use a suitable fixture,
+not this production saved-route model unchanged; full Go conformance is not claimed.
+
+A private closure resolves the **same SDK App's public token factory** only when a
+new authorized send needs it. A fresh SDK HTTP client sends the exact bounded card
+message to the saved HTTPS conversation URL: one POST, no redirects, proxy/retry
+inheritance or activity-ID injection, verified TLS, and bounded raw receipts.
+Only valid synchronous 200/201 receipt IDs confirm success. Receipt commit precedes
+`delivered`; a caller disconnect does not erase a received, settled receipt.
+
+This is Telegram-compatible suppression/replay, **not provider exactly-once**.
+Before provider dispatch, token failure/cancellation may retry. After dispatch,
+timeout, cancellation, network loss, non-2xx or invalid/missing receipt is terminal
+`unknown`, exposed as `nonRetryableError`. Startup converts abandoned sends to
+unknown. Unknown is never automatically resent, expired, reset or repaired; a lost
+Teams receipt cannot be reconstructed. Keep one process, one intact/current local
+PV, stable Orka target/Gateway UID/ledger, and retained routes/history as described
+above and in the journal limits below.
+
+SIGINT/SIGTERM or either storage poison stops both directions: mark unready, stop
+intake, abort API/provider/relay work, drain SDK callbacks, token acquisition and
+all settlement, then close **both** stores. Fatal storage signals follow the fixed
+HTTP response flush/disconnect. Public SDK bot-token acquisition cannot be
+cancelled: at most one acquisition is outstanding, late completion cannot POST,
+and shutdown waits for it. A stuck acquisition can therefore hold graceful
+shutdown beyond the HTTP deadline. Never mistake client timeout for drained I/O.
+Production has no CLI/env cloud, token-factory, provider-proxy or TLS bypass seam.
+
+Native HTTP/HTTPS, actual SDK signatures/client transport, SQLite, concurrent
+replay, cancellation and restart are exercised locally. Live provider/Orka,
+network-filesystem and power-cut validation are not claimed.
 
 ## Contributor tasks
 
@@ -301,8 +413,8 @@ ID; `rejected` and `unknown` are permanent. Startup converts abandoned `sending`
 records to `unknown`, **never to resend permission**. No clock, PID timeout, or
 lease expiry reclaims them. `retryable` settlement requires actual proof of **no
 provider effect**; timeout, cancellation, a generic 5xx, or an invalid/missing
-receipt is not proof. The later sender must prohibit hidden SDK retries and
-redirect replay; none of that sender behavior is implemented here.
+receipt is not proof. The integrated outbound sender prohibits hidden SDK retries
+and redirect replay; direct journal callers must preserve the same restrictions.
 
 ### Journal operational limits
 
@@ -338,10 +450,11 @@ redirect replay; none of that sender behavior is implemented here.
   Callers must not put secrets in identifiers or receipts. There is no TTL, reset,
   deletion or reconciliation API; growth and storage monitoring are operator work.
 
-These outcomes are local domain states, **not new V1 response statuses**. This is
-not a sender, authentication boundary, human attestation, transport deadline
-implementation, or capability claim. Teams acceptance with a lost response remains
-uncertain; blocking a resend does not recover an unknown provider correlation.
+These outcomes are local domain states, **not new V1 response statuses**. The
+journal itself is not an authentication or transport boundary. The full runtime
+maps its outcomes to the existing V1 responses above. Teams acceptance with a lost
+response remains uncertain; blocking a resend does not recover an unknown provider
+correlation.
 See [CONTRIBUTING.md](CONTRIBUTING.md#delivery-journal-contract) for the API contract.
 
 Focused journal tests:
@@ -393,12 +506,12 @@ imports or legacy HttpPlugin are used.
 
 ## Roadmap and safety
 
-Journal-backed Teams sending, authenticated outbound V1 endpoints, conformance,
-and live Teams validation come next. Authenticated inbound transport and durable
-routing/relay are implemented; they do not alone make a Gateway ready.
-Shared-chat multiplayer collaboration is a later milestone. Buzz is an experience
-reference, not a dependency or existing integration in this repository.
+Journal-backed Teams sending and authenticated V1 endpoints are implemented in
+opt-in full mode. Live Teams/Orka registration, deployment and end-to-end validation
+remain separate. Shared-chat multiplayer collaboration is a later milestone. Buzz
+is an experience reference, not a dependency or existing integration here.
 
-Orka requires idempotent delivery, including replay correlation. Provider recovery
-when Teams accepts a send but its response is lost is unresolved. This inbound slice
-advertises no capabilities and does not claim to solve that problem.
+Orka requires idempotent delivery, including replay correlation. Confirmed receipts
+replay their correlation, but provider recovery when Teams accepts a send and its
+response is lost remains unresolved. The capability uses the Telegram-compatible
+uncertainty baseline, not a claim to solve lost-receipt recovery.
