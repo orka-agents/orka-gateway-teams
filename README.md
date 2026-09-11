@@ -11,8 +11,12 @@ Local readiness means initialized listeners/stores, not validated live provider
 credentials. [Kubernetes packaging and a gated setup guide](docs/deployment.md) are
 available: a single-replica persistent app, pinned TLS proxy, separate provisioning
 Jobs, Orka examples and a personal-only Teams manifest template. Live registration,
-trusted identity discovery, live Teams/Orka execution and a deployment demo remain
-separate work; synthetic container/Kubernetes fixtures do not prove them.
+live Teams/Orka execution and a deployment demo remain separate work; synthetic
+container/Kubernetes fixtures do not prove them. A separate
+[authenticated one-shot setup capture](docs/setup-capture.md) can collect six
+private candidate identities from a fresh-code-correlated personal message for
+operator review. It does not authorize senders, run Tasks, reply, or change normal
+authentication; host and explicitly overridden container commands are supported.
 
 ## Local development
 
@@ -63,7 +67,8 @@ source, or in committed files. Use a secret manager/Kubernetes Secrets for serve
 The first five rows (including both Gateway fields) suffice for `init`. Serve
 requires all rows. Lists contain 1–100 explicit entries; no wildcards, first-request
 learning, or inferred `28:` prefix. Obtain the bot recipient IDs and public-cloud
-service URLs from your trusted deployment configuration, not unverified requests.
+service URLs from trusted deployment configuration or operator-reviewed
+[authenticated setup capture](docs/setup-capture.md), never unverified requests.
 URL configuration normalizes hostname/encoding and adds a trailing slash; query,
 fragment, userinfo and nonstandard **service** ports are refused. Orka may use a
 custom HTTPS port. Incoming body and signed `serviceurl` must exactly match each

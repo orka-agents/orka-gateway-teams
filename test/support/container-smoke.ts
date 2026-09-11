@@ -2,7 +2,7 @@
 // The same file is transpiled into a private fixture mount, never into the image.
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, request as plaintextRequest } from 'node:http';
 import type { OutgoingHttpHeaders } from 'node:http';
@@ -50,6 +50,7 @@ async function fixture(mode: string): Promise<void> {
     stage = 'image excludes dependency source maps';
     assert.equal(files('/app/node_modules').some((name) => name.endsWith('.map')), false);
     assert.equal(existsSync('/app/dist/deployment/probe.js'), true);
+    assert.equal(existsSync('/app/dist/setup/main.js'), true);
     const lock = JSON.parse(readFileSync('/app/package-lock.json', 'utf8')) as { packages: Record<string, { dev?: boolean; optional?: boolean }> };
     for (const [path, entry] of Object.entries(lock.packages)) {
       if (!path) continue;
@@ -253,6 +254,20 @@ async function smoke(): Promise<void> {
     ok(await run(['run', '--rm', '--network', 'none', ...security, ...helper(), '--entrypoint', 'node', image, '/fixture/container-smoke.mjs', 'fixture-inspect']));
     console.log('PASS Node 24.2.0, UID/GID 1000, direct argv, production-only app payload, read-only root and writable tmpfs');
 
+    stage = 'standalone compiled capture with private host mount, no runtime volume and safe expiry';
+    const setupDirectory = join(directory, 'capture'); mkdirSync(setupDirectory, { mode: 0o700 });
+    const challenge = 'orka-setup:' + randomBytes(16).toString('hex'); secrets.push(challenge);
+    writeFileSync(join(setupDirectory, 'challenge'), challenge, { mode: 0o600, flag: 'wx' });
+    const setupEnv = { TEAMS_APP_ID: env.TEAMS_APP_ID!, TEAMS_TENANT_ID: env.TEAMS_TENANT_ID!, TEAMS_CLIENT_SECRET: env.TEAMS_CLIENT_SECRET!,
+      SETUP_CHALLENGE_FILE: '/capture/challenge', SETUP_CAPTURE_FILE: '/capture/candidate.json', SETUP_TIMEOUT_MS: '1000', SETUP_HOST: '0.0.0.0' };
+    const setupArgs = [...security, ...mount(setupDirectory, '/capture', false), ...Object.keys(setupEnv).flatMap((key) => ['-e', key]),
+      '--entrypoint', 'node', image, '/app/dist/setup/main.js'];
+    const expiredSetup = await run(['run', '--rm', '--network', 'none', ...setupArgs], setupEnv);
+    assert.equal(expiredSetup.code, 1); assert.equal(expiredSetup.stdout.length, 0);
+    assert.equal(expiredSetup.stderr === 'teams-setup: listening\nteams-setup: failed\n', true);
+    assert.deepEqual(readdirSync(setupDirectory), ['challenge']); assert.deepEqual(readdirSync(data), []);
+    console.log('PASS compiled setup entrypoint, private host-only mount, no runtime database, fixed-safe expiry');
+
     stage = 'explicit image initialization and refused reinitialization';
     for (const mode of ['init', 'init-delivery']) {
       const args = ['run', '--rm', '--network', 'none', ...security, ...storage(), ...initKeys.flatMap((key) => ['-e', key]), image, mode];
@@ -276,6 +291,26 @@ async function smoke(): Promise<void> {
     stage = 'isolated network local bridge address';
     smokeHost = ok(await run(['inspect', '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', anchor]));
     assert.equal(isIP(smokeHost), 4);
+    stage = 'actual setup entrypoint auth refusal, no V1 or outbound listener';
+    const captureDirectory = join(directory, 'capture-network'); mkdirSync(captureDirectory, { mode: 0o700 });
+    const freshChallenge = 'orka-setup:' + randomBytes(16).toString('hex'); secrets.push(freshChallenge);
+    writeFileSync(join(captureDirectory, 'challenge'), freshChallenge, { mode: 0o600, flag: 'wx' });
+    const captureName = `${owned}-setup`;
+    await start(captureName, [...podNetwork, ...security, ...mount(captureDirectory, '/capture', false),
+      ...Object.keys(setupEnv).flatMap((key) => ['-e', key]), '--entrypoint', 'node', image, '/app/dist/setup/main.js'],
+    { ...setupEnv, SETUP_TIMEOUT_MS: '5000' });
+    const captureDeadline = performance.now() + 4000;
+    while (await plaintextStatus(3978) !== 404) { assert.equal(performance.now() < captureDeadline, true); await sleep(50); }
+    assert.equal(await plaintextStatus(3979), 0);
+    const denied = await fetch(`http://${smokeHost}:3978/api/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'message', text: freshChallenge, serviceUrl: 'https://teams.example.invalid/' }) });
+    assert.equal(denied.status, 401); assert.deepEqual(await denied.json(), { error: 'Request rejected' });
+    assert.equal(ok(await run(['wait', captureName])), '1');
+    const captureLogs = await run(['logs', captureName]); ok(captureLogs);
+    assert.equal(captureLogs.stdout.length, 0); assert.equal(captureLogs.stderr === 'teams-setup: listening\nteams-setup: failed\n', true);
+    assert.deepEqual(readdirSync(captureDirectory), ['challenge']);
+    console.log('PASS actual setup image auth denial, no candidate/V1/outbound listener, private challenge absent from logs');
+
     const publicPort = 8443; const privatePort = 8444;
     const appArgs = [...podNetwork, ...security, ...storage(), ...caMount(), ...credentials, image];
     stage = 'real image default serve startup';

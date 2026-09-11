@@ -7,19 +7,22 @@ registration, or an Agent. Local readiness does not validate Teams credentials.
 
 ## Gate 0 — trusted identities and operator authority
 
-**STOP before initialization or public exposure unless all required inputs below
-are verified for the SAME bot, tenant, Teams channel registration, and intended
-personal conversation.** Current tooling/research has not established a supported
-read-only way to obtain every exact `recipient.id`, `serviceUrl`, `from.id`, and
-conversation/context ID before this strict receiver starts. A fresh installation
-without these bindings is not yet live-bootstrappable by this guide.
+**STOP before normal initialization or runtime public exposure unless all required
+inputs below are verified for the SAME bot, tenant, Teams channel registration,
+and intended personal conversation.** Use independently trusted bindings from an
+existing approved deployment, or the separate bounded
+[authenticated setup-capture workflow](setup-capture.md) before normal initialization.
+It requires approved bot credentials/installation and an operator-managed HTTPS
+frontend, a freshly generated private challenge, and explicit review of exactly six
+private candidate fields. Capture runs only on a host or explicitly overridden
+container with host-mounted output, never the normal runtime/PVC. It performs no
+Task, reply, automatic allowlist update or tenant action; live capture is not claimed
+by synthetic tests.
 
-Use independently trusted bindings from an existing approved deployment, or stop
-for a separately designed and approved authenticated discovery workflow. Do not
-infer `28:<clientId>`, borrow IDs from another bot/environment, treat an AAD object
-ID as `from.id`, use a proactive global URL as an inbound guarantee, capture raw
-activities, enable auth bypass/first-request learning, or invent production routes.
-No such discovery mode is included. The [identifiers guide][identifiers] says the
+Do not infer `28:<clientId>`, borrow IDs from another bot/environment, treat an AAD
+object ID as `from.id`, use a proactive global URL as an inbound guarantee, capture
+raw activities, enable auth bypass/first-request learning, or invent production
+routes. The [identifiers guide][identifiers] says the
 channel account address comes from the incoming activity's recipient field;
 [proactive messaging][proactive] distinguishes fallback URLs from reply service URLs.
 
@@ -60,6 +63,19 @@ keep real values out of commits. Secret-manager output/private files must contai
 **exact bytes without a trailing newline**. Never use shell tracing, token literals
 in argv, `--from-literal` credentials, environment dumps, Secret YAML output, or
 request-bearing logs. Kubernetes API/audit handling must also protect Secret bodies.
+
+### First-installation order
+
+The numbered sections group responsibilities, not permission to initialize before
+identities exist. Obtain registration/installation authority and the approved bot
+and HTTPS route first (the separately authorized operator work in Gate 4 may
+therefore precede capture). Stop normal intake, perform host/container setup capture
+when needed, privately review all six candidate identities, and close/drain capture
+routing. Reconcile lost ACKs/provider retries before switching modes: capture has
+no shared normal-runtime replay ledger. Then fill the private normal configuration
+copies and complete the existing Orka/TLS/storage gates. Initialize new stores
+**only after** that review. Use a new ordinary authorized message—not the setup
+code—for separately approved live Task/reply validation.
 
 ## Gate 1 — existing Kubernetes and Orka prerequisites
 
@@ -328,7 +344,8 @@ performed or permissions established by this repository**.
    endpoint to the operator's public HTTPS URL ending `/api/messages`. Per
    [Connect to Teams][connect-teams], configure its Microsoft Teams channel for
    the public-cloud environment. Do not enable calling or use a quickstart's
-   unauthenticated playground mode. This does not discover the trusted IDs in Gate 0.
+   unauthenticated playground mode. Registration alone does not discover Gate 0's
+   identities; use trusted existing bindings or the separate reviewed setup capture.
 3. Fill every `REQUIRED_...` field in the copied `manifest.json`. `id` is the Teams
    package GUID; `bots[0].botId` is the bot OAuth client GUID. Manifest schema is
    pinned to [1.30][manifest-schema], with `scopes: ["personal"]` only. No Graph,

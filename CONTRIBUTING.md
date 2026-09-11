@@ -73,6 +73,47 @@ URLs, live identities, PNGs and ZIPs belong in operator-managed ignored artifact
 not source. Synthetic readiness/replay is not live credentials, full conformance,
 controller readiness or proof that the default kind CNI enforces NetworkPolicy.
 
+## Setup capture boundaries
+
+The separate [setup command and host/container guide](docs/setup-capture.md) uses
+`src/setup/{config,artifact,server,main}.ts`. It does not modify normal ingress,
+schema, dependencies, provider sending or Orka admission. `setup:capture` runs
+`node dist/setup/main.js`; Docker requires an explicit entrypoint override.
+
+- `parseSetupConfig(env)` and `validateSetupConfig(config)` return a frozen setup
+  snapshot. No dummy allowlist is used for preflight. Actual candidate recipient
+  and service values pass the unchanged `validateReceiverConfig` after selection.
+- `startSetupCapture(config, authDependencies?, signal?)` returns
+  `{port, done: Promise<void>, stop(): Promise<void>}`. Auth test dependencies are
+  only `FetchKeys` and SDK `CloudEnvironment`, never a generic auth callback,
+  provider factory or CLI override. Use the real shared RSA/JWKS fixture to prove
+  **two independent verifications**, including SDK wrong-key refusal.
+- `openSetupArtifact(config)` returns `{matches(text), publish(candidate, active),
+  close()}`. Publication is synchronous and reserves once, with exclusive atomic
+  hard-link publication and a final active fence. All descriptors/identities remain
+  private; only proven-owned temps can be cleaned. Never open a runtime DB here.
+- `SetupCandidate` has exactly six strings: `appId`, `tenantId`, `recipientId`,
+  `serviceUrl`, `senderId`, `conversationId`. The writer explicitly projects them
+  with a 4096-byte ceiling. No code/text/token/label/activity ID/reply target is saved.
+- Success follows durability, response finish/disconnect, and SDK drain. Shutdown
+  fences late callbacks and cannot await its own SDK request. Admission deadlines
+  are not cancellable SDK I/O or hard-real-time filesystem guarantees.
+- Challenge syntax cannot attest entropy/freshness/humanity: operators generate
+  16 fresh random bytes privately for every attempt and manually review the result.
+  Do not auto-configure allowlists or add Kubernetes capture/provisioning actions.
+
+Focused tests (Node >=24, no patch-version requirement):
+
+```sh
+node --import tsx --test test/setup-config.test.ts test/setup-artifact.test.ts test/setup-server.test.ts test/setup-cli.test.ts
+```
+
+Tests use real private files, OS fault boundaries, actual SDK auth, concurrency and
+late verification, and standalone CLI processes. Never assert private values in
+actual/expected diffs or print child errors. The explicit container gate checks the
+new compiled entrypoint with a host-only capture mount, expiry and auth refusal;
+there is no production auth override and no live positive-capture claim.
+
 ## Ingress implementation and test boundaries
 
 - `src/ingress/config.ts` parses explicit nonsecret init scope or full serve config;
