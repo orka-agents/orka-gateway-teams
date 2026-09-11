@@ -37,6 +37,10 @@ const schema = [
   `CREATE TRIGGER scope_no_delete BEFORE DELETE ON scope BEGIN
     SELECT RAISE(ABORT, 'immutable scope'); END`,
 ];
+const operationQuery = `SELECT *, CAST(idempotency_id AS BLOB) AS idempotency_id_bytes,
+  CAST(provider_message_id AS BLOB) AS provider_message_id_bytes FROM operations`;
+const aliasQuery = `SELECT *, CAST(identifier AS BLOB) AS identifier_bytes,
+  CAST(idempotency_id AS BLOB) AS idempotency_id_bytes FROM aliases`;
 
 export function initializeDeliveryJournal(path: string, inputScope: Readonly<JournalScope>): void {
   const scope = validateScope(inputScope);
@@ -178,30 +182,47 @@ function settle(db: DatabaseSync, claim: DeliveryClaim, outcome: DeliveryOutcome
 }
 
 function resolveAlias(db: DatabaseSync, identifier: string): string | undefined {
-  const alias = db.prepare('SELECT idempotency_id FROM aliases WHERE identifier = ?').get(identifier);
-  if (!alias) return undefined;
-  if (typeof alias.idempotency_id !== 'string' || !readOperation(db, alias.idempotency_id)) throw new DeliveryJournalError('corrupt');
-  return alias.idempotency_id;
+  const target = readAlias(db, identifier);
+  if (target && !readOperation(db, target)) throw new DeliveryJournalError('corrupt');
+  return target;
+}
+
+function readAlias(db: DatabaseSync, identifier: string): string | undefined {
+  const row = db.prepare(`${aliasQuery} WHERE identifier = ?`).get(identifier);
+  return row ? decodeAlias(row) : undefined;
+}
+
+function decodeAlias(row: Record<string, unknown>): string {
+  storedIdentity(row.identifier, row.identifier_bytes);
+  return storedIdentity(row.idempotency_id, row.idempotency_id_bytes);
 }
 
 function readOperation(db: DatabaseSync, key: string): Operation | undefined {
-  const row = db.prepare('SELECT * FROM operations WHERE idempotency_id = ?').get(key);
+  const row = db.prepare(`${operationQuery} WHERE idempotency_id = ?`).get(key);
   if (!row) return undefined;
-  if (db.prepare('SELECT idempotency_id FROM aliases WHERE identifier = ?').get(key)?.idempotency_id !== key) {
-    throw new DeliveryJournalError('corrupt');
-  }
+  if (readAlias(db, key) !== key) throw new DeliveryJournalError('corrupt');
   return decodeOperation(row);
+}
+
+function storedIdentity(value: unknown, bytes: unknown): string {
+  try {
+    const decoded = identity(value);
+    // SQLite TEXT decoding can replace malformed bytes. Require an exact UTF-8
+    // roundtrip, preserving legitimate U+FFFD and leading BOM characters.
+    if (!(bytes instanceof Uint8Array) || !Buffer.from(decoded, 'utf8').equals(bytes)) throw new DeliveryJournalError('corrupt');
+    return decoded;
+  } catch { throw new DeliveryJournalError('corrupt'); }
 }
 
 function decodeOperation(row: Record<string, unknown>): Operation {
   try {
-    const idempotencyId = identity(row.idempotency_id);
+    const idempotencyId = storedIdentity(row.idempotency_id, row.idempotency_id_bytes);
     const attemptId = identity(row.attempt_id);
     if (row.fingerprint_version !== 1 || typeof row.digest !== 'string' || !/^[0-9a-f]{64}$/u.test(row.digest) ||
         !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(attemptId) ||
         !['ready', 'sending', 'delivered', 'rejected', 'unknown'].includes(row.state as string)) throw new DeliveryJournalError('corrupt');
     const state = row.state as Operation['state'];
-    const providerMessageId = state === 'delivered' ? identity(row.provider_message_id) : null;
+    const providerMessageId = state === 'delivered' ? storedIdentity(row.provider_message_id, row.provider_message_id_bytes) : null;
     if (state !== 'delivered' && row.provider_message_id !== null) throw new DeliveryJournalError('corrupt');
     return { idempotencyId, digest: row.digest, attemptId, state, providerMessageId };
   } catch { throw new DeliveryJournalError('corrupt'); }
@@ -267,29 +288,28 @@ function configure(db: DatabaseSync): void {
 
 function validateStore(db: DatabaseSync, expected: JournalScope): void {
   if (db.prepare('PRAGMA application_id').get()?.application_id !== APPLICATION_ID ||
-      db.prepare('PRAGMA user_version').get()?.user_version !== SCHEMA_VERSION) throw new DeliveryJournalError('unsupported-schema');
+      db.prepare('PRAGMA user_version').get()?.user_version !== SCHEMA_VERSION ||
+      // CAST(TEXT AS BLOB) uses the store's encoding; initialized journals are UTF-8.
+      db.prepare('PRAGMA encoding').get()?.encoding !== 'UTF-8') throw new DeliveryJournalError('unsupported-schema');
   const storedSchema = db.prepare('SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL').all().map((row) => row.sql);
   if (storedSchema.length !== schema.length || schema.some((sql) => !storedSchema.includes(sql))) throw new DeliveryJournalError('corrupt');
   const integrity = db.prepare('PRAGMA integrity_check').all();
   if (integrity.length !== 1 || integrity[0]?.integrity_check !== 'ok' ||
       db.prepare('PRAGMA foreign_key_check').all().length !== 0) throw new DeliveryJournalError('corrupt');
-  const rows = db.prepare('SELECT * FROM scope').all();
+  const rows = db.prepare(`SELECT *, CAST(app_id AS BLOB) AS app_id_bytes,
+    CAST(tenant_id AS BLOB) AS tenant_id_bytes FROM scope`).all();
   const row = rows[0];
   if (rows.length !== 1 || !row || row.singleton !== 1 || row.fingerprint_version !== 1) throw new DeliveryJournalError('corrupt');
-  let actual: JournalScope;
-  try { actual = validateScope({ appId: row.app_id, tenantId: row.tenant_id }); }
-  catch { throw new DeliveryJournalError('corrupt'); }
+  const actual = {
+    appId: storedIdentity(row.app_id, row.app_id_bytes),
+    tenantId: storedIdentity(row.tenant_id, row.tenant_id_bytes),
+  };
   if (actual.appId !== expected.appId || actual.tenantId !== expected.tenantId) throw new DeliveryJournalError('scope-mismatch');
-  for (const operation of db.prepare('SELECT * FROM operations').iterate()) {
+  for (const operation of db.prepare(operationQuery).iterate()) {
     const decoded = decodeOperation(operation);
-    if (db.prepare('SELECT idempotency_id FROM aliases WHERE identifier = ?').get(decoded.idempotencyId)?.idempotency_id !== decoded.idempotencyId) {
-      throw new DeliveryJournalError('corrupt');
-    }
+    if (readAlias(db, decoded.idempotencyId) !== decoded.idempotencyId) throw new DeliveryJournalError('corrupt');
   }
-  for (const alias of db.prepare('SELECT * FROM aliases').iterate()) {
-    try { identity(alias.identifier); identity(alias.idempotency_id); }
-    catch { throw new DeliveryJournalError('corrupt'); }
-  }
+  for (const alias of db.prepare(aliasQuery).iterate()) decodeAlias(alias);
 }
 
 function transaction<T>(db: DatabaseSync, action: () => T): T {

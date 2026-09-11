@@ -416,6 +416,154 @@ test('corruption encountered by a live handle cannot return a cached receipt or 
   assert.throws(() => journal.begin(errorDelivery), errorCode('unavailable'));
 });
 
+const malformedUTF8: [string, number[]][] = [
+  ['continuation', [0x70, 0x80, 0x31]],
+  ['truncated', [0x70, 0xe2, 0x82]],
+  ['overlong', [0x70, 0xc0, 0xaf, 0x31]],
+  ['surrogate', [0x70, 0xed, 0xa0, 0x80, 0x31]],
+];
+for (const [name, bytes] of malformedUTF8) {
+  for (const read of ['startup', 'begin', 'settle'] as const) {
+    test(`malformed UTF-8 receipt (${name}) fails closed on ${read}`, (t) => {
+      const s = store(t); s.initialize(); const journal = s.open(); const started = claim(journal);
+      const receipt = { kind: 'delivered', providerMessageId: 'provider-fixture-1' } as const;
+      journal.settle(started, receipt);
+      if (read === 'startup') { claim(journal, errorDelivery); journal.close(); }
+      raw(s.path, (db) => {
+        db.prepare('UPDATE operations SET provider_message_id=CAST(? AS TEXT) WHERE idempotency_id=?')
+          .run(Buffer.from(bytes), finalDelivery.idempotencyId);
+        assert.equal(db.prepare('PRAGMA integrity_check').get()?.integrity_check, 'ok');
+      });
+      if (read === 'startup') {
+        const before = readFileSync(s.path);
+        assert.throws(s.open, errorCode('corrupt'));
+        assert.deepEqual(readFileSync(s.path), before);
+      } else {
+        assert.throws(() => read === 'begin' ? journal.begin(finalDelivery) : journal.settle(started, receipt), errorCode('corrupt'));
+        assert.throws(() => journal.begin(errorDelivery), errorCode('unavailable'));
+        assert.throws(() => journal.settle(started, { kind: 'retryable' }), errorCode('unavailable'));
+      }
+    });
+  }
+}
+
+for (const read of ['begin', 'settle'] as const) {
+  test(`malformed UTF-8 alias target cannot resolve to a valid replacement-character key on ${read}`, (t) => {
+    const s = store(t); s.initialize(); const journal = s.open();
+    const request = { ...finalDelivery, idempotencyId: 'p\ufffd1' };
+    const started = claim(journal, request);
+    const receipt = { kind: 'delivered', providerMessageId: 'saved-fixture' } as const;
+    journal.settle(started, receipt);
+    claim(journal, errorDelivery);
+    raw(s.path, (db) => {
+      db.exec('PRAGMA foreign_keys=OFF');
+      db.prepare('UPDATE aliases SET idempotency_id=CAST(? AS TEXT) WHERE identifier=?')
+        .run(Buffer.from([0x70, 0x80, 0x31]), read === 'begin' ? errorDelivery.deliveryId : request.idempotencyId);
+      assert.equal(db.prepare('PRAGMA integrity_check').get()?.integrity_check, 'ok');
+    });
+    assert.throws(() => read === 'begin'
+      ? journal.begin({ ...request, deliveryId: errorDelivery.deliveryId })
+      : journal.settle(started, receipt), errorCode('corrupt'));
+    assert.throws(() => journal.begin(errorDelivery), errorCode('unavailable'));
+  });
+}
+
+test('malformed UTF-8 alias identifier refuses startup before recovery', (t) => {
+  const s = store(t); s.initialize(); const journal = s.open(); claim(journal); journal.close();
+  raw(s.path, (db) => {
+    db.prepare('INSERT INTO aliases VALUES (CAST(? AS TEXT), ?)')
+      .run(Buffer.from([0x70, 0x80, 0x31]), finalDelivery.idempotencyId);
+    assert.equal(db.prepare('PRAGMA integrity_check').get()?.integrity_check, 'ok');
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+  });
+  const before = readFileSync(s.path);
+  assert.throws(s.open, errorCode('corrupt'));
+  assert.deepEqual(readFileSync(s.path), before);
+});
+
+test('malformed UTF-8 operation and alias targets cannot hide behind an existing valid key at startup', (t) => {
+  const s = store(t); s.initialize(); const journal = s.open();
+  claim(journal, { ...finalDelivery, idempotencyId: 'p\ufffd1' });
+  claim(journal, errorDelivery); journal.close();
+  raw(s.path, (db) => {
+    db.exec('PRAGMA foreign_keys=OFF');
+    const bytes = Buffer.from([0x70, 0x80, 0x31]);
+    db.prepare('UPDATE operations SET idempotency_id=CAST(? AS TEXT) WHERE idempotency_id=?').run(bytes, errorDelivery.idempotencyId);
+    db.prepare('UPDATE aliases SET idempotency_id=CAST(? AS TEXT) WHERE idempotency_id=?').run(bytes, errorDelivery.idempotencyId);
+    db.prepare('UPDATE aliases SET identifier=CAST(? AS TEXT) WHERE identifier=?').run(bytes, errorDelivery.idempotencyId);
+    assert.equal(db.prepare('PRAGMA integrity_check').get()?.integrity_check, 'ok');
+    assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+  });
+  const before = readFileSync(s.path);
+  assert.throws(s.open, errorCode('corrupt'));
+  assert.deepEqual(readFileSync(s.path), before);
+});
+
+for (const [field, column] of [['appId', 'app_id'], ['tenantId', 'tenant_id']] as const) {
+  test(`malformed UTF-8 scope ${field} cannot match a valid replacement-character identity`, (t) => {
+    const s = store(t); s.initialize(); const journal = s.open(); claim(journal); journal.close();
+    raw(s.path, (db) => {
+      const trigger = db.prepare("SELECT sql FROM sqlite_schema WHERE name='scope_no_update'").get()!.sql as string;
+      db.exec('DROP TRIGGER scope_no_update');
+      db.prepare(`UPDATE scope SET ${column}=CAST(? AS TEXT)`).run(Buffer.from([0x70, 0x80, 0x31]));
+      db.exec(trigger);
+      assert.equal(db.prepare('PRAGMA integrity_check').get()?.integrity_check, 'ok');
+    });
+    const before = readFileSync(s.path);
+    assert.throws(() => {
+      const opened = openDeliveryJournal(s.path, { ...scope, [field]: 'p\ufffd1' });
+      opened.close();
+    }, errorCode('corrupt'));
+    assert.deepEqual(readFileSync(s.path), before);
+  });
+}
+
+for (const marker of ['\ufffd', '\ufeff']) {
+  test(`stored UTF-8 identities preserve valid ${JSON.stringify(marker)} including leading BOM`, (t) => {
+    const s = store(t);
+    const exactScope = { appId: `${marker}app${marker}`, tenantId: `${marker}tenant${marker}` };
+    const request = { ...finalDelivery, accountId: exactScope.tenantId, idempotencyId: `${marker}stable${marker}`, deliveryId: `${marker}alias${marker}` };
+    const receipt = { kind: 'delivered', providerMessageId: `${marker}provider${marker}` } as const;
+    initializeDeliveryJournal(s.path, exactScope);
+    let journal = openDeliveryJournal(s.path, exactScope);
+    try {
+      const started = claim(journal, request);
+      assert.equal(journal.settle(started, receipt), 'recorded');
+      assert.deepEqual(journal.begin(request), receipt);
+      assert.equal(journal.settle(started, receipt), 'unchanged');
+      journal.close(); journal = openDeliveryJournal(s.path, exactScope);
+      assert.deepEqual(journal.begin(request), receipt);
+      assert.deepEqual(journal.begin({ ...request, deliveryId: `${marker}fresh${marker}` }), receipt);
+      assert.deepEqual(journal.begin({ ...request, idempotencyId: 'stable' }), { kind: 'conflict' });
+      assert.equal(journal.settle(started, { kind: 'delivered', providerMessageId: 'provider' }), 'stale');
+    } finally { journal.close(); }
+    assert.throws(() => openDeliveryJournal(s.path, { ...exactScope, appId: 'app' }), errorCode('scope-mismatch'));
+  });
+}
+
+for (const encoding of ['UTF-16le', 'UTF-16be']) {
+  test(`non-UTF-8 ${encoding} storage is refused rather than adopting another text encoding`, (t) => {
+    const s = store(t); s.initialize();
+    let definitions: string[] = [];
+    raw(s.path, (db) => {
+      assert.equal(db.prepare('PRAGMA encoding').get()?.encoding, 'UTF-8');
+      definitions = db.prepare('SELECT sql FROM sqlite_schema WHERE sql IS NOT NULL').all().map((row) => row.sql as string);
+    });
+    const foreign = join(s.directory, 'foreign.sqlite');
+    raw(foreign, (db) => {
+      db.exec(`PRAGMA encoding='${encoding}'; PRAGMA application_id=0x4f54444a; PRAGMA user_version=1`);
+      for (const sql of definitions) db.exec(sql);
+      db.prepare('INSERT INTO scope VALUES (1, ?, ?, 1)').run(scope.appId, scope.tenantId);
+      assert.equal(db.prepare('PRAGMA encoding').get()?.encoding, encoding);
+      assert.equal(db.prepare('PRAGMA integrity_check').get()?.integrity_check, 'ok');
+    });
+    renameSync(foreign, s.path);
+    const before = readFileSync(s.path);
+    assert.throws(s.open, errorCode('unsupported-schema'));
+    assert.deepEqual(readFileSync(s.path), before);
+  });
+}
+
 test('schema enforces immutable scope, alias uniqueness, foreign keys and receipt/state pairing', (t) => {
   const s = store(t); s.initialize(); const journal = s.open(); claim(journal); journal.close();
   raw(s.path, (db) => {
