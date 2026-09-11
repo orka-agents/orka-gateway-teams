@@ -6,6 +6,7 @@
   "engines": { "node": ">=24" },
   "scripts": {
     "test": "node --import tsx --test test/*.test.ts",
+    "test:container": "node --import tsx test/support/container-smoke.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/ingress/main.js serve",
