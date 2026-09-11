@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: teams
+  namespace: orka-system
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orka-gateway-teams
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orka-gateway-teams
+    spec:
+      automountServiceAccountToken: false
+      # Operational timeout, NOT proof that uncancellable SDK work drained.
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          # Unpublished local build; operators MUST pin their own production digest.
+          image: orka-gateway-teams:local
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          envFrom:
+            - configMapRef:
+                name: teams-config
+          env:
+            - name: TEAMS_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef: {name: teams-bot, key: client-secret}
+            - name: ORKA_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef: {name: teams-orka-inbound, key: token}
+            - name: ORKA_OUTBOUND_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef: {name: teams-orka-outbound, key: token}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+          readinessProbe:
+            exec:
+              command: [node, /app/dist/deployment/probe.js]
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: '1', memory: 512Mi}
+          volumeMounts:
+            - {name: state, mountPath: /data, subPath: teams}
+            - {name: app-tmp, mountPath: /tmp}
+            - {name: adapter-ca, mountPath: /etc/adapter-ca, readOnly: true}
+        - name: proxy
+          image: nginxinc/nginx-unprivileged:stable-alpine@sha256:442753882674b49ae2c1de83ed67896131c0777f56df5005e356e62bc3f7e7ce
+          imagePullPolicy: IfNotPresent
+          command: [nginx]
+          args: [-c, /etc/nginx/nginx.conf, -g, 'daemon off;']
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 101
+            runAsGroup: 101
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          ports:
+            - {name: messages-tls, containerPort: 8443}
+            - {name: adapter-tls, containerPort: 8444}
+          resources:
+            requests: {cpu: 25m, memory: 16Mi}
+            limits: {cpu: 250m, memory: 64Mi}
+          volumeMounts:
+            - {name: nginx, mountPath: /etc/nginx/nginx.conf, subPath: nginx.conf, readOnly: true}
+            - {name: tls, mountPath: /etc/adapter-tls, readOnly: true}
+            - {name: proxy-tmp, mountPath: /tmp}
+      volumes:
+        - name: state
+          persistentVolumeClaim: {claimName: teams-state}
+        - name: nginx
+          configMap: {name: teams-nginx}
+        - name: adapter-ca
+          configMap:
+            name: teams-adapter-ca
+            items: [{key: ca.crt, path: ca.crt}]
+        - name: tls
+          secret:
+            secretName: teams-tls
+            defaultMode: 0444
+            items:
+              - {key: tls.crt, path: tls.crt}
+              - {key: tls.key, path: tls.key}
+        - name: app-tmp
+          emptyDir: {medium: Memory, sizeLimit: 32Mi}
+        - name: proxy-tmp
+          emptyDir: {medium: Memory, sizeLimit: 16Mi}

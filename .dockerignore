@@ -1,0 +1,9 @@
+# Allowlist only the locked build inputs. Dockerfile is sent as build metadata.
+**
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.build.json
+!src/
+!src/**/
+!src/**/*.ts

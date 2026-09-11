@@ -32,6 +32,47 @@ constraints, and is not run by the runtime test command. `npm run check` runs
 typecheck, runtime tests, and `npm run build`. Build output is in ignored `dist/`; optional preview files belong
 in ignored `bin/`. Do not commit binaries, credentials, or generated output.
 
+## Optional packaging gates
+
+See [the deployment runbook](docs/deployment.md#scoped-verification) for exact
+prerequisites and kindctl commands. Select Node 24.2.0 on `PATH` using your local
+toolchain manager (`node --version` must report `v24.2.0`). From this adapter
+worktree, set and export `KINDCTL` to the absolute path of the canonical wrapper in
+your Orka checkout; replace the example path below. The deployment runner requires
+an existing executable file and validates its scoped kubeconfig path and context
+before cluster access.
+
+```sh
+npm run check
+npm run test:container
+export KINDCTL=/absolute/path/to/orka/.agents/skills/kindctl/bin/kindctl
+"$KINDCTL" exec --tag deployment -- npm run test:deployment
+```
+
+The two smoke commands fail if prerequisites are absent; neither is part of default
+`npm test`. Docker acceptance builds/runs the actual image and pinned proxy.
+Deployment acceptance uses real Kustomize, server dry-run against installed Gateway
+CRDs and synthetic Pods/PVC/TLS/restarts. It creates only a new owned namespace and
+never installs Orka, touches global kubeconfig, or deletes the operator's cluster.
+
+`test/deployment-ownership.test.ts` is offline behavioral coverage for failed or
+incomplete termination proof. The real deployment fixture seeds receipts only via
+the public journal API after all owners are stopped, and refuses owner-file
+mutation/restoration while any Pod/container/controller could still own the store.
+A CLI exit or successful scale/delete acknowledgement alone is not that proof.
+`test/deployment-processes.test.ts` also runs offline, covering required wrapper
+configuration, bounded log capture and all-follower cleanup after failures.
+Fixture code uses a file subPath mount and explicit completion markers; a projected
+ConfigMap symlink must not silently skip its main-module guard. Never turn fixture
+routing or fault injection into production configuration.
+
+Keep runtime assets under the `deploy/` root Kustomization and storage/init/Orka
+objects outside its resource list. Do not add fsGroup, automatic DB initialization,
+Secret content/hash generators, floating image versions or request logging. Legal
+URLs, live identities, PNGs and ZIPs belong in operator-managed ignored artifacts,
+not source. Synthetic readiness/replay is not live credentials, full conformance,
+controller readiness or proof that the default kind CNI enforces NetworkPolicy.
+
 ## Ingress implementation and test boundaries
 
 - `src/ingress/config.ts` parses explicit nonsecret init scope or full serve config;
@@ -556,5 +597,5 @@ gateway. The bounded converter in [#550](https://github.com/orka-agents/orka/iss
 and formatter in [#551](https://github.com/orka-agents/orka/issues/551) are implemented;
 inbound authentication, transport and ingress/routing persistence are implemented.
 Journal-backed Teams sending and authenticated outbound endpoints are implemented
-in opt-in full mode. Full conformance and live Teams/deployment validation remain
-separate work.
+in opt-in full mode. Container/Kubernetes packaging has separate synthetic gates;
+full conformance and live Teams/Orka deployment validation remain separate work.

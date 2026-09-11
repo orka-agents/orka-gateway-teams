@@ -1,0 +1,12 @@
+apiVersion: gateway.orka.ai/v1alpha1
+kind: GatewayClass
+metadata:
+  name: teams-sdk-v1
+spec:
+  category: chat
+  contractVersion: orka.gateway.v1
+  capabilities:
+    inboundText: true
+    outboundText: true
+    senderIdentity: true
+    idempotentDelivery: true

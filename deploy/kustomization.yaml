@@ -1,0 +1,11 @@
+# Runtime ONLY. Storage/admin/init Jobs and Orka objects have separate lifecycles.
+# The entrypoint lives here so the static nginx.conf stays inside Kustomize's root.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: orka-system
+resources:
+  - runtime
+configMapGenerator:
+  - name: teams-nginx
+    files:
+      - nginx.conf

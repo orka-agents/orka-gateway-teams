@@ -1,0 +1,43 @@
+# First provisioning ONLY, with exact nonsecret scope already configured.
+# A partial failure must be inspected; never delete state to make a retry pass.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: teams-init
+  namespace: orka-system
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: init
+          image: orka-gateway-teams:local
+          imagePullPolicy: IfNotPresent
+          command: [/bin/sh, -ec]
+          args:
+            - 'node /app/dist/ingress/main.js init && node /app/dist/ingress/main.js init-delivery'
+          envFrom:
+            - configMapRef: {name: teams-config}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+          volumeMounts:
+            - {name: state, mountPath: /data, subPath: teams}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: state
+          persistentVolumeClaim: {claimName: teams-state}
+        - name: tmp
+          emptyDir: {medium: Memory, sizeLimit: 32Mi}

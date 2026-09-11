@@ -1,0 +1,20 @@
+# Replace every REQUIRED value from trusted, verified SAME-bot/channel bindings.
+# Current Orka CRD REQUIRES contextId; do not omit it or use a wildcard.
+apiVersion: gateway.orka.ai/v1alpha1
+kind: GatewayBinding
+metadata:
+  name: teams-personal
+  namespace: orka-system
+spec:
+  gatewayRef: {name: teams}
+  agentRef: {name: required-existing-agent}
+  match:
+    accountId: REQUIRED_EXACT_TENANT_GUID
+    contextId: REQUIRED_EXACT_PERSONAL_CONVERSATION_ID
+  senderPolicy:
+    mode: allowlist
+    allowedSenderIds:
+      - REQUIRED_EXACT_ACTIVITY_FROM_ID
+  session:
+    mode: context-sender
+  activeTurnBehavior: queue

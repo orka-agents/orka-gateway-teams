@@ -1,0 +1,11 @@
+apiVersion: gateway.orka.ai/v1alpha1
+kind: Gateway
+metadata:
+  name: teams
+  namespace: orka-system
+spec:
+  gatewayClassName: teams-sdk-v1
+  adapter:
+    serviceRef: {name: teams-adapter, port: 443}
+  inboundAuthRef: {name: teams-orka-inbound, key: token}
+  outboundAuthRef: {name: teams-orka-outbound, key: token}

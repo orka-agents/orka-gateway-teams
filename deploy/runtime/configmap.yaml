@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: teams-config
+  namespace: orka-system
+data:
+  # Invalid/empty required settings deliberately prevent unconfigured startup.
+  # Set the exact nonsecret scope BEFORE first initialization; never rebind a DB.
+  TEAMS_APP_ID: REQUIRED_BOT_OAUTH_CLIENT_GUID
+  TEAMS_TENANT_ID: REQUIRED_TENANT_GUID
+  ORKA_BASE_URL: REQUIRED_EXISTING_HTTPS_ORKA_API_BASE_URL
+  ORKA_GATEWAY_NAMESPACE: orka-system
+  ORKA_GATEWAY_NAME: teams
+  TEAMS_RECIPIENT_IDS: '[]'
+  TEAMS_SERVICE_URLS: '[]'
+  INGRESS_DB: /data/ingress.sqlite
+  DELIVERY_DB: /data/delivery.sqlite
+  OUTBOUND_ENABLED: 'true'
+  INGRESS_HOST: 127.0.0.1
+  INGRESS_PORT: '3978'
+  OUTBOUND_HOST: 127.0.0.1
+  OUTBOUND_PORT: '3979'
