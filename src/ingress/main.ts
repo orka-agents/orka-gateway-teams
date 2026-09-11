@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
+import { X509Certificate } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { ConfigurationError, parseConfig } from './config.js';
+import { ConfigurationError, parseConfig, tlsVerificationEnabled } from './config.js';
 import type { ServeConfig } from './config.js';
 import { logIngress } from './logger.js';
 import { createOrkaClient } from './client.js';
@@ -13,8 +14,9 @@ import type { Receiver, ReceiverDependencies } from './server.js';
 
 export interface IngressRuntime { port: number; done: Promise<void>; stop(): Promise<void> }
 export async function startIngressRuntime(config: ServeConfig, dependencies: ReceiverDependencies = {}): Promise<IngressRuntime> {
+  if (!tlsVerificationEnabled()) throw new ConfigurationError();
   const client = createOrkaClient(config.scope, { bearerToken: config.bearerToken,
-    ...(config.caFile === undefined ? {} : { ca: readFileSync(config.caFile) }) });
+    ...(config.caFile === undefined ? {} : { ca: readCaBundle(config.caFile) }) });
   const store = openIngressStore(config.dbPath, config.scope, { policy: config.policy });
   let receiver: Receiver;
   try { receiver = await startReceiver(config.receiver, store, dependencies); }
@@ -49,6 +51,20 @@ export async function startIngressRuntime(config: ServeConfig, dependencies: Rec
   void receiver.failed.catch(() => { fatal = true; void stop().catch(() => {}); });
   void relay.then(() => { if (fatal) void stop().catch(() => {}); });
   return { port: receiver.port, done, stop };
+}
+
+function readCaBundle(path: string): Buffer {
+  try {
+    const bytes = readFileSync(path);
+    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+    const pem = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/gu;
+    const certificates = text.match(pem);
+    // Parse each certificate, not only the first one OpenSSL finds, and refuse
+    // incomplete blocks or arbitrary trailing content instead of silently trusting a partial bundle.
+    if (!certificates?.length || !/^[\t\r\n ]*$/u.test(text.replace(pem, ''))) throw new ConfigurationError();
+    for (const certificate of certificates) new X509Certificate(certificate);
+    return bytes;
+  } catch { throw new ConfigurationError(); }
 }
 
 async function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<number> {

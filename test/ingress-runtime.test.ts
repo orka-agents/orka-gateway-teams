@@ -7,6 +7,7 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { startIngressRuntime } from '../src/ingress/main.js';
+import { ConfigurationError } from '../src/ingress/config.js';
 import type { IngressRuntime } from '../src/ingress/main.js';
 import { initializeIngressStore, openIngressStore } from '../src/ingress/store.js';
 import { httpsFixture } from './support/ingress-https.js';
@@ -22,6 +23,47 @@ function storage(t: TestContext, baseUrl: string, ca: Buffer) {
     policy: { maxPending: 1000, maxRecords: 100000, replayWindowMs: 86400000 } };
   initializeIngressStore(dbPath, config.scope); return { config, own(runtime: IngressRuntime) { owner = runtime; return runtime; } };
 }
+
+test('invalid custom CA bundles fail configuration before binding', async (t) => {
+  const auth = await authFixture(t);
+  const upstream = await httpsFixture(t, (_req, res) => { res.end(); });
+  const certificate = upstream.ca.toString('utf8');
+  const truncated = certificate.replace('-----END CERTIFICATE-----', '');
+  for (const [name, value] of [
+    ['empty', ''], ['whitespace', '\n \t'], ['non-PEM', 'private-ca-content-sentinel'],
+    ['malformed certificate', '-----BEGIN CERTIFICATE-----\nnot-a-certificate\n-----END CERTIFICATE-----\n'],
+    ['truncated certificate', truncated], ['valid first then garbage', `${certificate}private-trailing-ca-sentinel`],
+    ['valid first then malformed', `${certificate}-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----\n`],
+    ['valid first then truncated', `${certificate}${truncated}`],
+  ]) await t.test(name!, async (t) => {
+    const { config, own } = storage(t, upstream.baseUrl, Buffer.from(value!));
+    await assert.rejects(startIngressRuntime(config, auth.dependencies).then(own), (error: unknown) =>
+      error instanceof ConfigurationError && error.message === 'Invalid ingress configuration' && error.cause === undefined);
+  });
+});
+
+test('invalid custom CA is rejected before opening the inbox', async (t) => {
+  const auth = await authFixture(t); const upstream = await httpsFixture(t, (_req, res) => { res.end(); });
+  const { config } = storage(t, upstream.baseUrl, Buffer.alloc(0));
+  const owner = openIngressStore(config.dbPath, config.scope);
+  try { await assert.rejects(startIngressRuntime(config, auth.dependencies), ConfigurationError); }
+  finally { owner.close(); }
+});
+
+test('valid multi-certificate custom CA bundle retains trust in the second certificate for HTTPS relay', { timeout: 10000 }, async (t) => {
+  const auth = await authFixture(t); const arrived = deferred<void>(); let requests = 0;
+  const unrelated = await httpsFixture(t, (_req, res) => { res.end(); });
+  const upstream = await httpsFixture(t, (req, res) => {
+    req.resume(); req.on('end', () => {
+      requests++; res.writeHead(202); res.end(JSON.stringify({ status: 'accepted', eventId: 'trusted-orka-event', state: 'Queued' })); arrived.resolve();
+    });
+  });
+  const { config, own } = storage(t, upstream.baseUrl, Buffer.concat([unrelated.ca, Buffer.from('\n'), upstream.ca]));
+  const runtime = own(await startIngressRuntime(config, auth.dependencies));
+  assert.equal((await post(runtime.port, auth.token())).status, 200);
+  await arrived.promise;
+  assert.equal(requests, 1);
+});
 
 test('verified HTTP -> durable inbox -> native HTTPS Orka202; restart and concurrent replays never relay again', async (t) => {
   const auth = await authFixture(t); const events: EventEnvelope[] = []; const arrived = deferred<void>();

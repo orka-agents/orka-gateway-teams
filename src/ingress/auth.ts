@@ -1,5 +1,6 @@
 import { createPublicKey } from 'node:crypto';
 import jwt from 'jsonwebtoken';
+import { tlsVerificationEnabled } from './config.js';
 
 export const PUBLIC_JWKS_URL = 'https://login.botframework.com/v1/.well-known/keys';
 const ISSUER = 'https://api.botframework.com';
@@ -38,6 +39,7 @@ export function createStrictAuth(appId: string, fetchKeys: FetchKeys = fetch) {
         if (!record(key) || typeof key.kid !== 'string' || !key.kid || key.kid.length > 256 || fresh.has(key.kid)) throw new Error('Keys unavailable');
         fresh.set(key.kid, key);
       }
+      if (!tlsVerificationEnabled()) throw new Error('Keys unavailable');
       keys = fresh; expires = performance.now() + CACHE_MS;
     })();
     try { await loading; } finally { loading = undefined; }
@@ -45,6 +47,7 @@ export function createStrictAuth(appId: string, fetchKeys: FetchKeys = fetch) {
 
   return async (authorization: unknown, body: unknown): Promise<boolean> => {
     try {
+      if (!tlsVerificationEnabled()) return false;
       if (typeof authorization !== 'string' || authorization.length > 12000 || !/^Bearer [A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u.test(authorization) ||
           !record(body) || typeof body.serviceUrl !== 'string' || !body.serviceUrl) return false;
       const raw = authorization.slice(7);
@@ -52,6 +55,7 @@ export function createStrictAuth(appId: string, fetchKeys: FetchKeys = fetch) {
       if (!decoded || decoded.header.alg !== 'RS256' || typeof decoded.header.kid !== 'string' ||
           !decoded.header.kid || decoded.header.kid.length > 256) return false;
       await refresh();
+      if (!tlsVerificationEnabled()) return false;
       // A cache miss never triggers a per-kid refresh. Rotation becomes visible
       // after five minutes; attacker-controlled kids cannot create a fetch storm.
       const key = keys.get(decoded.header.kid);

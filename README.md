@@ -89,7 +89,13 @@ listener is loopback HTTP, not a public TLS terminator. Configure your proxy wit
 bounded headers/body/deadlines, no request-body/auth-header access logs, and no
 redirect/retry rewriting. Preserve authorization and original JSON. There are
 no unauthenticated readiness endpoints. Orka TLS certificate/hostname checks stay
-enabled; a custom CA changes trust roots, not verification. The receiver makes no
+enabled; a custom CA changes trust roots, not verification. Custom CA files must
+contain one or more valid PEM certificates separated only by whitespace; every
+certificate and the complete bundle are validated before opening the inbox or
+binding. Empty, malformed, truncated or partly valid bundles fail configuration.
+`NODE_TLS_REJECT_UNAUTHORIZED=0` is refused at startup and on incoming requests,
+including changes while authentication is in flight; the runtime never resets or
+silently overrides that environment setting. The receiver makes no
 Teams/Graph/OAuth sends or token acquisition calls. No unused Orka-to-adapter token
 is configured until authenticated outbound endpoints exist.
 

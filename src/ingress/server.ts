@@ -6,7 +6,7 @@ import { convertActivity } from '../teams/convert.js';
 import { createStrictAuth } from './auth.js';
 import { NativeAdapter } from './http-adapter.js';
 import { safeSdkLogger } from './logger.js';
-import { validateReceiverConfig } from './config.js';
+import { ConfigurationError, tlsVerificationEnabled, validateReceiverConfig } from './config.js';
 import type { ReceiverConfig } from './config.js';
 import type { AdmissionResult, IngressStore, ReplyRoute } from './types.js';
 import type { EventEnvelope } from '../protocol/types.js';
@@ -32,6 +32,7 @@ export async function startReceiver(input: ReceiverConfig, sink: AdmissionSink, 
   // Bypass neither authentication nor the registered route. Replace the default
   // processing callback so activity rehydration, OAuth and event dispatch never run.
   app.server.onRequest = async ({ body }) => {
+    if (!tlsVerificationEnabled()) return { status: 401 };
     if (!adapter.active || storageFailed) return { status: 503 };
     const input: unknown = body;
     if (!record(input) || !record(input.recipient) || typeof input.recipient.id !== 'string' ||
@@ -63,8 +64,13 @@ export async function startReceiver(input: ReceiverConfig, sink: AdmissionSink, 
       return { status: 503 };
     }
   };
-  try { await app.initialize(); const port = await adapter.listen(config.host, config.port); return { port, failed, stop: () => adapter.stop() }; }
-  catch { await adapter.stop(); throw new Error('Ingress startup failed'); }
+  try {
+    await app.initialize();
+    if (!tlsVerificationEnabled()) throw new ConfigurationError();
+    const port = await adapter.listen(config.host, config.port); return { port, failed, stop: () => adapter.stop() };
+  } catch (error) {
+    await adapter.stop(); throw error instanceof ConfigurationError ? error : new Error('Ingress startup failed');
+  }
 }
 
 function record(value: unknown): value is Record<string, unknown> {

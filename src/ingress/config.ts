@@ -7,6 +7,8 @@ export interface ReceiverConfig { appId: string; tenantId: string; clientSecret:
   serviceUrls: readonly string[]; host: string; port: number }
 
 export class ConfigurationError extends Error { constructor() { super('Invalid ingress configuration'); } }
+// SDK auth flags do not override Node's process-wide TLS trust bypass.
+export function tlsVerificationEnabled(): boolean { return process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '0'; }
 export interface InitConfig { dbPath: string; scope: Readonly<IngressScope> }
 export interface ServeConfig extends InitConfig { receiver: ReceiverConfig; bearerToken: string; caFile?: string; policy: IngressPolicy }
 export function parseConfig(env: NodeJS.ProcessEnv, mode: 'init'): InitConfig;
@@ -33,6 +35,7 @@ export function parseConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'serve'): Ini
 /** Also validate direct library callers before creating SDK credentials or binding. */
 export function validateReceiverConfig(input: ReceiverConfig): ReceiverConfig {
   try {
+    if (!tlsVerificationEnabled()) fail();
     if (!isIP(input.host) || !Number.isInteger(input.port) || input.port < 0 || input.port > 65535) fail();
     if (!Array.isArray(input.recipientIds) || !Array.isArray(input.serviceUrls) || !input.recipientIds.length ||
         !input.serviceUrls.length || input.recipientIds.length > 100 || input.serviceUrls.length > 100) fail();

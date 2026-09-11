@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -46,6 +46,22 @@ test('CLI unknown command, missing/malformed config and missing DB fail safely b
     assert.ok(!run.output().includes(env.TEAMS_CLIENT_SECRET)); assert.ok(!run.output().includes(env.ORKA_BEARER_TOKEN));
   }
   assert.equal(existsSync(env.INGRESS_DB), false);
+});
+
+test('CLI rejects TLS bypass and invalid CA files before listening without exposing configuration', async (t) => {
+  const env = { ...envFixture(t), TEAMS_CLIENT_SECRET: randomUUID(), ORKA_BEARER_TOKEN: randomUUID(),
+    TEAMS_RECIPIENT_IDS: JSON.stringify(receiverConfig.recipientIds), TEAMS_SERVICE_URLS: JSON.stringify(receiverConfig.serviceUrls) };
+  const init = cli(t, ['init'], env); assert.equal(await init.finished, 0);
+  const caFile = join(dirname(env.INGRESS_DB), 'private-ca-path-sentinel.pem');
+  const bypass = cli(t, ['serve'], { ...env, NODE_TLS_REJECT_UNAUTHORIZED: '0' });
+  assert.equal(await bypass.finished, 1); assert.ok(bypass.output().includes('teams-ingress: configuration-failed'));
+  assert.ok(!bypass.output().includes('listening'));
+  for (const content of ['', 'private-ca-content-sentinel']) {
+    writeFileSync(caFile, content, { mode: 0o600 });
+    const run = cli(t, ['serve'], { ...env, ORKA_CA_FILE: caFile }); assert.equal(await run.finished, 1);
+    assert.ok(run.output().includes('teams-ingress: configuration-failed')); assert.ok(!run.output().includes('listening'));
+    for (const value of [caFile, 'private-ca-content-sentinel', env.TEAMS_CLIENT_SECRET, env.ORKA_BEARER_TOKEN]) assert.ok(!run.output().includes(value));
+  }
 });
 
 test('CLI bind failure is nonzero and sanitized rather than swallowed by App.start', async (t) => {
