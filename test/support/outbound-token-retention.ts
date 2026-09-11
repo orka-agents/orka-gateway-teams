@@ -36,5 +36,6 @@ try {
   const beforeRelease = { bodyBytes, acquisitions, posts, tokenSettled, after1000, after2000 };
   release(); await sender.stop();
   const afterDrain = await retainedBytes() - baseline;
-  process.send!({ ...beforeRelease, afterDrain, postsAfterDrain: posts });
+  await new Promise<void>((resolve, reject) =>
+    process.send!({ ...beforeRelease, afterDrain, postsAfterDrain: posts }, (error: Error | null) => error ? reject(error) : resolve()));
 } finally { release(); await sender.stop(); process.disconnect(); }
