@@ -300,6 +300,29 @@ async function smoke(): Promise<void> {
     chmodSync(join(appAuth, 'private-key.pem'), 0o600);
     console.log('PASS actual certificate setup, UID1000 private read-only pair, no-network expiry, mixed/invalid credential refusal before artifacts/stores');
 
+    stage = 'compiled managed-identity setup without credential mount or token acquisition';
+    const miEnv = { TEAMS_CREDENTIAL_MODE: 'managed-identity-federation',
+      TEAMS_MANAGED_IDENTITY_CLIENT_ID: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      TEAMS_MANAGED_IDENTITY_PRINCIPAL_ID: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' };
+    const miSetupEnv = { ...setupWithoutSecret, ...miEnv };
+    const miSetupArgs = [...security, ...mount(setupDirectory, '/capture', false),
+      ...Object.keys(miSetupEnv).flatMap((key) => ['-e', key]), '--entrypoint', 'node', image, '/app/dist/setup/main.js'];
+    const miSetup = await run(['run', '--rm', '--network', 'none', ...miSetupArgs], miSetupEnv);
+    assert.equal(miSetup.code, 1); assert.equal(miSetup.stdout.length, 0);
+    assert.equal(miSetup.stderr === 'teams-setup: listening\nteams-setup: failed\n', true);
+    const miRuntimeEnv = { ...runtimeWithoutSecret, ...miEnv };
+    const miRuntimeArgs = [...security, ...storage(), ...Object.keys(miRuntimeEnv).flatMap((key) => ['-e', key]), image];
+    for (const extra of [{ TEAMS_CLIENT_SECRET: '' }, { TEAMS_CERTIFICATE_FILE: '' }, { IDENTITY_ENDPOINT: '' },
+      { TEAMS_MANAGED_IDENTITY_PRINCIPAL_ID: '' }]) {
+      const extraArgs = Object.keys(extra).flatMap((key) => ['-e', key]);
+      const invalidSetup = await run(['run', '--rm', '--network', 'none', ...extraArgs, ...miSetupArgs], { ...miSetupEnv, ...extra });
+      assert.equal(invalidSetup.code, 1); assert.equal(invalidSetup.stderr === 'teams-setup: failed\n', true);
+      const invalidRuntime = await run(['run', '--rm', '--network', 'none', ...extraArgs, ...miRuntimeArgs], { ...miRuntimeEnv, ...extra });
+      assert.equal(invalidRuntime.code, 1); assert.equal(invalidRuntime.stderr.includes('configuration-failed'), true);
+      assert.deepEqual(readdirSync(setupDirectory), ['challenge']); assert.deepEqual(readdirSync(data), []);
+    }
+    console.log('PASS actual managed-identity setup without network/credential mounts, mixed/invalid mode refusal before artifacts/stores');
+
     stage = 'explicit image initialization and refused reinitialization';
     for (const mode of ['init', 'init-delivery']) {
       const args = ['run', '--rm', '--network', 'none', ...security, ...storage(), ...initKeys.flatMap((key) => ['-e', key]), image, mode];
@@ -432,6 +455,15 @@ async function smoke(): Promise<void> {
     }
     await replay(); await stop(certApp); modes();
     console.log('PASS actual certificate normal entrypoint/readiness, separate mounted credentials/stores, preserved durable receipt without token request');
+
+    stage = 'actual managed-identity normal entrypoint/readiness and receipt replay without acquisition';
+    const miApp = `${owned}-managed-identity`; await start(miApp, [...podNetwork, ...miRuntimeArgs], miRuntimeEnv);
+    const miDeadline = performance.now() + 15000;
+    while ((await https(ca, privatePort, '/v1/health', { headers: auth })).status !== 200) {
+      assert.equal(performance.now() < miDeadline, true); await sleep(100);
+    }
+    await replay(); await stop(miApp); modes();
+    console.log('PASS actual managed-identity normal entrypoint/readiness and durable receipt replay; no live Azure qualification');
 
     stage = 'proxy transport fixture startup';
     const upstream = `${owned}-upstream`;

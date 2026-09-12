@@ -57,6 +57,12 @@ ownership, read-only mounts, rotation, scoped MSAL authentication, and the **not
 provided/verified** Kubernetes private-copy overlay. There is no implicit managed
 identity or federation fallback; local certificate validation is not tenant acceptance.
 
+Explicit [managed-identity federation](docs/managed-identity-auth.md) supports a
+specifically assigned UAMI federated to the existing bot application, using the
+fixed Azure Linux VM/ACI IMDS contract. Setup is acquisition-free; full outbound
+use requires qualified hosting and an approved FIC. No App Service/ACA endpoint,
+AKS token-file, local Azure CLI or default-identity fallback is provided.
+
 ### Required configuration
 
 | Variable | Meaning |
@@ -66,9 +72,10 @@ identity or federation fallback; local certificate validation is not tenant acce
 | `ORKA_BASE_URL` | HTTPS base URL, including any installation base path |
 | `ORKA_GATEWAY_NAMESPACE`, `ORKA_GATEWAY_NAME` | Stable target Gateway |
 | `INGRESS_DB` | Absolute new/existing ingress DB path; existing private parent directory |
-| `TEAMS_CLIENT_SECRET` | Required in default/explicit `client-secret` mode; forbidden in certificate mode |
-| `TEAMS_CREDENTIAL_MODE` | Optional `client-secret` (default), or explicit `certificate` |
-| `TEAMS_CERTIFICATE_FILE`, `TEAMS_PRIVATE_KEY_FILE` | Required only in certificate mode; private matching PEM pair, absent in secret mode |
+| `TEAMS_CLIENT_SECRET` | Required only in default/explicit `client-secret` mode; absent in other modes |
+| `TEAMS_CREDENTIAL_MODE` | Optional `client-secret` (default), explicit `certificate`, or explicit `managed-identity-federation` |
+| `TEAMS_CERTIFICATE_FILE`, `TEAMS_PRIVATE_KEY_FILE` | Required only in certificate mode; private matching PEM pair, absent in other modes |
+| `TEAMS_MANAGED_IDENTITY_CLIENT_ID`, `TEAMS_MANAGED_IDENTITY_PRINCIPAL_ID` | Required only in managed-identity-federation mode; explicit UAMI client and principal GUIDs, absent in other modes |
 | `ORKA_BEARER_TOKEN` | Required adapter-to-Orka bearer for ingress POST only |
 | `TEAMS_RECIPIENT_IDS` | Required JSON array of exact allowed bot recipient IDs |
 | `TEAMS_SERVICE_URLS` | Required JSON array of exact allowed HTTPS service base URLs |
@@ -76,7 +83,8 @@ identity or federation fallback; local certificate validation is not tenant acce
 The first five rows (including both Gateway fields) suffice for `init`. Serve
 requires all required noncredential settings and exactly one credential set:
 `TEAMS_CLIENT_SECRET` for default/explicit client-secret mode, or both PEM file
-settings with explicit `TEAMS_CREDENTIAL_MODE=certificate`. Optional settings remain
+settings with explicit `TEAMS_CREDENTIAL_MODE=certificate`, or both UAMI GUIDs with
+explicit `TEAMS_CREDENTIAL_MODE=managed-identity-federation`. Optional settings remain
 optional. Lists contain 1–100 explicit entries; no wildcards, first-request
 learning, or inferred `28:` prefix. Obtain the bot recipient IDs and public-cloud
 service URLs from trusted deployment configuration or operator-reviewed

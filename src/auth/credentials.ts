@@ -2,19 +2,32 @@ import { isAbsolute, normalize } from 'node:path';
 import type { Credentials, TokenCredentials } from '@microsoft/teams.api';
 
 export type SharedBotCredentialConfig =
-  | { credentialMode?: 'client-secret'; clientSecret: string; certificateFile?: never; privateKeyFile?: never }
-  | { credentialMode: 'certificate'; clientSecret?: never; certificateFile: string; privateKeyFile: string };
+  | { credentialMode?: 'client-secret'; clientSecret: string; certificateFile?: never; privateKeyFile?: never; managedIdentityClientId?: never; managedIdentityPrincipalId?: never }
+  | { credentialMode: 'certificate'; clientSecret?: never; certificateFile: string; privateKeyFile: string; managedIdentityClientId?: never; managedIdentityPrincipalId?: never }
+  | { credentialMode: 'managed-identity-federation'; managedIdentityClientId: string; managedIdentityPrincipalId: string;
+      clientSecret?: never; certificateFile?: never; privateKeyFile?: never };
 
 /** Structural only: private material is never part of configuration or its validation. */
 export function parseBotCredential(env: NodeJS.ProcessEnv): SharedBotCredentialConfig {
   if (env.TEAMS_CREDENTIAL_MODE === 'certificate') assertCertificateEnvironment(env);
-  return validateBotCredential({ credentialMode: env.TEAMS_CREDENTIAL_MODE, clientSecret: env.TEAMS_CLIENT_SECRET,
-    certificateFile: env.TEAMS_CERTIFICATE_FILE, privateKeyFile: env.TEAMS_PRIVATE_KEY_FILE });
+  if (env.TEAMS_CREDENTIAL_MODE === 'managed-identity-federation') assertManagedIdentityEnvironment(env);
+  return validateBotCredential({ appId: env.TEAMS_APP_ID, credentialMode: env.TEAMS_CREDENTIAL_MODE, clientSecret: env.TEAMS_CLIENT_SECRET,
+    certificateFile: env.TEAMS_CERTIFICATE_FILE, privateKeyFile: env.TEAMS_PRIVATE_KEY_FILE,
+    managedIdentityClientId: env.TEAMS_MANAGED_IDENTITY_CLIENT_ID, managedIdentityPrincipalId: env.TEAMS_MANAGED_IDENTITY_PRINCIPAL_ID });
 }
 
 export function validateBotCredential(input: unknown): SharedBotCredentialConfig {
   if (!input || typeof input !== 'object') return fail();
   const value = input as Record<string, unknown>;
+  if (value.credentialMode === 'managed-identity-federation') {
+    assertManagedIdentityEnvironment();
+    if (['clientSecret', 'certificateFile', 'privateKeyFile', 'token', 'clientCertificate', 'managedIdentityType'].some((key) => value[key] !== undefined)) fail();
+    const managedIdentityClientId = canonicalGuid(value.managedIdentityClientId);
+    const managedIdentityPrincipalId = canonicalGuid(value.managedIdentityPrincipalId);
+    if (canonicalGuid(value.appId) === managedIdentityClientId) fail();
+    return Object.freeze({ credentialMode: 'managed-identity-federation', managedIdentityClientId, managedIdentityPrincipalId });
+  }
+  if (value.managedIdentityClientId !== undefined || value.managedIdentityPrincipalId !== undefined) fail();
   if (value.credentialMode === 'certificate') {
     assertCertificateEnvironment();
     if (['clientSecret', 'token', 'clientCertificate', 'managedIdentityClientId', 'managedIdentityType'].some((key) => value[key] !== undefined)) fail();
@@ -34,6 +47,12 @@ export function assertCertificateEnvironment(env: NodeJS.ProcessEnv = process.en
   if (env.CLIENT_SECRET !== undefined || env.MANAGED_IDENTITY_CLIENT_ID !== undefined) fail();
 }
 
+/** Only the fixed Linux IMDS contract is supported, never another endpoint or token file. */
+export function assertManagedIdentityEnvironment(env: NodeJS.ProcessEnv = process.env): void {
+  assertCertificateEnvironment(env);
+  if (['IDENTITY_ENDPOINT', 'IDENTITY_HEADER', 'MSI_ENDPOINT', 'MSI_SECRET', 'AZURE_FEDERATED_TOKEN_FILE'].some((key) => env[key] !== undefined)) fail();
+}
+
 /** Check the public SDK selection, not private TokenManager implementation state. */
 export function assertSelectedTokenCredentials(credentials: Credentials | undefined, appId: string, tenantId: string, token: TokenCredentials['token']): void {
   assertCertificateEnvironment();
@@ -47,5 +66,9 @@ function credentialPath(value: unknown): string {
   if (typeof value !== 'string' || !isAbsolute(value) || normalize(value) !== value || value.endsWith('/') ||
       Buffer.byteLength(value) > 4096 || /\p{Cc}|[\uD800-\uDFFF]/u.test(value)) fail();
   return value;
+}
+function canonicalGuid(value: unknown): string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)) fail();
+  return value.toLowerCase();
 }
 function fail(): never { throw new Error('Invalid bot credentials'); }

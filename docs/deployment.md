@@ -34,6 +34,13 @@ removal of `TEAMS_CLIENT_SECRET`, and an app-only read-only credential mount;
 no such overlay is provided or verified here. Do not add `fsGroup` or widen modes
 as a workaround. See [certificate deployment limits](certificate-auth.md#kubernetes-qualification).
 
+The separate [managed-identity federation mode](managed-identity-auth.md) is limited
+to qualified Azure Linux VM/ACI IMDS hosts with an explicitly assigned UAMI and
+approved FIC on the existing bot app. It does not add AKS token-file or ACA/App
+Service endpoint support, nor change these Kubernetes secret assets. Persistent
+hosting/storage and public HTTPS for that mode require a separate deployment
+design; ACI/Azure Files is not automatically qualified for this SQLite lifecycle.
+
 Registration permissions, acceptance of the selected application credential mode,
 and actual app installation remain operator prerequisites. A visible custom-upload
 option alone does not prove them. An observed Azure CLI `AADSTS530084` policy block
@@ -48,7 +55,7 @@ operator action, using the Microsoft sources linked below.
 | --- | --- |
 | Bot OAuth client / Microsoft App ID | `TEAMS_APP_ID`, valid GUID; also manifest `bots[0].botId`. **Not** necessarily the Teams package ID. |
 | Tenant GUID | `TEAMS_TENANT_ID` and binding `match.accountId`; exact trusted tenant, no `common` or multi-tenant inference. |
-| Bot credential | Default Kubernetes assets: `teams-bot` Secret key `client-secret` → `TEAMS_CLIENT_SECRET`, a client-secret **value**, not its ID. Explicit certificate authentication supports host/Docker; a Kubernetes certificate private-copy overlay is not supplied/verified. |
+| Bot credential | Default Kubernetes assets: `teams-bot` Secret key `client-secret` → `TEAMS_CLIENT_SECRET`, a client-secret **value**, not its ID. Explicit certificate authentication supports host/Docker; managed-identity federation supports the qualified Linux VM/ACI IMDS contract. Neither mode supplies a Kubernetes overlay. |
 | Verified bot recipient IDs | `TEAMS_RECIPIENT_IDS`, JSON array of exact allowed incoming `recipient.id` values, 1–100 entries. |
 | Verified service base URLs | `TEAMS_SERVICE_URLS`, JSON array of exact canonical public-cloud HTTPS URLs, 1–100 entries. Match path case/trailing slash; no query/fragment/userinfo/nonstandard service port. |
 | Verified sender IDs | Binding `senderPolicy.allowedSenderIds`: exact activity `from.id`, not display name, email, AAD ID or a guessed prefix. |
@@ -349,7 +356,10 @@ performed or permissions established by this repository**.
    recommends stronger credentials. [Explicit certificate authentication](certificate-auth.md)
    is available for host/Docker, with separate approval/public-certificate registration.
    Kubernetes requires an operator-reviewed private-copy overlay; packaging does
-   not make a security exception. Managed identity/federation are not implemented.
+   not make a security exception. [Explicit managed-identity federation](managed-identity-auth.md)
+   requires a qualified Azure Linux VM/ACI IMDS host with a user-assigned managed
+   identity attached, plus a federated credential on the existing application. No Kubernetes overlay
+   is supplied for that mode.
 2. Per [bot settings][bot-settings], set the Azure Bot Configuration messaging
    endpoint to the operator's public HTTPS URL ending `/api/messages`. Per
    [Connect to Teams][connect-teams], configure its Microsoft Teams channel for

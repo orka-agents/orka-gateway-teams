@@ -1,5 +1,6 @@
 import { App } from '@microsoft/teams.apps';
 import { assertCredentialSeparation, prepareCertificate } from '../auth/certificate.js';
+import { prepareManagedIdentity } from '../auth/managed-identity.js';
 import { assertSelectedTokenCredentials, denyBotToken, validateBotCredential } from '../auth/credentials.js';
 import { PUBLIC } from '@microsoft/teams.api';
 import type { Activity, CloudEnvironment } from '@microsoft/teams.api';
@@ -20,7 +21,8 @@ export async function startSetupCapture(input: SetupConfig, dependencies: SetupA
   const config = validateSetupConfig(input);
   if (signal?.aborted) throw failure();
   assertCredentialSeparation(config, [config.challengeFile, config.captureFile]);
-  const certificate = config.credentialMode === 'certificate' ? prepareCertificate(config) : undefined;
+  const credential = config.credentialMode === 'certificate' ? prepareCertificate(config) :
+    config.credentialMode === 'managed-identity-federation' ? prepareManagedIdentity(config) : undefined;
   const artifact = openSetupArtifact(config);
   const adapter = new NativeAdapter(createStrictAuth(config.appId, dependencies.fetchKeys));
   const deadline = performance.now() + config.timeoutMs;
@@ -56,14 +58,14 @@ export async function startSetupCapture(input: SetupConfig, dependencies: SetupA
   signal?.addEventListener('abort', cancel, { once: true });
 
   try {
-    certificate?.assertUsable();
+    credential?.assertUsable();
     const app = new App({ clientId: config.appId, tenantId: config.tenantId,
-      ...(config.credentialMode === 'certificate' ? { token: denyBotToken } : { clientSecret: config.clientSecret }),
+      ...(config.credentialMode === 'certificate' || config.credentialMode === 'managed-identity-federation' ? { token: denyBotToken } : { clientSecret: config.clientSecret }),
       httpServerAdapter: adapter, logger: safeSdkLogger, dangerouslyAllowUnauthenticatedRequests: false,
       cloud: dependencies.sdkCloud ?? PUBLIC, plugins: [], oauth: { fetchUserToken: false },
       // Unused SDK client configuration only, not a discovered route or a URL we request.
       serviceUrl: 'https://smba.trafficmanager.net/teams/', messagingEndpoint: '/api/messages' });
-    if (certificate) assertSelectedTokenCredentials(app.credentials, config.appId, config.tenantId, denyBotToken);
+    if (credential) assertSelectedTokenCredentials(app.credentials, config.appId, config.tenantId, denyBotToken);
     app.server.onRequest = async ({ body }) => {
       if (!tlsVerificationEnabled()) return { status: 401 };
       if (!active() || state !== 'waiting') return { status: 503 };
@@ -101,8 +103,8 @@ export async function startSetupCapture(input: SetupConfig, dependencies: SetupA
       } catch { state = 'failed'; return { status: 503 }; }
     };
     await app.initialize();
-    certificate?.assertUsable();
-    if (certificate) assertSelectedTokenCredentials(app.credentials, config.appId, config.tenantId, denyBotToken);
+    credential?.assertUsable();
+    if (credential) assertSelectedTokenCredentials(app.credentials, config.appId, config.tenantId, denyBotToken);
     if (terminating || signal?.aborted || !tlsVerificationEnabled() || performance.now() >= deadline) throw failure();
     const port = await adapter.listen(config.host, config.port);
     if (terminating || signal?.aborted || !tlsVerificationEnabled() || performance.now() >= deadline) throw failure();

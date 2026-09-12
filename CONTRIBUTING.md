@@ -8,7 +8,8 @@ delivery journal, SDK-authenticated raw receiver, durable inbox/routes, HTTPS
 Orka relay and opt-in authenticated V1 Teams sending are implemented.
 No live credentials, Teams registration, provider sends or cluster setup are
 needed for development/tests. Running serve requires explicit configured bot credentials
-(default client secret or an approved private certificate pair) and directional Orka secrets;
+(default client secret, an approved private certificate pair, or explicit managed-identity
+federation) and directional Orka secrets;
 see [configuration and provisioning](README.md#run-durable-ingress).
 
 ## Development and checks
@@ -144,6 +145,39 @@ node --import tsx --test test/certificate-config.test.ts test/certificate-files.
 No live Entra/Teams calls are part of these tests. The Docker gate covers compiled
 certificate entrypoint/mount validation; default Kubernetes secret assets remain
 unchanged and no certificate Kubernetes overlay is claimed.
+
+## Managed-identity federation boundaries
+
+See [managed-identity authentication](docs/managed-identity-auth.md). The shared
+credential union includes explicit `managed-identity-federation` with required
+UAMI client/principal GUIDs. `prepareManagedIdentity` is structural/no-I/O and
+returns only `assertUsable()` and one-use `createToken(dependencies?)`. Preparation,
+setup and ingress-only must never construct a CCA or acquire metadata/app tokens.
+
+`app-token.ts` contains only the shared lazy CCA/cache logic extracted from the
+certificate provider. Preserve all certificate APIs/errors. `imds.ts` owns the
+fixed native link-local HTTP GET; Entra retains the existing confined verified
+HTTPS network. `ReceiverDependencies.managedIdentity` exposes only `imdsRequest`
+(native HTTP request) and `entraNetwork` (public MSAL `INetworkModule`) as trusted
+library test seams, not endpoint/CLI overrides. No SDK managed-identity option,
+private MSAL hooks, serialized-cache inspection or legacy `botToken` overrides.
+
+MSAL resolves assertions before final-token cache lookup. Test the real public
+callback: two eligible acquisitions mean **two IMDS GETs and one Entra POST** when
+the final token is cached. Keep all assertions/tokens in memory and out of test
+failure diffs. Validate only proven identity claims, including URI or public
+resource GUID audience; do not invent mandatory optional IMDS fields. Entra owns
+cryptographic verification. Test malformed pre-cache responses, actual request
+close, singleflight, removable waiters, two-leg deadline/no-late-send and shutdown
+before both stores close. No extra cache/retry queue or new dependency.
+
+```sh
+node --import tsx --test test/managed-identity-config.test.ts test/managed-identity-token.test.ts test/managed-identity-runtime.test.ts
+```
+
+The actual Docker gate also checks MI setup/config refusal and normal readiness/
+receipt replay without acquisition. It does not live-qualify the Node provider on
+Azure or provide persistent hosting/HTTPS. Default Kubernetes assets stay secret mode.
 
 ## Ingress implementation and test boundaries
 
