@@ -74,7 +74,10 @@ identity or federation fallback; local certificate validation is not tenant acce
 | `TEAMS_SERVICE_URLS` | Required JSON array of exact allowed HTTPS service base URLs |
 
 The first five rows (including both Gateway fields) suffice for `init`. Serve
-requires all rows. Lists contain 1–100 explicit entries; no wildcards, first-request
+requires all required noncredential settings and exactly one credential set:
+`TEAMS_CLIENT_SECRET` for default/explicit client-secret mode, or both PEM file
+settings with explicit `TEAMS_CREDENTIAL_MODE=certificate`. Optional settings remain
+optional. Lists contain 1–100 explicit entries; no wildcards, first-request
 learning, or inferred `28:` prefix. Obtain the bot recipient IDs and public-cloud
 service URLs from trusted deployment configuration or operator-reviewed
 [authenticated setup capture](docs/setup-capture.md), never unverified requests.

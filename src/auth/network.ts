@@ -57,7 +57,18 @@ export function createCertificateNetwork(tenantId: string): INetworkModule {
 }
 
 export function validAccessToken(value: unknown): value is string {
-  return typeof value === 'string' && value.length <= 8192 && /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u.test(value);
+  if (typeof value !== 'string' || value.length > 8192 || !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u.test(value)) return false;
+  try {
+    // Syntax only for the trusted OAuth response: keep SDK decoding failures out
+    // of MSAL's cache without adding signature verification or claim policy.
+    return value.split('.').every((segment, index) => {
+      const bytes = Buffer.from(segment, 'base64url');
+      if (bytes.toString('base64url') !== segment) return false;
+      if (index === 2) return true;
+      const object: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes));
+      return object !== null && typeof object === 'object' && !Array.isArray(object);
+    });
+  } catch { return false; }
 }
 
 /** Applied BEFORE MSAL can cache anything, including at the trusted test I/O seam. */
