@@ -5,8 +5,9 @@ export async function relayOne(store: IngressStore | IngressPort, client: OrkaCl
   isReady: () => boolean = () => true): Promise<boolean> {
   const active = () => !signal?.aborted && isReady();
   if (!active()) return false;
+  const isPort = 'claimForForwarding' in store;
   let claim: Readonly<IngressClaim>;
-  if ('claimForForwarding' in store) {
+  if (isPort) {
     const grant = await store.claimForForwarding();
     if (!grant) return false;
     try {
@@ -29,10 +30,14 @@ export async function relayOne(store: IngressStore | IngressPort, client: OrkaCl
   try { result = await client.post(claim.event, signal); }
   catch { result = { kind: 'retry' }; }
   if (signal?.aborted && result.kind !== 'retry') result = { kind: 'retry' };
-  if (result.kind === 'receipt') return await store.complete(claim, result.receipt);
-  if (result.kind === 'blocked') return await store.block(claim, result.reason);
-  const backoff = Math.min(60000, 1000 * 2 ** Math.min(6, claim.attempt - 1));
-  // A stale result yields an idle poll, never a tight retry loop or another
-  // settlement. Storage failures escape to stop the loop, not network retry.
-  return await store.retry(claim, Math.max(backoff, result.retryAfterMs ?? 0));
+  let settled: boolean;
+  if (result.kind === 'receipt') settled = await store.complete(claim, result.receipt);
+  else if (result.kind === 'blocked') settled = await store.block(claim, result.reason);
+  else {
+    const backoff = Math.min(60000, 1000 * 2 ** Math.min(6, claim.attempt - 1));
+    settled = await store.retry(claim, Math.max(backoff, result.retryAfterMs ?? 0));
+  }
+  // Async-port staleness yields an idle poll. Legacy callers retain true after
+  // a POST even if settlement is stale. Storage failures still escape unchanged.
+  return isPort ? settled : true;
 }

@@ -119,6 +119,30 @@ test('shutdown does not shorten a Retry-After already received from Orka', async
   advance(1); assert.deepEqual(store.claim()?.event, expectedEvent);
 });
 
+for (const outcome of ['receipt', 'retry', 'blocked'] as const) {
+  test(`legacy relay returns true after one POST even when ${outcome} settlement is stale`, async (t) => {
+    let posts = 0;
+    const { ca, baseUrl } = await httpsFixture(t, (request, response) => {
+      request.resume(); request.on('end', () => {
+        posts++;
+        // Persist expiry while the real POST is in flight. Every settlement
+        // below must now see a quarantined record, not current forwarding state.
+        advance(100); store.claim();
+        response.writeHead(outcome === 'receipt' ? 202 : outcome === 'retry' ? 503 : 409);
+        response.end(outcome === 'receipt' ? JSON.stringify(receipt) : '');
+      });
+    });
+    const { store, target, advance } = fixture(t, baseUrl, 100);
+    const client = createOrkaClient(target, { bearerToken: randomBytes(32).toString('hex'), ca });
+    store.admit(expectedEvent, route);
+    assert.equal(await relayOne(store, client), true);
+    assert.equal(posts, 1);
+    assert.equal(store.claim(), undefined);
+    assert.deepEqual(store.admit(expectedEvent, route), { kind: 'duplicate', replyTarget: expectedEvent.replyTarget });
+    assert.equal(await relayOne(store, client), false); assert.equal(posts, 1);
+  });
+}
+
 test('a throwing client leaves original event retryable, never a fabricated success', async (t) => {
   const { store, advance } = fixture(t, scope.orkaBaseUrl); store.admit(expectedEvent, route);
   assert.equal(await relayOne(store, { async post() { throw new Error('synthetic transport failure'); } }), true);

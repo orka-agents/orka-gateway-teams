@@ -98,6 +98,37 @@ test('snapshot precedes async begin; deferred history replay never consults curr
   } finally { await dispatcher.stop(); }
 });
 
+test('uncancelled send permission is retired at journal settlement entry before stop', async (t) => {
+  const f = fixture(t); const gate = deferred<void>(); const entry = deferred<boolean>();
+  let attemptSignal: AbortSignal | undefined; let responded = false; let stopped = false;
+  const dispatcher = createDeliveryDispatcher({ ...f.options, sender: {
+    send(saved, message, context) {
+      assert.ok(context?.signal); attemptSignal = context.signal;
+      assert.equal(attemptSignal.aborted, false, 'the real sender starts with live permission');
+      return f.sender.send(saved, message, context);
+    }, stop: () => f.sender.stop(),
+  }, journal: { ...f.journal,
+    settle: async (...args: Parameters<typeof f.journal.settle>) => {
+      // Capture at entry, before the storage await or any caller/stop abort can
+      // disguise a missing dispatcher retirement fence.
+      entry.resolve(attemptSignal?.aborted === true);
+      await gate.promise; return f.journal.settle(...args);
+    },
+  } });
+  const pending = dispatcher.deliver(finalDelivery).then((value) => { responded = true; return value; });
+  try {
+    assert.equal(await entry.promise, true, 'permission must be retired before journal.settle enters');
+    assert.equal(f.posts(), 1); assert.equal(f.body(), JSON.stringify(finalMessage));
+    assert.equal(f.journal.begin(finalDelivery).kind, 'inFlight');
+    await turn(); assert.equal(responded, false);
+    const stopping = dispatcher.stop().then(() => { stopped = true; });
+    await turn(); assert.equal(stopped, false, 'stop must drain deferred receipt settlement');
+    gate.resolve();
+    assert.deepEqual(await pending, { status: 'delivered', providerMessageId: 'async-receipt' });
+    await stopping; assert.deepEqual(f.journal.begin(finalDelivery), delivered); assert.equal(f.posts(), 1);
+  } finally { gate.resolve(); await pending; await dispatcher.stop(); }
+});
+
 test('pre-effect cancellation retires send permission before deferred retry settlement and late token', async (t) => {
   const f = fixture(t); const token = deferred<string>(); const acquired = deferred<void>(); const settle = deferred<void>();
   const settling = deferred<void>(); let posts = 0;
