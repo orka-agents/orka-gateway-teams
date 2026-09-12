@@ -11,8 +11,9 @@ Synthetic tests do not establish live Teams/Orka compatibility or tenant authori
 ## Prerequisites and boundaries
 
 - The operator must already have approval for the bot/application, exact tenant,
-  the selected client-secret or explicit certificate credential mode, Teams channel, installation and intended personal
-  chat. A custom-upload option or successful local listener is not proof of these.
+  the selected client-secret, certificate or managed-identity-federation credential
+  mode, Teams channel, installation and intended personal chat. A custom-upload
+  option or successful local listener is not proof of these.
   This command does not register/install apps, change tenant policy/consent, use
   Graph, or work around blocked authentication. See [deployment Gate 0](deployment.md#gate-0--trusted-identities-and-operator-authority).
 - Provide an approved, externally managed **HTTPS** messaging frontend ending in
@@ -62,6 +63,14 @@ deny-only SDK token callback and never constructs an MSAL client or tests tenant
 authentication. See [certificate files and host/Docker configuration](certificate-auth.md),
 including ambient SDK secret/managed-identity refusal. The commands below show
 legacy secret mode; use that guide's mount/env substitutions for certificate mode.
+
+For explicit [managed-identity federation](managed-identity-auth.md), omit secret
+and certificate settings and supply `TEAMS_CREDENTIAL_MODE=managed-identity-federation`,
+`TEAMS_MANAGED_IDENTITY_CLIENT_ID` and `TEAMS_MANAGED_IDENTITY_PRINCIPAL_ID`.
+Preparation is structural only, with no credential files. Setup uses the same
+deny-only callback and does not contact IMDS or construct a CCA. It cannot prove
+host UAMI assignment, FIC acceptance or outbound acquisition. The six-field
+artifact and dual incoming JWT verification remain unchanged.
 
 CLI rejects `ORKA_*`, `INGRESS_*`, `OUTBOUND_*`, `DELIVERY_DB`,
 `TEAMS_RECIPIENT_IDS` and `TEAMS_SERVICE_URLS`, even when empty/disabled. Do not

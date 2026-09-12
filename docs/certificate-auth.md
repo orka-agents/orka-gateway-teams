@@ -2,8 +2,11 @@
 
 Both normal serve and one-shot setup capture support an explicitly selected,
 single-tenant **application certificate**. Client-secret mode remains the default.
-This is not managed identity, federation, Graph/user authentication, or a tenant
-policy exception. Keep the existing bot registration, app ID, tenant and channel.
+Certificate mode is not managed identity, federation, Graph/user authentication,
+or a tenant policy exception. A separate explicit
+[managed-identity federation mode](managed-identity-auth.md) is available for
+qualified Azure Linux VM/ACI IMDS hosts; there is no fallback between modes.
+Keep the existing bot registration, app ID, tenant and channel.
 An authorized operator must approve the credential method and register the
 **public certificate only** with that same application. Local validation does not
 prove tenant acceptance, registration permissions, or successful live sending.
@@ -25,7 +28,9 @@ Supply the existing `TEAMS_APP_ID` and `TEAMS_TENANT_ID` GUIDs, plus:
 
 In default or explicit `client-secret` mode, `TEAMS_CLIENT_SECRET` remains required
 and both file variables must be absent. Unknown modes, partial pairs, mixed
-credentials, empty values and ambiguous paths fail closed. Certificate mode also
+credentials, empty values and ambiguous paths fail closed. Both secret and
+certificate modes require `TEAMS_MANAGED_IDENTITY_CLIENT_ID` and
+`TEAMS_MANAGED_IDENTITY_PRINCIPAL_ID` to be absent. Certificate mode also
 rejects the SDK's ambient `CLIENT_SECRET` and `MANAGED_IDENTITY_CLIENT_ID`, even
 empty. Explicit app/tenant configuration overrides SDK app/tenant defaults; the
 runtime checks the SDK's public selected credentials before listening. Never

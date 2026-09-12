@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { App } from '@microsoft/teams.apps';
 import { PUBLIC } from '@microsoft/teams.api';
-import type { Activity, CloudEnvironment } from '@microsoft/teams.api';
+import type { Activity, CloudEnvironment, TokenCredentials } from '@microsoft/teams.api';
 import type { Token } from '@microsoft/teams.common/http';
 import type { INetworkModule } from '@azure/msal-node';
 import { prepareCertificate } from '../auth/certificate.js';
-import type { PreparedCertificate } from '../auth/certificate.js';
+import { prepareManagedIdentity } from '../auth/managed-identity.js';
+import type { ManagedIdentityDependencies } from '../auth/managed-identity.js';
 import { assertSelectedTokenCredentials, denyBotToken } from '../auth/credentials.js';
 import type { DeliveryJournal } from '../delivery/types.js';
 import { createDeliveryDispatcher } from '../outbound/dispatcher.js';
@@ -22,7 +23,7 @@ import type { AdmissionResult, IngressStore, ReplyRoute } from './types.js';
 import type { EventEnvelope } from '../protocol/types.js';
 
 export interface ReceiverDependencies { sdkCloud?: CloudEnvironment; fetchKeys?: (url: string, options: RequestInit) => Promise<Response>;
-  botToken?: Token; providerPost?: ProviderPost; certificateNetwork?: INetworkModule }
+  botToken?: Token; providerPost?: ProviderPost; certificateNetwork?: INetworkModule; managedIdentity?: ManagedIdentityDependencies }
 export interface AdmissionSink { readonly scope: IngressStore['scope'];
   admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>): AdmissionResult | Promise<AdmissionResult> }
 export interface ReceiverOutbound { journal: DeliveryJournal; getRoute: (key: string) => ReplyRoute | undefined }
@@ -32,19 +33,26 @@ export interface PreparedReceiver { start(sink: AdmissionSink, outbound?: Receiv
 /** Call before owning any datastore. Preparation has no listener, CCA or live file descriptors. */
 export function prepareReceiver(input: ReceiverConfig, dependencies: ReceiverDependencies = {}): PreparedReceiver {
   const config = validateReceiverConfig(input);
-  const deps = { ...dependencies, ...(dependencies.sdkCloud === undefined ? {} : { sdkCloud: { ...dependencies.sdkCloud } }) };
-  let certificate: PreparedCertificate | undefined;
+  const deps = { ...dependencies, ...(dependencies.sdkCloud === undefined ? {} : { sdkCloud: { ...dependencies.sdkCloud } }),
+    ...(dependencies.managedIdentity === undefined ? {} : { managedIdentity: { ...dependencies.managedIdentity } }) };
+  let credential: { assertUsable(): void; createToken(): TokenCredentials['token'] } | undefined;
   try {
-    if (config.credentialMode === 'certificate') {
+    if (config.credentialMode === 'certificate' || config.credentialMode === 'managed-identity-federation') {
       if (deps.botToken !== undefined || (deps.sdkCloud !== undefined &&
           (deps.sdkCloud.botScope !== PUBLIC.botScope || deps.sdkCloud.loginEndpoint !== PUBLIC.loginEndpoint))) throw new ConfigurationError();
-      certificate = prepareCertificate(config);
+      if (config.credentialMode === 'certificate') {
+        const certificate = prepareCertificate(config);
+        credential = { assertUsable: certificate.assertUsable, createToken: () => certificate.createToken(deps.certificateNetwork) };
+      } else {
+        const identity = prepareManagedIdentity(config);
+        credential = { assertUsable: identity.assertUsable, createToken: () => identity.createToken(deps.managedIdentity) };
+      }
     }
   } catch { throw new ConfigurationError(); }
   let started = false;
   return Object.freeze({ async start(sink: AdmissionSink, outbound?: ReceiverOutbound) {
     if (started) throw new ConfigurationError(); started = true;
-    return startPreparedReceiver(config, sink, deps, certificate, outbound);
+    return startPreparedReceiver(config, sink, deps, credential, outbound);
   } });
 }
 
@@ -53,7 +61,7 @@ export async function startReceiver(input: ReceiverConfig, sink: AdmissionSink, 
 }
 
 async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink, dependencies: ReceiverDependencies,
-  certificate: PreparedCertificate | undefined, outbound?: ReceiverOutbound): Promise<Receiver> {
+  credential: { assertUsable(): void; createToken(): TokenCredentials['token'] } | undefined, outbound?: ReceiverOutbound): Promise<Receiver> {
   if (sink.scope.appId !== config.appId || sink.scope.tenantId !== config.tenantId) throw new Error('Invalid receiver configuration');
   const recipients = new Set(config.recipientIds); const services = new Set(config.serviceUrls);
   const adapter = new NativeAdapter(createStrictAuth(config.appId, dependencies.fetchKeys));
@@ -61,10 +69,10 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
   const failed = new Promise<never>((_resolve, reject) => { fail = reject; });
   // Consumers can await failure; a receiver used without a relay still fails closed.
   void failed.catch(() => {});
-  certificate?.assertUsable();
-  const token = certificate ? (outbound ? certificate.createToken(dependencies.certificateNetwork) : denyBotToken) : undefined;
+  credential?.assertUsable();
+  const token = credential ? (outbound ? credential.createToken() : denyBotToken) : undefined;
   const app = new App({ clientId: config.appId, tenantId: config.tenantId,
-    ...(config.credentialMode === 'certificate' ? { token: token! } : { clientSecret: config.clientSecret }),
+    ...(config.credentialMode === 'certificate' || config.credentialMode === 'managed-identity-federation' ? { token: token! } : { clientSecret: config.clientSecret }),
     httpServerAdapter: adapter, logger: safeSdkLogger, dangerouslyAllowUnauthenticatedRequests: false,
     cloud: dependencies.sdkCloud ?? PUBLIC, plugins: [], oauth: { fetchUserToken: false },
     serviceUrl: config.serviceUrls[0]!, messagingEndpoint: '/api/messages' });
@@ -126,7 +134,7 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
         scope: { appId: config.appId, tenantId: config.tenantId }, serviceUrls: config.serviceUrls, recipientIds: config.recipientIds, sender });
     }
     await app.initialize();
-    certificate?.assertUsable();
+    credential?.assertUsable();
     if (token) assertSelectedTokenCredentials(app.credentials, config.appId, config.tenantId, token);
     if (!tlsVerificationEnabled()) throw new ConfigurationError();
     const port = await adapter.listen(config.host, config.port); return { port, failed, stop, ...(dispatcher === undefined ? {} : { outbound: dispatcher }) };
