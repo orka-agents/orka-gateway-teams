@@ -3,7 +3,6 @@ import http from 'node:http';
 import type { IncomingMessage, RequestOptions, ServerResponse } from 'node:http';
 import type { TestContext } from 'node:test';
 import type { INetworkModule, NetworkRequestOptions, NetworkResponse } from '@azure/msal-node';
-import { PUBLIC } from '@microsoft/teams.api';
 import { receiverConfig } from './ingress-auth.js';
 import { syntheticAccessToken } from './certificate.js';
 
@@ -39,4 +38,3 @@ export function entraNetwork(post: (url: string, options?: NetworkRequestOptions
   return { sendGetRequestAsync: async () => { throw new Error('Unexpected discovery'); },
     sendPostRequestAsync: <T>(url: string, options?: NetworkRequestOptions) => post(url, options) as Promise<NetworkResponse<T>> };
 }
-export const botScope = PUBLIC.botScope;
