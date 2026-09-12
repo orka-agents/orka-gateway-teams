@@ -7,7 +7,8 @@ available. `convertActivity` ([#550](https://github.com/orka-agents/orka/issues/
 delivery journal, SDK-authenticated raw receiver, durable inbox/routes, HTTPS
 Orka relay and opt-in authenticated V1 Teams sending are implemented.
 No live credentials, Teams registration, provider sends or cluster setup are
-needed for development/tests. Running serve requires explicit configured secrets;
+needed for development/tests. Running serve requires explicit configured bot credentials
+(default client secret or an approved private certificate pair) and directional Orka secrets;
 see [configuration and provisioning](README.md#run-durable-ingress).
 
 ## Development and checks
@@ -22,7 +23,8 @@ npm run check
 `npm test` runs all runtime tests, including the real converter, formatter, preview
 CLI, temporary-file/child-process journal tests, and real HTTP/RSA/JWKS/SQLite/HTTPS
 ingress/outbound tests, including registered-SDK input through V1 reply and durable
-receipt replay. OpenSSL is required for ephemeral local test TLS certificates;
+receipt replay. OpenSSL is required for independent ephemeral synthetic app-auth
+and TLS certificate fixtures;
 private keys are never checked in or printed. Tests do not call live Teams/Orka.
 For focused tests: `node --import tsx --test test/convert.test.ts` or
 `node --import tsx --test test/format.test.ts`.
@@ -76,8 +78,9 @@ controller readiness or proof that the default kind CNI enforces NetworkPolicy.
 ## Setup capture boundaries
 
 The separate [setup command and host/container guide](docs/setup-capture.md) uses
-`src/setup/{config,artifact,server,main}.ts`. It does not modify normal ingress,
-schema, dependencies, provider sending or Orka admission. `setup:capture` runs
+`src/setup/{config,artifact,server,main}.ts` and shared `src/auth/` credential
+preparation. Setup does not perform provider sending or Orka admission, and the
+six-field capture projection is independent of credential mode. `setup:capture` runs
 `node dist/setup/main.js`; Docker requires an explicit entrypoint override.
 
 - `parseSetupConfig(env)` and `validateSetupConfig(config)` return a frozen setup
@@ -113,6 +116,34 @@ late verification, and standalone CLI processes. Never assert private values in
 actual/expected diffs or print child errors. The explicit container gate checks the
 new compiled entrypoint with a host-only capture mount, expiry and auth refusal;
 there is no production auth override and no live positive-capture claim.
+
+## Certificate authentication boundaries
+
+See [certificate authentication](docs/certificate-auth.md). `src/auth/credentials.ts`
+owns the shared discriminated union/structural parser; `certificate.ts` snapshots
+private matching RSA material into closures; `network.ts` confines native MSAL I/O.
+`prepareReceiver(config, deps?).start(sink, outbound?)` is one-use, with no listener,
+CCA or retained descriptor before start. Normal runtime performs metadata-only
+storage/sidecar collision checks and prepares before Orka client/store opens.
+Never reread credential files after SQLite ownership, add an already-validated
+bypass, expose a prepared private key/MSAL object, or use the legacy `botToken`
+seam as certificate integration proof.
+
+Tests must exercise the real SDK public callback/selected credentials and pinned
+MSAL 5.6.0 signing/cache, with synthetic key material only. `certificateNetwork`
+is the public `INetworkModule` test seam, not a CLI endpoint override. Native HTTPS
+must remain verified, bounded, fixed-destination, no GET/redirect/proxy/retry, and
+settle actual work before sender drain. Discard every MSAL log, including non-PII
+messages. Do not log decoded assertions, keys, tokens or raw OAuth errors. Setup
+must validate files but deny token acquisition without constructing a CCA.
+
+```sh
+node --import tsx --test test/certificate-config.test.ts test/certificate-files.test.ts test/certificate-token.test.ts test/certificate-runtime.test.ts
+```
+
+No live Entra/Teams calls are part of these tests. The Docker gate covers compiled
+certificate entrypoint/mount validation; default Kubernetes secret assets remain
+unchanged and no certificate Kubernetes overlay is claimed.
 
 ## Ingress implementation and test boundaries
 

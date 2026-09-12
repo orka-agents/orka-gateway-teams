@@ -268,6 +268,38 @@ async function smoke(): Promise<void> {
     assert.deepEqual(readdirSync(setupDirectory), ['challenge']); assert.deepEqual(readdirSync(data), []);
     console.log('PASS compiled setup entrypoint, private host-only mount, no runtime database, fixed-safe expiry');
 
+    stage = 'independent synthetic app certificate with app-only private read-only mount';
+    const appAuth = join(directory, 'app-auth'); mkdirSync(appAuth, { mode: 0o700 });
+    ok(await command('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', join(appAuth, 'private-key.pem'),
+      '-out', join(appAuth, 'certificate.crt'), '-days', '1', '-subj', '/CN=synthetic-app-auth.invalid']));
+    chmodSync(join(appAuth, 'private-key.pem'), 0o600); chmodSync(join(appAuth, 'certificate.crt'), 0o600);
+    secrets.push(readFileSync(join(appAuth, 'private-key.pem'), 'utf8'));
+    const certEnv = { TEAMS_CREDENTIAL_MODE: 'certificate', TEAMS_CERTIFICATE_FILE: '/credentials/certificate.crt',
+      TEAMS_PRIVATE_KEY_FILE: '/credentials/private-key.pem' };
+    const { TEAMS_CLIENT_SECRET: _setupSecret, ...setupWithoutSecret } = setupEnv;
+    const certSetupEnv = { ...setupWithoutSecret, ...certEnv };
+    const certSetupArgs = [...security, ...mount(appAuth, '/credentials'), ...mount(setupDirectory, '/capture', false),
+      ...Object.keys(certSetupEnv).flatMap((key) => ['-e', key]), '--entrypoint', 'node', image, '/app/dist/setup/main.js'];
+    const certificateSetup = await run(['run', '--rm', '--network', 'none', ...certSetupArgs], certSetupEnv);
+    assert.equal(certificateSetup.code, 1); assert.equal(certificateSetup.stdout.length, 0);
+    assert.equal(certificateSetup.stderr === 'teams-setup: listening\nteams-setup: failed\n', true);
+    assert.deepEqual(readdirSync(setupDirectory), ['challenge']); assert.deepEqual(readdirSync(data), []);
+    const mixedSetup = await run(['run', '--rm', '--network', 'none', '-e', 'TEAMS_CLIENT_SECRET', ...certSetupArgs],
+      { ...certSetupEnv, TEAMS_CLIENT_SECRET: '' });
+    assert.equal(mixedSetup.code, 1); assert.equal(mixedSetup.stderr === 'teams-setup: failed\n', true);
+    const { TEAMS_CLIENT_SECRET: _runtimeSecret, ...runtimeWithoutSecret } = env;
+    const certRuntimeEnv = { ...runtimeWithoutSecret, ...certEnv };
+    const certRuntimeArgs = [...security, ...mount(appAuth, '/credentials'), ...storage(),
+      ...Object.keys(certRuntimeEnv).flatMap((key) => ['-e', key]), image];
+    chmodSync(join(appAuth, 'private-key.pem'), 0o644);
+    const invalidCertificateSetup = await run(['run', '--rm', '--network', 'none', ...certSetupArgs], certSetupEnv);
+    assert.equal(invalidCertificateSetup.code, 1); assert.equal(invalidCertificateSetup.stderr === 'teams-setup: failed\n', true);
+    const invalidCertificateRuntime = await run(['run', '--rm', '--network', 'none', ...certRuntimeArgs], certRuntimeEnv);
+    assert.equal(invalidCertificateRuntime.code, 1); assert.equal(invalidCertificateRuntime.stderr.includes('listening'), false);
+    assert.deepEqual(readdirSync(setupDirectory), ['challenge']); assert.deepEqual(readdirSync(data), []);
+    chmodSync(join(appAuth, 'private-key.pem'), 0o600);
+    console.log('PASS actual certificate setup, UID1000 private read-only pair, no-network expiry, mixed/invalid credential refusal before artifacts/stores');
+
     stage = 'explicit image initialization and refused reinitialization';
     for (const mode of ['init', 'init-delivery']) {
       const args = ['run', '--rm', '--network', 'none', ...security, ...storage(), ...initKeys.flatMap((key) => ['-e', key]), image, mode];
@@ -391,6 +423,15 @@ async function smoke(): Promise<void> {
     }
     await replay(); await stop(restarted); modes();
     console.log('PASS explicit init/refused reinit, stopped-only public API seed, exclusive/missing owner refusal, durable receipt and 0600 remount');
+
+    stage = 'actual default serve entrypoint with certificate mode and no token effect on receipt replay';
+    const certApp = `${owned}-certificate`; await start(certApp, [...podNetwork, ...certRuntimeArgs], certRuntimeEnv);
+    const certDeadline = performance.now() + 15000;
+    while ((await https(ca, privatePort, '/v1/health', { headers: auth })).status !== 200) {
+      assert.equal(performance.now() < certDeadline, true); await sleep(100);
+    }
+    await replay(); await stop(certApp); modes();
+    console.log('PASS actual certificate normal entrypoint/readiness, separate mounted credentials/stores, preserved durable receipt without token request');
 
     stage = 'proxy transport fixture startup';
     const upstream = `${owned}-upstream`;

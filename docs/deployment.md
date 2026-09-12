@@ -26,7 +26,15 @@ routes. The [identifiers guide][identifiers] says the
 channel account address comes from the incoming activity's recipient field;
 [proactive messaging][proactive] distinguishes fallback URLs from reply service URLs.
 
-Registration permissions, acceptance of the existing client-secret identity mode,
+The checked-in Kubernetes assets remain **client-secret mode**. A standard
+projected Secret does not satisfy the certificate loader's nonsymlink, current-UID
+`0700` directory and regular single-link private-file rules. Certificate Kubernetes
+requires a separately approved initializer/compatible CSI private-copy overlay,
+removal of `TEAMS_CLIENT_SECRET`, and an app-only read-only credential mount;
+no such overlay is provided or verified here. Do not add `fsGroup` or widen modes
+as a workaround. See [certificate deployment limits](certificate-auth.md#kubernetes-qualification).
+
+Registration permissions, acceptance of the selected application credential mode,
 and actual app installation remain operator prerequisites. A visible custom-upload
 option alone does not prove them. An observed Azure CLI `AADSTS530084` policy block
 is **not** authorization to change Conditional Access, consent, tenant settings,
@@ -40,7 +48,7 @@ operator action, using the Microsoft sources linked below.
 | --- | --- |
 | Bot OAuth client / Microsoft App ID | `TEAMS_APP_ID`, valid GUID; also manifest `bots[0].botId`. **Not** necessarily the Teams package ID. |
 | Tenant GUID | `TEAMS_TENANT_ID` and binding `match.accountId`; exact trusted tenant, no `common` or multi-tenant inference. |
-| Bot credential | `teams-bot` Secret key `client-secret` → `TEAMS_CLIENT_SECRET`; existing runtime requires a client-secret **value**, not its ID. No new identity mode is added. |
+| Bot credential | Default Kubernetes assets: `teams-bot` Secret key `client-secret` → `TEAMS_CLIENT_SECRET`, a client-secret **value**, not its ID. Explicit certificate authentication supports host/Docker; a Kubernetes certificate private-copy overlay is not supplied/verified. |
 | Verified bot recipient IDs | `TEAMS_RECIPIENT_IDS`, JSON array of exact allowed incoming `recipient.id` values, 1–100 entries. |
 | Verified service base URLs | `TEAMS_SERVICE_URLS`, JSON array of exact canonical public-cloud HTTPS URLs, 1–100 entries. Match path case/trailing slash; no query/fragment/userinfo/nonstandard service port. |
 | Verified sender IDs | Binding `senderPolicy.allowedSenderIds`: exact activity `from.id`, not display name, email, AAD ID or a guessed prefix. |
@@ -336,10 +344,12 @@ performed or permissions established by this repository**.
 1. Under separately approved registration authority, use Microsoft's
    [Azure Bot registration guidance][registration] and existing single-tenant
    identity. Verify Microsoft App ID and tenant in its Configuration. Preserve
-   the required client-secret mode only if your security owner accepts it:
+   default client-secret mode only if your security owner accepts it:
    [Microsoft discourages client secrets in production][credentials] and
-   recommends stronger credentials. This adapter does not yet implement those
-   alternative identity modes; packaging does not make a security exception.
+   recommends stronger credentials. [Explicit certificate authentication](certificate-auth.md)
+   is available for host/Docker, with separate approval/public-certificate registration.
+   Kubernetes requires an operator-reviewed private-copy overlay; packaging does
+   not make a security exception. Managed identity/federation are not implemented.
 2. Per [bot settings][bot-settings], set the Azure Bot Configuration messaging
    endpoint to the operator's public HTTPS URL ending `/api/messages`. Per
    [Connect to Teams][connect-teams], configure its Microsoft Teams channel for

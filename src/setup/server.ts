@@ -1,4 +1,6 @@
 import { App } from '@microsoft/teams.apps';
+import { assertCredentialSeparation, prepareCertificate } from '../auth/certificate.js';
+import { assertSelectedTokenCredentials, denyBotToken, validateBotCredential } from '../auth/credentials.js';
 import { PUBLIC } from '@microsoft/teams.api';
 import type { Activity, CloudEnvironment } from '@microsoft/teams.api';
 import { createStrictAuth } from '../ingress/auth.js';
@@ -17,6 +19,8 @@ export interface SetupCapture { port: number; done: Promise<void>; stop(): Promi
 export async function startSetupCapture(input: SetupConfig, dependencies: SetupAuthDependencies = {}, signal?: AbortSignal): Promise<SetupCapture> {
   const config = validateSetupConfig(input);
   if (signal?.aborted) throw failure();
+  assertCredentialSeparation(config, [config.challengeFile, config.captureFile]);
+  const certificate = config.credentialMode === 'certificate' ? prepareCertificate(config) : undefined;
   const artifact = openSetupArtifact(config);
   const adapter = new NativeAdapter(createStrictAuth(config.appId, dependencies.fetchKeys));
   const deadline = performance.now() + config.timeoutMs;
@@ -52,11 +56,14 @@ export async function startSetupCapture(input: SetupConfig, dependencies: SetupA
   signal?.addEventListener('abort', cancel, { once: true });
 
   try {
-    const app = new App({ clientId: config.appId, tenantId: config.tenantId, clientSecret: config.clientSecret,
+    certificate?.assertUsable();
+    const app = new App({ clientId: config.appId, tenantId: config.tenantId,
+      ...(config.credentialMode === 'certificate' ? { token: denyBotToken } : { clientSecret: config.clientSecret }),
       httpServerAdapter: adapter, logger: safeSdkLogger, dangerouslyAllowUnauthenticatedRequests: false,
       cloud: dependencies.sdkCloud ?? PUBLIC, plugins: [], oauth: { fetchUserToken: false },
       // Unused SDK client configuration only, not a discovered route or a URL we request.
       serviceUrl: 'https://smba.trafficmanager.net/teams/', messagingEndpoint: '/api/messages' });
+    if (certificate) assertSelectedTokenCredentials(app.credentials, config.appId, config.tenantId, denyBotToken);
     app.server.onRequest = async ({ body }) => {
       if (!tlsVerificationEnabled()) return { status: 401 };
       if (!active() || state !== 'waiting') return { status: 503 };
@@ -77,7 +84,7 @@ export async function startSetupCapture(input: SetupConfig, dependencies: SetupA
       if (converted.kind === 'ignored' || !artifact.matches(raw.text)) return { status: 200, body: { status: 'ignored' } };
       try {
         // Apply unchanged runtime routing policy to actual discovered values, not dummy defaults.
-        validateReceiverConfig({ appId: config.appId, tenantId: config.tenantId, clientSecret: config.clientSecret,
+        validateReceiverConfig({ appId: config.appId, tenantId: config.tenantId, ...validateBotCredential(config),
           host: config.host, port: config.port, recipientIds: [raw.recipient.id], serviceUrls: [raw.serviceUrl] });
       } catch { return { status: 400 }; }
       if (!active()) return { status: 503 };
@@ -94,6 +101,8 @@ export async function startSetupCapture(input: SetupConfig, dependencies: SetupA
       } catch { state = 'failed'; return { status: 503 }; }
     };
     await app.initialize();
+    certificate?.assertUsable();
+    if (certificate) assertSelectedTokenCredentials(app.credentials, config.appId, config.tenantId, denyBotToken);
     if (terminating || signal?.aborted || !tlsVerificationEnabled() || performance.now() >= deadline) throw failure();
     const port = await adapter.listen(config.host, config.port);
     if (terminating || signal?.aborted || !tlsVerificationEnabled() || performance.now() >= deadline) throw failure();

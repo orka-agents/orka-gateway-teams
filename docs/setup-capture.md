@@ -11,7 +11,7 @@ Synthetic tests do not establish live Teams/Orka compatibility or tenant authori
 ## Prerequisites and boundaries
 
 - The operator must already have approval for the bot/application, exact tenant,
-  client-secret credential mode, Teams channel, installation and intended personal
+  the selected client-secret or explicit certificate credential mode, Teams channel, installation and intended personal
   chat. A custom-upload option or successful local listener is not proof of these.
   This command does not register/install apps, change tenant policy/consent, use
   Graph, or work around blocked authentication. See [deployment Gate 0](deployment.md#gate-0--trusted-identities-and-operator-authority).
@@ -44,7 +44,7 @@ chat, shell history, tracing, tickets, or committed files:
 | --- | --- |
 | `TEAMS_APP_ID` | Exact bot OAuth application/client GUID |
 | `TEAMS_TENANT_ID` | Exact tenant GUID, no `common` inference |
-| `TEAMS_CLIENT_SECRET` | Bot client-secret value, not its ID |
+| `TEAMS_CLIENT_SECRET` | Bot client-secret value, not its ID, in default/explicit `client-secret` mode only |
 | `SETUP_CHALLENGE_FILE` | Absolute path to the new private challenge file |
 | `SETUP_CAPTURE_FILE` | Absolute path to an **absent** candidate JSON file |
 
@@ -53,6 +53,15 @@ chat, shell history, tracing, tickets, or committed files:
 | `SETUP_HOST` | `127.0.0.1`; explicit IPv4/IPv6 address |
 | `SETUP_PORT` | `3978`; integer 1–65535 |
 | `SETUP_TIMEOUT_MS` | `600000` (10 minutes); 1000–900000 (15 minutes) |
+
+For explicit certificate mode, omit `TEAMS_CLIENT_SECRET` entirely and set
+`TEAMS_CREDENTIAL_MODE=certificate`, `TEAMS_CERTIFICATE_FILE` and
+`TEAMS_PRIVATE_KEY_FILE`. The matching private pair is validated before the
+artifact opens, in a separate dedicated credential directory. Capture uses a
+deny-only SDK token callback and never constructs an MSAL client or tests tenant
+authentication. See [certificate files and host/Docker configuration](certificate-auth.md),
+including ambient SDK secret/managed-identity refusal. The commands below show
+legacy secret mode; use that guide's mount/env substitutions for certificate mode.
 
 CLI rejects `ORKA_*`, `INGRESS_*`, `OUTBOUND_*`, `DELIVERY_DB`,
 `TEAMS_RECIPIENT_IDS` and `TEAMS_SERVICE_URLS`, even when empty/disabled. Do not
@@ -90,7 +99,7 @@ put credentials or other secrets into that chat.
 
 ## Host command
 
-After privately supplying the three bot variables, select the private paths:
+After privately supplying the bot identity and selected credential settings, select the private paths:
 
 ```sh
 SETUP_CHALLENGE_FILE=/private/teams-setup-attempt/challenge \
@@ -111,7 +120,7 @@ must pass before selection. The configured tenant must be asserted in the body,
 every supplied tenant must agree, and the raw channel must be `msteams`. The actual
 recipient and signed service URL must fit the unchanged normal receiver policy.
 A valid SDK signature and challenge correlation do not prove humanity, ownership
-of an unknown recipient mapping, or that the client secret can acquire a token.
+of an unknown recipient mapping, or that the configured credential can acquire a token.
 There is no health endpoint or provider reply; the HTTP ACK is not an Orka admission.
 
 Wait for `teams-setup: saved` and exit **0**. That means the private candidate is
