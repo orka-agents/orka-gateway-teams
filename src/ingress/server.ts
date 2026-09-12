@@ -8,7 +8,7 @@ import { prepareCertificate } from '../auth/certificate.js';
 import { prepareManagedIdentity } from '../auth/managed-identity.js';
 import type { ManagedIdentityDependencies } from '../auth/managed-identity.js';
 import { assertSelectedTokenCredentials, denyBotToken } from '../auth/credentials.js';
-import type { DeliveryJournal } from '../delivery/types.js';
+import type { DeliveryJournalPort } from '../delivery/types.js';
 import { createDeliveryDispatcher } from '../outbound/dispatcher.js';
 import { createProviderSender } from '../outbound/sender.js';
 import type { ProviderPost } from '../outbound/sender.js';
@@ -26,9 +26,9 @@ export interface ReceiverDependencies { sdkCloud?: CloudEnvironment; fetchKeys?:
   botToken?: Token; providerPost?: ProviderPost; certificateNetwork?: INetworkModule; managedIdentity?: ManagedIdentityDependencies }
 export interface AdmissionSink { readonly scope: IngressStore['scope'];
   admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>): AdmissionResult | Promise<AdmissionResult> }
-export interface ReceiverOutbound { journal: DeliveryJournal; getRoute: (key: string) => ReplyRoute | undefined }
+export interface ReceiverOutbound { journal: DeliveryJournalPort; getRoute: (key: string) => ReplyRoute | undefined | Promise<ReplyRoute | undefined> }
 export interface Receiver { port: number; stop(): Promise<void>; failed: Promise<never>; outbound?: DeliveryDispatcher }
-export interface PreparedReceiver { start(sink: AdmissionSink, outbound?: ReceiverOutbound): Promise<Receiver> }
+export interface PreparedReceiver { start(sink: AdmissionSink, outbound?: ReceiverOutbound, signal?: AbortSignal): Promise<Receiver> }
 
 /** Call before owning any datastore. Preparation has no listener, CCA or live file descriptors. */
 export function prepareReceiver(input: ReceiverConfig, dependencies: ReceiverDependencies = {}): PreparedReceiver {
@@ -50,9 +50,9 @@ export function prepareReceiver(input: ReceiverConfig, dependencies: ReceiverDep
     }
   } catch { throw new ConfigurationError(); }
   let started = false;
-  return Object.freeze({ async start(sink: AdmissionSink, outbound?: ReceiverOutbound) {
+  return Object.freeze({ async start(sink: AdmissionSink, outbound?: ReceiverOutbound, signal?: AbortSignal) {
     if (started) throw new ConfigurationError(); started = true;
-    return startPreparedReceiver(config, sink, deps, credential, outbound);
+    return startPreparedReceiver(config, sink, deps, credential, outbound, signal);
   } });
 }
 
@@ -61,7 +61,8 @@ export async function startReceiver(input: ReceiverConfig, sink: AdmissionSink, 
 }
 
 async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink, dependencies: ReceiverDependencies,
-  credential: { assertUsable(): void; createToken(): TokenCredentials['token'] } | undefined, outbound?: ReceiverOutbound): Promise<Receiver> {
+  credential: { assertUsable(): void; createToken(): TokenCredentials['token'] } | undefined, outbound?: ReceiverOutbound, signal?: AbortSignal): Promise<Receiver> {
+  if (signal?.aborted) throw new Error('Ingress startup failed');
   if (sink.scope.appId !== config.appId || sink.scope.tenantId !== config.tenantId) throw new Error('Invalid receiver configuration');
   const recipients = new Set(config.recipientIds); const services = new Set(config.serviceUrls);
   const adapter = new NativeAdapter(createStrictAuth(config.appId, dependencies.fetchKeys));
@@ -83,7 +84,7 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
   // processing callback so activity rehydration, OAuth and event dispatch never run.
   app.server.onRequest = async ({ body }) => {
     if (!tlsVerificationEnabled()) return { status: 401 };
-    if (!adapter.active || storageFailed) return { status: 503 };
+    if (!adapter.active || storageFailed || signal?.aborted) return { status: 503 };
     const input: unknown = body;
     if (!record(input) || !record(input.recipient) || typeof input.recipient.id !== 'string' ||
         !recipients.has(input.recipient.id) || typeof input.serviceUrl !== 'string' || !services.has(input.serviceUrl) ||
@@ -115,7 +116,10 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
     }
   };
   let dispatcher: DeliveryDispatcher | undefined; let stopping: Promise<void> | undefined;
-  const stop = () => stopping ??= (async () => { await Promise.all([adapter.stop(), dispatcher?.stop()]); })();
+  const stop = () => stopping ??= (async () => {
+    const results = await Promise.allSettled([adapter.stop(), dispatcher?.stop()]);
+    if (results.some((result) => result.status === 'rejected')) throw new Error('Ingress shutdown failed');
+  })();
   try {
     if (outbound) {
       // Constructor clientSecret takes precedence over its token option. Tests
@@ -137,7 +141,10 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
     credential?.assertUsable();
     if (token) assertSelectedTokenCredentials(app.credentials, config.appId, config.tenantId, token);
     if (!tlsVerificationEnabled()) throw new ConfigurationError();
-    const port = await adapter.listen(config.host, config.port); return { port, failed, stop, ...(dispatcher === undefined ? {} : { outbound: dispatcher }) };
+    if (signal?.aborted) throw new Error('Ingress startup failed');
+    const port = await adapter.listen(config.host, config.port);
+    if (signal?.aborted) throw new Error('Ingress startup failed');
+    return { port, failed, stop, ...(dispatcher === undefined ? {} : { outbound: dispatcher }) };
   } catch (error) {
     await stop(); throw error instanceof ConfigurationError ? error : new Error('Ingress startup failed');
   }

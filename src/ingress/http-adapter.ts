@@ -5,6 +5,7 @@ import type { HttpMethod, HttpRouteHandler, IHttpServerAdapter } from '@microsof
 
 const BODY_BYTES = 256 * 1024;
 const DEADLINE_MS = 10000;
+const MAX_PENDING_HANDLERS = 32;
 class HttpFailure extends Error { constructor(readonly status: number) { super('Request rejected'); } }
 
 /** Only the SDK-registered handler is callable; there is no alternate ingress route. */
@@ -17,8 +18,13 @@ export class NativeAdapter implements IHttpServerAdapter {
   private stopPromise: Promise<void> | undefined;
   private readonly server = createServer({ maxHeaderSize: 16 * 1024, headersTimeout: DEADLINE_MS,
     requestTimeout: DEADLINE_MS, connectionsCheckingInterval: 1000 }, (req, res) => {
+    // Reserve before reading/retaining any body or queuing authentication/storage.
+    // This set outlives HTTP timeout/disconnect and includes actual reconciliation.
+    if (this.stopping || this.work.size >= MAX_PENDING_HANDLERS) { respond(res, 503); return; }
     const operation = this.handle(req, res);
-    this.work.add(operation); void operation.finally(() => this.work.delete(operation));
+    this.work.add(operation);
+    const release = () => { this.work.delete(operation); };
+    void operation.then(release, release);
   });
 
   constructor(private readonly verify: (authorization: unknown, body: unknown) => Promise<boolean>) {

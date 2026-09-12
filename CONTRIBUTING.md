@@ -194,6 +194,9 @@ Azure or provide persistent hosting/HTTPS. Default Kubernetes assets stay secret
   strict guard, and calls that registered handler. Node receive timeouts alone do
   not cover SDK processing: an absolute deadline plus request-local cancellation
   fences late callbacks, while shutdown drains outstanding handler promises.
+  A fixed 32-handler budget is reserved before body retention; timed-out/disconnected
+  handlers retain slots until actual authentication/admission/reconciliation drains.
+  Saturation is transient 503, not storage poison. This adapter is shared with setup.
 - `server.ts` supplies `App` with explicit credentials, public cloud, safe logger
   and `dangerouslyAllowUnauthenticatedRequests: false`. Its awaited
   `App.server.onRequest` callback replaces default activity/OAuth dispatch. Do not
@@ -205,6 +208,14 @@ Azure or provide persistent hosting/HTTPS. Default Kubernetes assets stay secret
   retains the original envelope. The callback awaits admission, including an async
   sink used to test deferred commit. A fatal storage signal follows the fixed 503
   flush/disconnect, so shutdown does not preempt that response.
+- `IngressPort` and `DeliveryJournalPort` are explicit async-compatible orchestration
+  interfaces, not new backends. Public synchronous store/journal APIs and schemas
+  remain unchanged. `createIngressPort` adapts an already-owned SQLite inbox using
+  its same private connection: no reopened file/FD and no event-derived deadline.
+  Async inbox claims require one-use `IngressForwardingGrant` revalidation plus a
+  synchronous final `take` (owner/attempt, replay eligibility and quarantine).
+  Relay checks readiness/cancellation after revalidation; finalization retires send
+  permission synchronously. `Promise<IngressClaim>` alone is not an async port.
 - Existing `store.ts`, `client.ts`, and `relay.ts` own persistence, verified Orka202
   receipts and fenced settlement. `main.ts` composes one serial loop, never a second
   retry implementation. Abort then await **both** SDK/admission and relay settlement
@@ -635,7 +646,11 @@ Keep these ownership boundaries intact:
   binding either listener, passes the owned inbox's `getRoute`, binds receiver then
   API, marks ready, then starts the unchanged serial relay. Never reopen the live
   exclusive inbox for routes. Failed second-store/bind startup drains and releases
-  resources without initialization, deletion, reset or forwarding.
+  resources without initialization, deletion, reset or forwarding. Trusted library-only
+  `IngressRuntimeDependencies` opening seams can defer owned ports, never select a
+  backend from environment. Startup cancellation waits actual opening/initialization
+  and suppresses late readiness/listening/relay; asynchronous close attempts both
+  stores even if one rejects, only after both directions and reconciliation drain.
 - Either storage poison marks unready and stops both directions. API fatal signals
   follow response finish/disconnect, not the failed write itself. Abort intake,
   provider and relay work, drain SDK authentication, bot-token work and settlement,

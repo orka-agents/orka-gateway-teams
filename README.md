@@ -162,8 +162,11 @@ to five minutes. There is no CLI test-JWKS URL or cloud/auth override.
 
 HTTP accepts at most 256 KiB of uncompressed UTF-8 JSON and 16 KiB headers, with
 absolute ten-second connection/request-processing deadlines and fixed parser
-errors. SDK key I/O may outlive that transport deadline; late callbacks are fenced
-from admission and tracked/drained on shutdown. Do not hard-kill graceful shutdown
+errors. At most 32 ingress handlers retain bodies or await authentication/admission;
+saturation returns fixed transient HTTP 503 before body retention. These slots remain
+occupied after timeout/disconnect until actual work completes, independently of the
+durable inbox capacity. SDK key I/O may outlive that transport deadline; late callbacks
+are fenced from admission and tracked/drained on shutdown. Do not hard-kill graceful shutdown
 merely because the client-facing deadline has elapsed.
 
 The original body must identify the configured recipient, tenant and service URL
@@ -305,6 +308,13 @@ unknown. Unknown is never automatically resent, expired, reset or repaired; a lo
 Teams receipt cannot be reconstructed. Keep one process, one intact/current local
 PV, stable Orka target/Gateway UID/ledger, and retained routes/history as described
 above and in the journal limits below.
+
+Runtime orchestration awaits storage opening, admission, claims, route lookup,
+settlement and closing; SQLite remains the sole backend and its public store APIs
+remain synchronous. An inbox claim acknowledgement is not forwarding permission:
+the owned connection rechecks the exact attempt, replay deadline and quarantine
+immediately before the one-use Orka handoff. Cancellation during startup drains
+late opening/initialization without publishing readiness or starting the relay.
 
 SIGINT/SIGTERM or either storage poison stops both directions: mark unready, stop
 intake, abort API/provider/relay work, drain SDK callbacks, token acquisition and

@@ -18,47 +18,57 @@ export function createDeliveryDispatcher(options: DispatcherOptions): DeliveryDi
   const work = new Set<Promise<DeliveryResponse>>(); const controllers = new Set<AbortController>();
   let healthy = true; let stopped = false; let stopping: Promise<void> | undefined;
 
-  function settle(claim: DeliveryClaim, outcome: DeliveryOutcome): DeliveryResponse {
+  function poison(): void {
+    healthy = false;
+    for (const controller of controllers) controller.abort();
+  }
+
+  async function settle(claim: DeliveryClaim, outcome: DeliveryOutcome, retire: () => void): Promise<DeliveryResponse> {
+    // Revoke this attempt's local permission before finalization can queue/await.
+    // The sender also fences finished token/provider continuations independently.
+    retire();
     try {
       // Only our fresh claim may transition. Even unchanged is unexpected here:
       // no second settler or late-result repair is part of the dispatcher contract.
-      if (journal.settle(claim, outcome) !== 'recorded') { healthy = false; return retryable; }
+      if (await journal.settle(claim, outcome) !== 'recorded') { poison(); return retryable; }
       return response(outcome);
-    } catch { healthy = false; return retryable; }
+    } catch { poison(); return retryable; }
   }
 
-  async function dispatch(input: Readonly<DeliveryRequest>, signal: AbortSignal, deadline: number): Promise<DeliveryResponse> {
+  async function dispatch(input: Readonly<DeliveryRequest>, signal: AbortSignal, deadline: number, retire: () => void): Promise<DeliveryResponse> {
     let request: DeliveryRequest;
     try { request = snapshotDelivery(input, scope); } catch { return nonRetryable; }
-    if (stopped || !healthy) return retryable;
+    const active = () => !stopped && healthy && !signal.aborted && Number.isFinite(deadline) && performance.now() < deadline;
+    if (!active()) return retryable;
     let begun: BeginDeliveryResult;
-    try { begun = journal.begin(request); } catch { healthy = false; return retryable; }
+    try { begun = await journal.begin(request); } catch { poison(); return retryable; }
     // Durable history is authoritative even after current routing policy changes.
     if (begun.kind !== 'claimed') return response(begun);
     const { claim } = begun;
+    const finish = (outcome: DeliveryOutcome) => settle(claim, outcome, retire);
+    if (!active()) return finish({ kind: 'retryable' });
     let saved: ReplyRoute | undefined;
-    try { saved = getRoute(request.replyTarget); }
-    catch { healthy = false; settle(claim, { kind: 'retryable' }); return retryable; }
+    try { saved = await getRoute(request.replyTarget); }
+    catch { poison(); return finish({ kind: 'retryable' }); }
+    if (!active()) return finish({ kind: 'retryable' });
     let route: ReplyRoute; let message: OutgoingTeamsMessage;
     try {
       route = validateRoute(saved);
       if (!services.has(route.serviceUrl) || !recipients.has(route.bot.id) || route.conversation.tenantId !== scope.tenantId ||
           request.accountId !== scope.tenantId || request.contextId !== route.conversation.id || request.threadId) {
-        return settle(claim, { kind: 'rejected' });
+        return finish({ kind: 'rejected' });
       }
       message = formatDelivery(request);
-    } catch { return settle(claim, { kind: 'rejected' }); }
+    } catch { return finish({ kind: 'rejected' }); }
     // The budget starts before snapshot/SQLite/formatting. Do not rely solely
     // on a timer getting a turn after potentially blocking synchronous work.
-    if (stopped || !healthy || signal.aborted || !Number.isFinite(deadline) || performance.now() >= deadline) {
-      return settle(claim, { kind: 'retryable' });
-    }
+    if (!active()) return finish({ kind: 'retryable' });
     let outcome: DeliveryOutcome;
     try { outcome = validateOutcome(await sender.send(route, message, { signal, deadline })); }
     catch { outcome = { kind: 'unknown' }; }
     // A confirmed receipt is not discarded because the caller disconnected.
     // It still must be durably settled before any delivered response escapes.
-    return settle(claim, outcome);
+    return finish(outcome);
   }
 
   return {
@@ -70,9 +80,9 @@ export function createDeliveryDispatcher(options: DispatcherOptions): DeliveryDi
       let resolve!: (value: DeliveryResponse) => void;
       const pending = new Promise<DeliveryResponse>((done) => { resolve = done; });
       // Register before synchronous callbacks; dispatch takes its deep snapshot
-      // and begins the journal synchronously, before the first provider await.
+      // before calling the async-compatible journal, not after its first await.
       work.add(pending);
-      void dispatch(request, signal, deadline).then(resolve, () => { healthy = false; resolve(retryable); });
+      void dispatch(request, signal, deadline, () => controller.abort()).then(resolve, () => { poison(); resolve(retryable); });
       void pending.then(() => { work.delete(pending); controllers.delete(controller); });
       return pending;
     },
@@ -80,7 +90,10 @@ export function createDeliveryDispatcher(options: DispatcherOptions): DeliveryDi
       if (!stopping) {
         stopped = true;
         for (const controller of controllers) controller.abort();
-        stopping = (async () => { await Promise.all([Promise.all(work), sender.stop()]); })();
+        stopping = (async () => {
+          const results = await Promise.allSettled([Promise.all(work), sender.stop()]);
+          if (results.some((result) => result.status === 'rejected')) throw new Error('Delivery shutdown failed');
+        })();
       }
       return stopping;
     },

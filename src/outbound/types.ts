@@ -1,5 +1,5 @@
 import type { DeliveryRequest } from '../protocol/types.js';
-import type { DeliveryJournal, JournalScope } from '../delivery/types.js';
+import type { DeliveryJournalPort, JournalScope } from '../delivery/types.js';
 import type { ReplyRoute } from '../ingress/types.js';
 import type { OutgoingTeamsMessage } from '../teams/format.js';
 
@@ -15,9 +15,9 @@ export interface ProviderSender {
   stop(): Promise<void>;
 }
 export interface DispatcherOptions {
-  journal: DeliveryJournal;
+  journal: DeliveryJournalPort;
   scope: Readonly<JournalScope>;
-  getRoute: (replyTarget: string) => ReplyRoute | undefined;
+  getRoute: (replyTarget: string) => ReplyRoute | undefined | Promise<ReplyRoute | undefined>;
   serviceUrls: readonly string[];
   recipientIds: readonly string[];
   sender: ProviderSender;
