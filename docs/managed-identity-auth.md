@@ -30,9 +30,13 @@ code or unrelated principals: access to that identity is a privileged boundary.
 A laptop can validate configuration and run acquisition-free setup, but cannot
 prove host assignment or use its CLI login for outbound sends.
 
-The protocol was previously exercised by a separate live Python spike. The new
-Node provider has **not been live-Azure qualified**. Offline real HTTP/MSAL/SDK
-tests and actual Docker startup/replay are not live Teams or Azure validation.
+A bounded live Linux ACI test exercised the bundled Node 24.2.0 credential provider
+and public SDK token decoder with the platform environment intact. It verified
+MI-to-existing-app Bot Framework token issuance and cached app-token reuse: two
+IMDS requests and one Entra exchange. This was **credential-provider qualification,
+not deployment of the full gateway image**. Live Teams receive/send, persistent
+storage and HTTPS hosting remain separate gates; offline Docker startup/replay
+does not establish them.
 
 ## Configuration
 
@@ -53,9 +57,12 @@ reject the two `TEAMS_MANAGED_IDENTITY_*` variables, including empty values.
 
 This mode also rejects the SDK's ambient `CLIENT_SECRET` and
 `MANAGED_IDENTITY_CLIENT_ID`, and alternative-platform settings
-`IDENTITY_ENDPOINT`, `IDENTITY_HEADER`, `MSI_ENDPOINT`, `MSI_SECRET` and
-`AZURE_FEDERATED_TOKEN_FILE`, even when empty. The application does not clear them
-or infer another authentication method. Use a clean approved environment.
+`IDENTITY_ENDPOINT`, `MSI_ENDPOINT`, `MSI_SECRET` and `AZURE_FEDERATED_TOKEN_FILE`,
+even when empty. The application does not clear them or infer another authentication
+method. Linux ACI also injects `IDENTITY_HEADER` without an alternative endpoint;
+that variable is tolerated, left untouched, and never read into configuration or
+forwarded to IMDS, Entra or Teams. It does not select credentials or relax any of
+the other checks. Use an approved environment.
 
 For illustration only, these are **synthetic**, nonfunctional identities:
 

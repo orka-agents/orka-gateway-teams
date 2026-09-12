@@ -26,6 +26,11 @@ import { expectedEvent } from './fixtures/incoming.js';
 import { finalDelivery } from './fixtures/outgoing.js';
 
 const journalScope = { appId: scope.appId, tenantId: scope.tenantId };
+function aciHeader(t: TestContext): string {
+  const before = process.env.IDENTITY_HEADER; const header = 'synthetic-unused-aci-header';
+  t.after(() => { if (before === undefined) delete process.env.IDENTITY_HEADER; else process.env.IDENTITY_HEADER = before; });
+  process.env.IDENTITY_HEADER = header; return header;
+}
 function storage(t: TestContext) {
   const files = setupFiles(t);
   const config: ServeConfig = { receiver: { ...miConfig }, scope, dbPath: join(files.directory, 'inbox.sqlite'), bearerToken: randomUUID(),
@@ -45,6 +50,7 @@ function storage(t: TestContext) {
 }
 
 test('MI preparation and ingress-only SDK select a deny callback without files, network or CCA', async (t) => {
+  const header = aciHeader(t);
   let selected = false; const initialize = App.prototype.initialize;
   const open = t.mock.method(fs, 'openSync', () => { throw new Error('No credential files'); });
   const req = t.mock.method(http, 'request', () => { throw new Error('No metadata'); });
@@ -61,10 +67,12 @@ test('MI preparation and ingress-only SDK select a deny callback without files, 
   try {
     assert.equal(selected, true); await assert.rejects(prepared.start({ scope, admit: () => ({ kind: 'full' }) }));
     assert.equal(open.mock.callCount(), 0); assert.equal(req.mock.callCount(), 0); assert.equal(tls.mock.callCount(), 0); assert.equal(acquire.mock.callCount(), 0);
+    assert.equal(process.env.IDENTITY_HEADER === header, true);
   } finally { await receiver.stop(); }
 });
 
 test('MI setup uses deny-only public credentials and real dual JWT authentication with six-field capture', async (t) => {
+  const header = aciHeader(t);
   const files = setupFiles(t); const auth = await authFixture(t); let selected = false;
   const acquire = t.mock.method(ConfidentialClientApplication.prototype, 'acquireTokenByClientCredential', async () => { throw new Error('No CCA'); });
   const request = http.request; let metadataCalls = 0;
@@ -89,6 +97,7 @@ test('MI setup uses deny-only public credentials and real dual JWT authenticatio
   assert.deepEqual(Object.keys(candidate).sort(), ['appId', 'conversationId', 'recipientId', 'senderId', 'serviceUrl', 'tenantId']);
   assert.equal(auth.requests(), 2); assert.equal(selected, true);
   assert.equal(acquire.mock.callCount(), 0); assert.equal(metadataCalls, 0); assert.equal(tls.mock.callCount(), 0);
+  assert.equal(JSON.stringify(candidate).includes(header), false); assert.equal(process.env.IDENTITY_HEADER === header, true);
 });
 
 for (const variant of ['before preparation', 'before SDK', 'during initialization', 'wrong selection']) {
@@ -114,6 +123,7 @@ test('MI refuses legacy botToken override and alternate SDK scope/authority', ()
 });
 
 test('full normal runtime uses real MI, CCA and public App token for journal-backed sends and receipt replay', async (t) => {
+  const header = aciHeader(t);
   const f = storage(t); f.init(); const auth = await authFixture(t); const imds = await imdsFixture(t);
   let posts = 0; let sends = 0; let selected = false; const initialize = App.prototype.initialize;
   // Only the explicit native test boundary may reach metadata. This also makes a missing wiring fail privately.
@@ -131,7 +141,8 @@ test('full normal runtime uses real MI, CCA and public App token for journal-bac
     managedIdentity: { imdsRequest: imds.imdsRequest, entraNetwork: entraNetwork(async () => {
       posts++; return { status: 200, headers: {}, body: { access_token: assertion(), token_type: 'Bearer', expires_in: 3600 } };
     }) }, providerPost: async (_url, _body, config) => {
-      sends++; assert.equal(typeof config.token, 'string'); return { status: 201, data: Buffer.from('{"id":"mi-receipt"}') };
+      sends++; assert.equal(typeof config.token, 'string'); assert.equal(JSON.stringify(config).includes(header), false);
+      return { status: 201, data: Buffer.from('{"id":"mi-receipt"}') };
     } });
   t.after(() => runtime.stop()); assert.equal(selected, true); assert.equal(imds.calls(), 0); assert.equal(posts, 0);
   assert.equal((await post(runtime.port, auth.token())).status, 200);
@@ -139,7 +150,8 @@ test('full normal runtime uses real MI, CCA and public App token for journal-bac
     headers: { Authorization: `Bearer ${f.config.outbound!.bearerToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ ...finalDelivery, deliveryId: id, idempotencyId: id }) });
   for (const id of ['first', 'second', 'first']) assert.equal((await (await deliver(id)).json() as { status: string }).status, 'delivered');
-  assert.equal(imds.calls(), 2); assert.equal(posts, 1); assert.equal(sends, 2); await runtime.stop();
+  assert.equal(imds.calls(), 2); assert.equal(posts, 1); assert.equal(sends, 2);
+  assert.equal(process.env.IDENTITY_HEADER === header, true); await runtime.stop();
   const owned = f.reopen(); try { assert.equal(owned.journal.begin({ ...finalDelivery, deliveryId: 'first', idempotencyId: 'first' }).kind, 'delivered'); }
   finally { owned.close(); }
 });

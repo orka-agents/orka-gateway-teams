@@ -301,7 +301,7 @@ async function smoke(): Promise<void> {
     console.log('PASS actual certificate setup, UID1000 private read-only pair, no-network expiry, mixed/invalid credential refusal before artifacts/stores');
 
     stage = 'compiled managed-identity setup without credential mount or token acquisition';
-    const miEnv = { TEAMS_CREDENTIAL_MODE: 'managed-identity-federation',
+    const miEnv = { IDENTITY_HEADER: 'synthetic-unused-aci-header', TEAMS_CREDENTIAL_MODE: 'managed-identity-federation',
       TEAMS_MANAGED_IDENTITY_CLIENT_ID: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       TEAMS_MANAGED_IDENTITY_PRINCIPAL_ID: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' };
     const miSetupEnv = { ...setupWithoutSecret, ...miEnv };

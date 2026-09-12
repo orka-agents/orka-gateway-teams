@@ -14,9 +14,11 @@ function environment(t: TestContext, name: string, value: string) {
   t.after(() => { if (before === undefined) delete process.env[name]; else process.env[name] = before; });
 }
 
-test('real CCA uses selected IMDS assertion each acquisition, including final-token cache hits (2 GETs, 1 POST)', async (t) => {
-  let issued = ''; let bodyBytes = 0; let metadata = false; let get = false; let calls = 0;
+test('real CCA uses selected IMDS assertion each acquisition, including final-token cache hits, without forwarding the ACI header', async (t) => {
+  const header = 'synthetic-unused-aci-header'; environment(t, 'IDENTITY_HEADER', header);
+  let issued = ''; let bodyBytes = 0; let metadata = false; let get = false; let calls = 0; let headerForwarded = false;
   const imds = await imdsFixture(t, (req, res) => {
+    headerForwarded ||= JSON.stringify(req.headers).includes(header) || (req.url ?? '').includes(header);
     metadata = req.headers.metadata === 'true'; get = req.method === 'GET';
     req.on('data', (bytes: Buffer) => { bodyBytes += bytes.length; });
     req.on('end', () => { issued = assertion({ marker: imds.calls() }); res.end(JSON.stringify({ access_token: issued })); });
@@ -25,7 +27,7 @@ test('real CCA uses selected IMDS assertion each acquisition, including final-to
   environment(t, 'NODE_USE_ENV_PROXY', '1');
   t.mock.method(globalThis, 'fetch', async () => { throw new Error('No fetch/default credential chain'); });
   const response = { access_token: syntheticAccessToken(), token_type: 'Bearer', expires_in: 3600 };
-  const observed = { endpoint: false, app: false, scope: false, grant: false, assertion: false, type: false, noSecret: false };
+  const observed = { endpoint: false, app: false, scope: false, grant: false, assertion: false, type: false, noSecret: false, noPlatformHeader: false };
   const clients = new Set<ConfidentialClientApplication>(); const acquire = ConfidentialClientApplication.prototype.acquireTokenByClientCredential;
   t.mock.method(ConfidentialClientApplication.prototype, 'acquireTokenByClientCredential', function(this: ConfidentialClientApplication, ...args: Parameters<typeof acquire>) {
     clients.add(this); return acquire.apply(this, args);
@@ -38,7 +40,8 @@ test('real CCA uses selected IMDS assertion each acquisition, including final-to
     observed.scope = body.get('scope') === PUBLIC.botScope; observed.grant = body.get('grant_type') === 'client_credentials';
     observed.assertion = body.get('client_assertion') === issued;
     observed.type = body.get('client_assertion_type') === 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer';
-    observed.noSecret = !body.has('client_secret'); return { status: 200, headers: {}, body: response };
+    observed.noSecret = !body.has('client_secret'); observed.noPlatformHeader = !JSON.stringify(options).includes(header);
+    return { status: 200, headers: {}, body: response };
   }) });
   assert.equal(clients.size, 0); assert.equal(imds.calls(), 0);
   assert.equal(await token(PUBLIC.botScope) === response.access_token, true);
@@ -46,6 +49,7 @@ test('real CCA uses selected IMDS assertion each acquisition, including final-to
   assert.equal(imds.calls(), 2); assert.equal(imds.closed(), 2); assert.equal(calls, 1); assert.equal(clients.size, 1);
   for (const [name, valid] of Object.entries(observed)) assert.equal(valid, true, name);
   assert.equal(metadata, true); assert.equal(get, true); assert.equal(bodyBytes, 0);
+  assert.equal(headerForwarded, false); assert.equal(process.env.IDENTITY_HEADER === header, true);
   for (const [scope, tenant] of [[PUBLIC.graphScope, undefined], [[PUBLIC.botScope, PUBLIC.botScope], undefined],
     [[], undefined], [PUBLIC.botScope, 'common'], [PUBLIC.botScope, '']] as [string | string[], string | undefined][]) {
     await assert.rejects(async () => token(scope, tenant), failure);
