@@ -5,9 +5,19 @@ import { basename, dirname, isAbsolute, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { decode, digest, encode, fingerprint, identity, integer, invalid, matchRoute, MAX_REPLAY_WINDOW_MS, validateEvent, validatePolicy, validateReceipt, validateRoute, validateScope } from './codec.js';
 import { IngressStoreError } from './types.js';
-import type { IngressClaim, IngressScope, IngressStore, StoreOptions } from './types.js';
+import type { IngressClaim, IngressForwardingGrant, IngressPort, IngressScope, IngressStore, StoreOptions } from './types.js';
 export { IngressStoreError } from './types.js';
 export type * from './types.js';
+
+const forwarding = new WeakMap<IngressStore, () => IngressForwardingGrant | undefined>();
+
+/** Adapt only a store owned by this module, using its SAME live SQLite connection. */
+export function createIngressPort(store: IngressStore): IngressPort {
+  const claimForForwarding = forwarding.get(store);
+  if (!claimForForwarding) throw new IngressStoreError('invalid-input');
+  return { scope: store.scope, admit: store.admit, claimForForwarding, complete: store.complete,
+    retry: store.retry, block: store.block, getRoute: store.getRoute, close: store.close };
+}
 
 const APPLICATION_ID = 0x4f54494e; // OTIN: separate from the delivery journal.
 const schema = [
@@ -68,7 +78,7 @@ export function openIngressStore(inputPath: string, inputScope: Readonly<Ingress
       try { sameFile(path, stamp); return transaction(main, action); }
       catch (error) { failed = true; throw storageError(error); }
     };
-    return {
+    const store: IngressStore = {
       scope,
       admit(inputEvent, inputRoute) {
         const event = validateEvent(inputEvent); const route = validateRoute(inputRoute); matchRoute(event, route, scope);
@@ -135,6 +145,29 @@ export function openIngressStore(inputPath: string, inputScope: Readonly<Ingress
       },
       close() { if (!closed) { closed = true; main.close(); } },
     };
+    forwarding.set(store, () => {
+      const claim = store.claim();
+      if (!claim) return undefined;
+      let retired = false;
+      const eligible = () => {
+        if (closed || failed) return false;
+        return run(() => {
+          // Observe expiry/regression on the owner's connection, never an event
+          // timestamp or a reopened FD. Settlement/quarantine/attempt rotation
+          // since claim acknowledgement also revokes permission.
+          advanceClock(main, now());
+          return main.prepare("SELECT 1 FROM inbox WHERE external_event_id=? AND attempt_id=? AND attempt=? AND state='forwarding'")
+            .get(Buffer.from(claim.externalEventId), claim.attemptId, claim.attempt) !== undefined;
+        });
+      };
+      return {
+        claim: structuredClone(claim),
+        revalidate() { if (retired) return false; if (eligible()) return true; retired = true; return false; },
+        take() { if (retired) return false; retired = true; return eligible(); },
+        retire() { retired = true; },
+      };
+    });
+    return store;
   } catch (error) { db?.close(); throw storageError(error); }
 }
 

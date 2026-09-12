@@ -9,9 +9,10 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { receiverConfig, scope } from './support/ingress-auth.js';
+import { openIngressStore } from '../src/ingress/store.js';
 
-function cli(t: TestContext, args: string[], env: NodeJS.ProcessEnv) {
-  const child = spawn(process.execPath, ['--import', 'tsx', 'src/ingress/main.ts', ...args], {
+function cli(t: TestContext, args: string[], env: NodeJS.ProcessEnv, early = false) {
+  const child = spawn(process.execPath, ['--import', 'tsx', ...(early ? ['--import', './test/support/setup-early-signal.ts'] : []), 'src/ingress/main.ts', ...args], {
     cwd: new URL('..', import.meta.url), env: { PATH: process.env.PATH, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = ''; let stderr = '';
   child.stdout.on('data', (chunk) => { stdout += chunk; }); child.stderr.on('data', (chunk) => { stderr += chunk; });
@@ -75,6 +76,17 @@ test('CLI bind failure is nonzero and sanitized rather than swallowed by App.sta
   const run = cli(t, ['serve'], env); assert.equal(await run.finished, 1);
   assert.ok(run.output().includes('teams-ingress: startup-failed')); assert.ok(!run.output().includes('listening'));
   assert.ok(!run.output().includes(env.TEAMS_CLIENT_SECRET)); assert.ok(!run.output().includes(env.ORKA_BEARER_TOKEN));
+});
+
+test('CLI startup SIGTERM suppresses listening announcement and releases the initialized inbox', async (t) => {
+  const env = { ...envFixture(t), TEAMS_CLIENT_SECRET: randomUUID(), ORKA_BEARER_TOKEN: randomUUID(),
+    TEAMS_RECIPIENT_IDS: JSON.stringify(receiverConfig.recipientIds), TEAMS_SERVICE_URLS: JSON.stringify(receiverConfig.serviceUrls) };
+  assert.equal(await cli(t, ['init'], env).finished, 0);
+  const run = cli(t, ['serve'], env, true);
+  assert.equal(await run.finished, 1); assert.ok(!run.output().includes('listening'));
+  assert.ok(run.output().includes('teams-ingress: startup-failed'));
+  for (const secret of [env.TEAMS_CLIENT_SECRET, env.ORKA_BEARER_TOKEN]) assert.ok(!run.output().includes(secret));
+  const store = openIngressStore(env.INGRESS_DB, scope); store.close();
 });
 
 test('CLI always uses fixed public auth despite SDK bypass/cloud/log env; SIGTERM closes cleanly', async (t) => {

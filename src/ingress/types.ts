@@ -16,6 +16,31 @@ export interface IngressStore {
   getRoute(replyTarget: string): ReplyRoute | undefined;
   close(): void;
 }
+/** Owner-local, one-use permission, separate from the unchanged public claim.
+ * revalidate owns/drains any storage reconciliation. take MUST synchronously
+ * recheck current owner/attempt, persisted replay eligibility and quarantine
+ * after that await, consuming permission even on failure. retire never awaits.
+ */
+export interface IngressForwardingGrant {
+  readonly claim: Readonly<IngressClaim>;
+  revalidate(): boolean | Promise<boolean>;
+  take(): boolean;
+  retire(): void;
+}
+/** Operation promises own actual work/reconciliation, not caller timeout races.
+ * Implementations snapshot inputs before queuing and reject storage poison;
+ * ineligible grants must not revive records or authorize another handoff.
+ */
+export interface IngressPort {
+  readonly scope: Readonly<IngressScope>;
+  admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>): AdmissionResult | Promise<AdmissionResult>;
+  claimForForwarding(): IngressForwardingGrant | undefined | Promise<IngressForwardingGrant | undefined>;
+  complete(claim: Readonly<IngressClaim>, receipt: Readonly<IngressReceipt>): boolean | Promise<boolean>;
+  retry(claim: Readonly<IngressClaim>, delayMs: number): boolean | Promise<boolean>;
+  block(claim: Readonly<IngressClaim>, reason: 'conflict' | 'invalid-event' | 'redirect'): boolean | Promise<boolean>;
+  getRoute(replyTarget: string): ReplyRoute | undefined | Promise<ReplyRoute | undefined>;
+  close(): void | Promise<void>;
+}
 export interface StoreOptions { policy?: IngressPolicy; now?: () => number }
 export type OrkaPostResult = { kind: 'receipt'; receipt: IngressReceipt } | { kind: 'retry'; retryAfterMs?: number } | { kind: 'blocked'; reason: 'conflict' | 'invalid-event' | 'redirect' };
 export interface OrkaClient { post(event: Readonly<EventEnvelope>, signal?: AbortSignal): Promise<OrkaPostResult> }

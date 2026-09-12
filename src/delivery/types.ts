@@ -19,6 +19,16 @@ export interface DeliveryJournal {
   close(): void;
 }
 
+/** Runtime orchestration port; the public SQLite journal remains synchronous.
+ * Promises cover actual durable work/reconciliation, not caller timeout races.
+ * Implementations snapshot inputs before queuing and reject storage poison.
+ */
+export interface DeliveryJournalPort {
+  begin(request: Readonly<DeliveryRequest>): BeginDeliveryResult | Promise<BeginDeliveryResult>;
+  settle(claim: Readonly<DeliveryClaim>, outcome: Readonly<DeliveryOutcome>): SettlementResult | Promise<SettlementResult>;
+  close(): void | Promise<void>;
+}
+
 const messages = {
   'invalid-input': 'Invalid delivery journal input.',
   missing: 'Delivery journal storage is missing.',
