@@ -1,10 +1,12 @@
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { realpathSync, statSync } from 'node:fs';
 import { isIP } from 'node:net';
+import { parseBotCredential, validateBotCredential } from '../auth/credentials.js';
+import type { SharedBotCredentialConfig } from '../auth/credentials.js';
 import { identity, validatePolicy } from './codec.js';
 import type { IngressPolicy, IngressScope } from './types.js';
 
-export interface ReceiverConfig { appId: string; tenantId: string; clientSecret: string; recipientIds: readonly string[];
+export type ReceiverConfig = SharedBotCredentialConfig & { appId: string; tenantId: string; recipientIds: readonly string[];
   serviceUrls: readonly string[]; host: string; port: number }
 
 export class ConfigurationError extends Error { constructor() { super('Invalid ingress configuration'); } }
@@ -30,7 +32,7 @@ export function parseConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'init-deliver
       return init;
     }
     const receiver = validateReceiverConfig({ appId: scope.appId, tenantId: scope.tenantId,
-      clientSecret: secret(env.TEAMS_CLIENT_SECRET), recipientIds: list(env.TEAMS_RECIPIENT_IDS).map(identity),
+      ...parseBotCredential(env), recipientIds: list(env.TEAMS_RECIPIENT_IDS).map(identity),
       serviceUrls: list(env.TEAMS_SERVICE_URLS).map((value) => baseUrl(value, true)),
       host: env.INGRESS_HOST ?? '127.0.0.1', port: number(env.INGRESS_PORT, 3978, 1, 65535) });
     const bearerToken = secret(env.ORKA_BEARER_TOKEN);
@@ -56,7 +58,7 @@ export function validateReceiverConfig(input: ReceiverConfig): ReceiverConfig {
     if (!Array.isArray(input.recipientIds) || !Array.isArray(input.serviceUrls) || !input.recipientIds.length ||
         !input.serviceUrls.length || input.recipientIds.length > 100 || input.serviceUrls.length > 100) fail();
     const serviceUrls = input.serviceUrls.map((value) => { if (baseUrl(value, true) !== value) fail(); return value; });
-    return Object.freeze({ appId: guid(input.appId), tenantId: guid(input.tenantId), clientSecret: secret(input.clientSecret),
+    return Object.freeze({ appId: guid(input.appId), tenantId: guid(input.tenantId), ...validateBotCredential(input),
       recipientIds: Object.freeze([...new Set(input.recipientIds.map(identity))]), serviceUrls: Object.freeze([...new Set(serviceUrls)]),
       host: input.host, port: input.port });
   } catch { throw new ConfigurationError(); }

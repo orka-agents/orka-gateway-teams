@@ -9,7 +9,8 @@ import { logIngress } from './logger.js';
 import { createOrkaClient } from './client.js';
 import { initializeIngressStore, openIngressStore } from './store.js';
 import { relayOne } from './relay.js';
-import { startReceiver } from './server.js';
+import { prepareReceiver } from './server.js';
+import { assertCredentialSeparation } from '../auth/certificate.js';
 import type { Receiver, ReceiverDependencies } from './server.js';
 import { initializeDeliveryJournal, openDeliveryJournal } from '../delivery/journal.js';
 import type { DeliveryJournal } from '../delivery/types.js';
@@ -21,6 +22,11 @@ export async function startIngressRuntime(config: ServeConfig, dependencies: Rec
   if (!tlsVerificationEnabled()) throw new ConfigurationError();
   const receiverConfig = validateReceiverConfig(config.receiver);
   const outbound = config.outbound === undefined ? undefined : validateOutboundConfig(config.outbound, config.dbPath, config.bearerToken, receiverConfig);
+  try {
+    const databases = [config.dbPath, ...(outbound ? [outbound.dbPath, `${outbound.dbPath}.owner.sqlite`] : [])];
+    assertCredentialSeparation(receiverConfig, databases.flatMap((path) => [path, `${path}-journal`, `${path}-wal`, `${path}-shm`]));
+  } catch { throw new ConfigurationError(); }
+  const prepared = prepareReceiver(receiverConfig, dependencies);
   const client = createOrkaClient(config.scope, { bearerToken: config.bearerToken,
     ...(config.caFile === undefined ? {} : { ca: readCaBundle(config.caFile) }) });
   const store = openIngressStore(config.dbPath, config.scope, { policy: config.policy });
@@ -29,8 +35,8 @@ export async function startIngressRuntime(config: ServeConfig, dependencies: Rec
   try {
     // Own both stores before binding either listener. Never reopen the exclusive inbox for routes.
     if (outbound) journal = openDeliveryJournal(outbound.dbPath, journalScope);
-    receiver = await startReceiver(receiverConfig, outbound ? { scope: store.scope,
-      admit: (event, route) => ready ? store.admit(event, route) : { kind: 'full' } } : store, dependencies,
+    receiver = await prepared.start(outbound ? { scope: store.scope,
+      admit: (event, route) => ready ? store.admit(event, route) : { kind: 'full' } } : store,
       journal === undefined ? undefined : { journal, getRoute: (key) => store.getRoute(key) });
     if (outbound) api = await startOutboundServer(outbound, receiver.outbound!, journalScope, () => ready);
     ready = true;

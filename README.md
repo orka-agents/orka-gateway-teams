@@ -48,7 +48,14 @@ operator-supplied icons and the final Teams ZIP under ignored `bin/`.
 Build with `npm ci && npm run build`. Node 24 is required (`node:sqlite` currently
 emits an experimental warning). Configure through environment variables; the CLI
 does not automatically load `.env`. Never put credentials on command lines, in
-source, or in committed files. Use a secret manager/Kubernetes Secrets for serve.
+source, or in committed files. Use an approved secret manager for serve; the
+shipped Kubernetes assets use Kubernetes Secrets in default client-secret mode.
+
+Certificate mode supports host/Docker serve and setup capture. See
+[certificate authentication](docs/certificate-auth.md) for strict private-file
+ownership, read-only mounts, rotation, scoped MSAL authentication, and the **not
+provided/verified** Kubernetes private-copy overlay. There is no implicit managed
+identity or federation fallback; local certificate validation is not tenant acceptance.
 
 ### Required configuration
 
@@ -59,13 +66,18 @@ source, or in committed files. Use a secret manager/Kubernetes Secrets for serve
 | `ORKA_BASE_URL` | HTTPS base URL, including any installation base path |
 | `ORKA_GATEWAY_NAMESPACE`, `ORKA_GATEWAY_NAME` | Stable target Gateway |
 | `INGRESS_DB` | Absolute new/existing ingress DB path; existing private parent directory |
-| `TEAMS_CLIENT_SECRET` | Required for serve; no implicit managed identity fallback |
+| `TEAMS_CLIENT_SECRET` | Required in default/explicit `client-secret` mode; forbidden in certificate mode |
+| `TEAMS_CREDENTIAL_MODE` | Optional `client-secret` (default), or explicit `certificate` |
+| `TEAMS_CERTIFICATE_FILE`, `TEAMS_PRIVATE_KEY_FILE` | Required only in certificate mode; private matching PEM pair, absent in secret mode |
 | `ORKA_BEARER_TOKEN` | Required adapter-to-Orka bearer for ingress POST only |
 | `TEAMS_RECIPIENT_IDS` | Required JSON array of exact allowed bot recipient IDs |
 | `TEAMS_SERVICE_URLS` | Required JSON array of exact allowed HTTPS service base URLs |
 
 The first five rows (including both Gateway fields) suffice for `init`. Serve
-requires all rows. Lists contain 1–100 explicit entries; no wildcards, first-request
+requires all required noncredential settings and exactly one credential set:
+`TEAMS_CLIENT_SECRET` for default/explicit client-secret mode, or both PEM file
+settings with explicit `TEAMS_CREDENTIAL_MODE=certificate`. Optional settings remain
+optional. Lists contain 1–100 explicit entries; no wildcards, first-request
 learning, or inferred `28:` prefix. Obtain the bot recipient IDs and public-cloud
 service URLs from trusted deployment configuration or operator-reviewed
 [authenticated setup capture](docs/setup-capture.md), never unverified requests.
