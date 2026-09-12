@@ -356,7 +356,10 @@ performed or permissions established by this repository**.
    recommends stronger credentials. [Explicit certificate authentication](certificate-auth.md)
    is available for host/Docker, with separate approval/public-certificate registration.
    Kubernetes requires an operator-reviewed private-copy overlay; packaging does
-   not make a security exception. Managed identity/federation are not implemented.
+   not make a security exception. [Explicit managed-identity federation](managed-identity-auth.md)
+   requires a qualified Azure Linux VM/ACI IMDS host with a user-assigned managed
+   identity attached, plus a federated credential on the existing application. No Kubernetes overlay
+   is supplied for that mode.
 2. Per [bot settings][bot-settings], set the Azure Bot Configuration messaging
    endpoint to the operator's public HTTPS URL ending `/api/messages`. Per
    [Connect to Teams][connect-teams], configure its Microsoft Teams channel for
