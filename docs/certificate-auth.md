@@ -146,14 +146,14 @@ an arbitrary projection, CSI driver or readiness result satisfies these rules.
 
 Normal full mode lazily creates one pinned MSAL 5.6.0 confidential client. MSAL
 signs PS256 assertions using the computed SHA-256 DER thumbprint (`x5t#S256`) and
-owns the in-memory cache. The public SDK `App.token(scope, tenantId?)` callback
-allows only `https://api.botframework.com/.default` (or a singleton array) and the
+owns the in-memory cache. The Teams SDK's public `token` constructor option supplies
+a `(scope, tenantId?)` callback that allows only `https://api.botframework.com/.default` (or a singleton array) and the
 configured tenant; no Graph or caller-selected authority is accepted.
 
 Bundled public metadata and explicit `DisableMsalForceRegion` avoid discovery and
 ambient region routing. Only a POST to the fixed public tenant token endpoint is
 permitted: native verified HTTPS, no connection pool/proxy/redirect/retry, 5-second
-overall budget, 64 KiB response/request and 16 KiB header bounds. The SDK-generated
+overall budget, 64 KiB response/request and 16 KiB header bounds. The MSAL-generated
 correlation query is checked and removed before native I/O. Bounded UTF-8 JSON
 OAuth success, bearer/JWT shape and expiry are checked before MSAL caching; returned
 and cached expiry is checked again. All MSAL logs and raw transport errors are
