@@ -32,6 +32,20 @@ test('explicit federation parses both commands structurally and freezes canonica
   }
 });
 
+for (const header of ['', 'synthetic-unused-aci-header']) test(`ACI header ${header ? 'present' : 'empty'} is unused by parsers and direct validation`, (t) => {
+  const before = process.env.IDENTITY_HEADER;
+  t.after(() => { if (before === undefined) delete process.env.IDENTITY_HEADER; else process.env.IDENTITY_HEADER = before; });
+  process.env.IDENTITY_HEADER = header;
+  for (const result of [parseConfig({ ...env, ...runtime, IDENTITY_HEADER: header }, 'serve').receiver,
+    parseSetupConfig({ ...env, ...setup, IDENTITY_HEADER: header }), validateReceiverConfig(direct()),
+    validateSetupConfig({ ...direct(), challengeFile: setup.SETUP_CHALLENGE_FILE, captureFile: setup.SETUP_CAPTURE_FILE, timeoutMs: 1000 })]) {
+    assert.equal(result.credentialMode, identity.credentialMode);
+    assert.equal(Object.hasOwn(result, 'IDENTITY_HEADER'), false);
+    if (header) assert.equal(JSON.stringify(result).includes(header), false);
+  }
+  assert.equal(process.env.IDENTITY_HEADER === header, true);
+});
+
 for (const [name, change] of [
   ['implicit', { TEAMS_CREDENTIAL_MODE: undefined }], ['unknown', { TEAMS_CREDENTIAL_MODE: 'managed-identity' }],
   ['empty mode', { TEAMS_CREDENTIAL_MODE: '' }], ['missing client', { TEAMS_MANAGED_IDENTITY_CLIENT_ID: undefined }],
@@ -41,11 +55,11 @@ for (const [name, change] of [
   ['secret', { TEAMS_CLIENT_SECRET: 'synthetic' }], ['empty secret', { TEAMS_CLIENT_SECRET: '' }],
   ['certificate', { TEAMS_CERTIFICATE_FILE: '/private/certificate.crt' }], ['empty certificate', { TEAMS_CERTIFICATE_FILE: '' }],
   ['key', { TEAMS_PRIVATE_KEY_FILE: '/private/key.pem' }], ['empty key', { TEAMS_PRIVATE_KEY_FILE: '' }],
-  ...['CLIENT_SECRET', 'MANAGED_IDENTITY_CLIENT_ID', 'IDENTITY_ENDPOINT', 'IDENTITY_HEADER', 'MSI_ENDPOINT', 'MSI_SECRET', 'AZURE_FEDERATED_TOKEN_FILE']
+  ...['CLIENT_SECRET', 'MANAGED_IDENTITY_CLIENT_ID', 'IDENTITY_ENDPOINT', 'MSI_ENDPOINT', 'MSI_SECRET', 'AZURE_FEDERATED_TOKEN_FILE']
     .map((name) => [name, { [name]: '' }] as const),
 ] as const) test(`federation both commands reject ${name}`, () => {
-  assert.throws(() => parseConfig({ ...env, ...runtime, ...change }, 'serve'), { message: 'Invalid ingress configuration' });
-  assert.throws(() => parseSetupConfig({ ...env, ...setup, ...change }), { message: 'Invalid setup configuration' });
+  assert.throws(() => parseConfig({ ...env, ...runtime, IDENTITY_HEADER: 'synthetic-unused-aci-header', ...change }, 'serve'), { message: 'Invalid ingress configuration' });
+  assert.throws(() => parseSetupConfig({ ...env, ...setup, IDENTITY_HEADER: 'synthetic-unused-aci-header', ...change }), { message: 'Invalid setup configuration' });
 });
 
 for (const mode of [undefined, 'client-secret', 'certificate']) for (const field of ['TEAMS_MANAGED_IDENTITY_CLIENT_ID', 'TEAMS_MANAGED_IDENTITY_PRINCIPAL_ID']) {
@@ -68,7 +82,7 @@ test('direct MI callers reject mixed credentials and malformed identity pairs, w
   assert.ok(isDeepStrictEqual(validateReceiverConfig(receiverConfig), receiverConfig));
 });
 
-for (const name of ['CLIENT_SECRET', 'MANAGED_IDENTITY_CLIENT_ID', 'IDENTITY_ENDPOINT', 'IDENTITY_HEADER', 'MSI_ENDPOINT', 'MSI_SECRET', 'AZURE_FEDERATED_TOKEN_FILE']) {
+for (const name of ['CLIENT_SECRET', 'MANAGED_IDENTITY_CLIENT_ID', 'IDENTITY_ENDPOINT', 'MSI_ENDPOINT', 'MSI_SECRET', 'AZURE_FEDERATED_TOKEN_FILE']) {
   test(`direct MI validates ambient ${name} without parser mutation`, (t) => {
     const before = process.env[name]; t.after(() => { if (before === undefined) delete process.env[name]; else process.env[name] = before; });
     process.env[name] = '';

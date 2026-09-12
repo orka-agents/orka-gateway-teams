@@ -50,7 +50,8 @@ export function assertCertificateEnvironment(env: NodeJS.ProcessEnv = process.en
 /** Only the fixed Linux IMDS contract is supported, never another endpoint or token file. */
 export function assertManagedIdentityEnvironment(env: NodeJS.ProcessEnv = process.env): void {
   assertCertificateEnvironment(env);
-  if (['IDENTITY_ENDPOINT', 'IDENTITY_HEADER', 'MSI_ENDPOINT', 'MSI_SECRET', 'AZURE_FEDERATED_TOKEN_FILE'].some((key) => env[key] !== undefined)) fail();
+  // Linux ACI injects IDENTITY_HEADER even for fixed IMDS; its value is never used or forwarded.
+  if (['IDENTITY_ENDPOINT', 'MSI_ENDPOINT', 'MSI_SECRET', 'AZURE_FEDERATED_TOKEN_FILE'].some((key) => env[key] !== undefined)) fail();
 }
 
 /** Check the public SDK selection, not private TokenManager implementation state. */

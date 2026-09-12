@@ -53,9 +53,12 @@ reject the two `TEAMS_MANAGED_IDENTITY_*` variables, including empty values.
 
 This mode also rejects the SDK's ambient `CLIENT_SECRET` and
 `MANAGED_IDENTITY_CLIENT_ID`, and alternative-platform settings
-`IDENTITY_ENDPOINT`, `IDENTITY_HEADER`, `MSI_ENDPOINT`, `MSI_SECRET` and
-`AZURE_FEDERATED_TOKEN_FILE`, even when empty. The application does not clear them
-or infer another authentication method. Use a clean approved environment.
+`IDENTITY_ENDPOINT`, `MSI_ENDPOINT`, `MSI_SECRET` and `AZURE_FEDERATED_TOKEN_FILE`,
+even when empty. The application does not clear them or infer another authentication
+method. Linux ACI also injects `IDENTITY_HEADER` without an alternative endpoint;
+that variable is tolerated, left untouched, and never read into configuration or
+forwarded to IMDS, Entra or Teams. It does not select credentials or relax any of
+the other checks. Use an approved environment.
 
 For illustration only, these are **synthetic**, nonfunctional identities:
 
