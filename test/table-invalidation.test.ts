@@ -6,6 +6,15 @@ import { deferred, eventually, stamp, syntheticToken, tableBinding, tableService
 const code = (e: unknown) => e instanceof Error && 'code' in e && e.code === 'unresolved' && !('cause' in e);
 const input = { input: Buffer.alloc(0), keys: [] };
 const plan = () => ({ state: Buffer.from('state'), result: Buffer.from('result'), actions: [] });
+for (const poisoned of [false, true]) test(`late invalidation preserves terminal closed state after poisoned=${poisoned} close`, async t => {
+  const s = await tableService(t); const k = createTableKernel(tableBinding, s.dependencies);
+  await k.initialize(); await k.acquire(); await k.scan(); if (poisoned) k.invalidate();
+  const close = k.close(); if (poisoned) await assert.rejects(close, code); else await close;
+  const before = k.status(); assert.equal(before.lifecycle, 'closed'); const requests = s.stats.requests;
+  k.invalidate(); assert.deepEqual(k.status(), before); assert.equal(k.close(), close);
+  if (poisoned) await assert.rejects(k.close(), code); else await k.close();
+  assert.equal(s.stats.requests, requests); assert.equal(s.stats.requests, s.stats.socketCloses);
+});
 test('existing poisoned-kernel diagnostic reads remain available without write authority', async t => {
   const s = await tableService(t); const k = createTableKernel(tableBinding, s.dependencies);
   await k.initialize(); await k.acquire(); await k.scan();

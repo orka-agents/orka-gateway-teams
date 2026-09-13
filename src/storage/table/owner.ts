@@ -155,7 +155,9 @@ class TableKernel {
     });
   }
   /** Irreversible domain-audit failure. Completion cannot restore authority; close still drains. */
-  invalidate(): void { this.invalidated = true; this.lifecycle = 'poisoned'; this.writePermission.abort(); }
+  invalidate(): void {
+    this.invalidated = true; if (this.lifecycle !== 'closed') this.lifecycle = 'poisoned'; this.writePermission.abort();
+  }
   close(): Promise<void> {
     if (this.closing) return this.closing;
     // Set the intake fence before cancelling queued work or waiting on active promises.
