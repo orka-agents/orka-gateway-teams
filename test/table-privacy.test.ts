@@ -12,6 +12,7 @@ import { finalDelivery } from './fixtures/outgoing.js';
 import { OwnedTableClient } from '../src/storage/table/client.js';
 import { bindTable } from '../src/storage/table/codec.js';
 import { context, tableBinding, tableService, syntheticToken } from './support/table-service.js';
+import { budget as auditBudget, code as auditCode, visitor as auditVisitor } from './support/owned-audit.js';
 
 class Context implements TracingContext {
   constructor(readonly values = new Map<symbol, unknown>()) {}
@@ -79,13 +80,35 @@ test('active recording instrumentation and verbose logs contain no private raw, 
   await k.initialize(); await k.acquire(); await k.scan();
   await k.mutate({ input: Buffer.from(marker), keys: [] }, () => ({ state: Buffer.from(marker), result: Buffer.from(marker),
     actions: [{ kind: 'create', key: { type: 'delivery', id: marker }, payload: Buffer.from(marker) }] }));
-  await k.scan(); await k.read({ type: 'delivery', id: marker }); await k.close();
+  await k.scan(); await k.auditOwned({ ...auditVisitor(), passes: 2 }, auditBudget());
+  await k.read({ type: 'delivery', id: marker }); await k.close();
   const v2 = await tableService(t, 'delivery', 2); const k2 = createTableKernelV2(tableBinding, v2.dependencies);
   await k2.initialize(); await k2.acquire(); await k2.scan();
   await k2.mutate({ input: Buffer.from(marker), keys: [] }, () => ({ state: Buffer.from(marker), result: Buffer.from(marker),
     actions: [{ kind: 'create', key: { type: 'delivery', id: marker }, payload: Buffer.from(marker) }] }));
-  await k2.scan(); await k2.read({ type: 'delivery', id: marker }); await k2.close();
+  await k2.scan(); await k2.auditOwned({ ...auditVisitor(), passes: 2 }, auditBudget());
+  await k2.read({ type: 'delivery', id: marker }); await k2.close();
   assert.equal(v2.rows.get('M')?.V, 2);
+  for (const format of [1, 2] as const) for (const fault of ['cursor', 'raw', 'callback', 'budget', 'transport'] as const) {
+    const service = await tableService(t, 'delivery', format);
+    const kernel = (format === 1 ? createTableKernel : createTableKernelV2)(tableBinding, service.dependencies);
+    await kernel.initialize(); await kernel.acquire(); let pages = 0;
+    service.controls.hook = e => {
+      if (e.path.includes(",RowKey='M'")) { e.reply(); return; } pages++;
+      if (fault === 'cursor' && pages === 1) {
+        e.res.writeHead(200, { 'content-type': 'application/json', 'x-ms-continuation-nextpartitionkey': marker, 'x-ms-continuation-nextrowkey': marker });
+        e.res.end('{"value":[]}');
+      } else if (fault === 'raw' || fault === 'budget' || fault === 'transport') {
+        e.res.writeHead(fault === 'transport' ? 503 : 200, { 'content-type': 'application/json', 'x-ms-error-code': marker });
+        e.res.end(JSON.stringify({ unknown: marker }));
+      } else { e.res.writeHead(200, { 'content-type': 'application/json' }); e.res.end(JSON.stringify({ value: [service.rows.get('M')] })); }
+    };
+    const audit = kernel.auditOwned({ ...auditVisitor(), record() { if (fault === 'callback') throw hidden; } }, auditBudget({ maxPageBytes: fault === 'budget' ? 1 : 1048576 }));
+    if (fault === 'cursor') { await audit; assert.equal(pages, 2); }
+    else await assert.rejects(audit, e => { inspect(e); return auditCode(fault === 'raw' || fault === 'callback' ? 'unresolved' : fault === 'budget' ? 'incomplete' : 'unavailable')(e); });
+    delete service.controls.hook;
+    if (fault === 'raw' || fault === 'callback') await assert.rejects(kernel.close(), auditCode('unresolved')); else await kernel.close();
+  }
   // Repeat the active instrumentation exercise through the production delivery
   // journal. Private request fields must not reach any wire entity or M result.
   const delivery = await tableService(t); let checkedActions = 0;

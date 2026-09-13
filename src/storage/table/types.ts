@@ -43,6 +43,22 @@ export interface PlannerView { input: Buffer; state: Buffer; records: readonly (
 export type Planner = (view: PlannerView) => Plan;
 export type MutationResult = { kind: 'committed'; result: Buffer } | { kind: 'cancelled' };
 export interface CallOptions { signal?: AbortSignal; timeoutMs?: number }
+/** Explicit operational completion budgets, not a domain capacity or RSS promise. */
+export interface OwnedAuditBudget {
+  maxPages: number; maxPageBytes: number; maxDurationMs: number; maxTrackingBytes: number;
+}
+export interface OwnedAuditOptions { signal?: AbortSignal; requestTimeoutMs?: number }
+export interface OwnedAuditVisitor {
+  passes: 1 | 2;
+  record(pass: 1 | 2, record: Readonly<StoredRecord>): void;
+  endPass(pass: 1 | 2): void;
+  finalize(): void;
+}
+export interface OwnedAuditVisitorV2 extends Omit<OwnedAuditVisitor, 'record'> {
+  record(pass: 1 | 2, record: Readonly<StoredRecordV2>): void;
+}
+/** Only this exact thrown value marks trusted domain-allocator exhaustion. */
+export const OWNED_AUDIT_BUDGET_EXHAUSTED: unique symbol = Symbol('owned-audit-budget-exhausted');
 export interface TableDependencies {
   token: (scope: 'https://storage.azure.com/.default', context: { signal: AbortSignal; deadline: number }) => Promise<string>;
   /** Trusted native I/O seam for library tests, never an endpoint/TLS configuration option. */

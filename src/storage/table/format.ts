@@ -1,6 +1,6 @@
 import { decodePage, decodePageV2, decodeRecord, decodeRecordV2, encodeExit, encodeRecord, encodeRecordV2, fail,
   initializationDigest, initializationDigestV2, metadata, metadataV2 } from './codec.js';
-import type { BoundTable, Metadata, MetadataV2, Plan, PlannerView, PlannerViewV2, StoredRecord, StoredRecordV2 } from './types.js';
+import type { BoundTable, Metadata, MetadataV2, OwnedAuditVisitor, OwnedAuditVisitorV2, Plan, PlannerView, PlannerViewV2, StoredRecord, StoredRecordV2 } from './types.js';
 
 // Closed internal selection only. Public factories pin this once; neither binding,
 // limits nor persisted bytes select a format or authorize a fallback.
@@ -9,6 +9,7 @@ export type AnyMetadata = Metadata | MetadataV2;
 export type MetadataFor<F extends MetadataFormat> = F extends 1 ? Metadata : MetadataV2;
 export type AnyStoredRecord = StoredRecord | StoredRecordV2;
 export type StoredFor<F extends MetadataFormat> = F extends 1 ? StoredRecord : StoredRecordV2;
+export type AuditVisitorFor<F extends MetadataFormat> = F extends 1 ? OwnedAuditVisitor : OwnedAuditVisitorV2;
 export type PlannerFor<F extends MetadataFormat> = (view: F extends 1 ? PlannerView : PlannerViewV2) => Plan;
 export function initDigest(format: MetadataFormat, binding: BoundTable, id: string): string {
   return (format === 1 ? initializationDigest : initializationDigestV2)(binding, id);
