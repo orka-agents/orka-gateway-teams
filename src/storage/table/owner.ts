@@ -179,6 +179,7 @@ class TableKernel {
       } catch { error = new TableError('unresolved'); }
       this.lifecycle = 'closing';
       try { await this.client.close(); } catch { error ??= new TableError('unavailable'); }
+      if (this.invalidated) error = new TableError('unresolved');
       this.lifecycle = 'closed'; if (error) throw error;
     });
     for (const job of [...this.queue]) this.cancel(job, new TableError('not-submitted'));

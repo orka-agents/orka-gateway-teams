@@ -71,6 +71,24 @@ for (const boundary of ['initialize', 'acquire', 'mutate', 'release', 'barrier']
   });
 }
 
+test('invalidation during committed release readback rejects close after drain without denying the release', async t => {
+  const s = await tableService(t); const k = createTableKernel(tableBinding, s.dependencies);
+  await k.initialize(); await k.acquire(); await k.scan();
+  const gate = deferred(); let held = false; let finished = false;
+  s.controls.hook = async e => {
+    if (!held && e.req.method === 'GET' && s.rows.get('M')?.Operation === 'release') { held = true; await gate.promise; }
+    e.reply();
+  };
+  const close = k.close(); assert.equal(k.close(), close);
+  const outcome = close.then(() => 'resolved', e => code(e) ? 'unresolved' : 'other').then(value => { finished = true; return value; });
+  await eventually(() => held); assert.equal(s.rows.get('M')?.Owner, '');
+  k.invalidate(); await new Promise(r => setTimeout(r, 20)); assert.equal(finished, false);
+  gate.resolve(); assert.equal(await outcome, 'unresolved');
+  assert.equal(k.status().lifecycle, 'closed'); assert.equal(k.status().ownership, 'none');
+  assert.equal(s.rows.get('M')?.Owner, ''); assert.equal(k.close(), close);
+  assert.equal(s.stats.requests, s.stats.requestCloses); assert.equal(s.stats.requests, s.stats.socketCloses);
+});
+
 test('late committed transition cannot restore old-fence authority to poisoned diagnostic reads', async t => {
   const s = await tableService(t); const k = createTableKernel(tableBinding, s.dependencies);
   await k.initialize(); await k.acquire(); await k.scan();
