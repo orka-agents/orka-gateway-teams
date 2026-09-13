@@ -51,16 +51,32 @@ export function wireM(owner = '', epoch = 0): Record<string, unknown> {
 export function mDigest(m: Record<string, unknown>): string {
   return hash(['orka-m-v1', m.Binding, m.InitId, m.InitDigest, m.Owner, Number(m.Epoch), m.Invocation, m.Operation, m.Plan, m.State, m.Result, m.Release]);
 }
-function checkEntity(e: Record<string, unknown>, expectedPartition: string, expectedBinding: Buffer): boolean {
-  if (e.PartitionKey !== expectedPartition || e.V !== 1 || typeof e.RowKey !== 'string') return false;
-  if (e.RowKey === 'M') return e.Digest === mDigest(e) && e.Binding === expectedBinding.toString('base64');
+function checkEntity(e: Record<string, unknown>, expectedPartition: string, expectedBinding: Buffer, metadataFormat: 1 | 2): boolean {
+  if (e.PartitionKey !== expectedPartition || typeof e.RowKey !== 'string' || e.V !== (e.RowKey === 'M' ? metadataFormat : 1)) return false;
+  if (e.RowKey === 'M') {
+    if (metadataFormat === 1) return e.Digest === mDigest(e) && e.Binding === expectedBinding.toString('base64');
+    const allowed = ['PartitionKey', 'RowKey', 'V', 'Digest', 'Binding', 'Binding@odata.type', 'InitId', 'InitDigest', 'Owner', 'Epoch', 'Epoch@odata.type',
+      'Invocation', 'Operation', 'Plan', 'State', 'State@odata.type', 'Result', 'Result@odata.type', 'Exit', 'Exit@odata.type'];
+    if (Object.keys(e).length !== allowed.length || Object.keys(e).some(k => !allowed.includes(k)) || typeof e.Exit !== 'string') return false;
+    const exit = Buffer.from(e.Exit, 'base64');
+    if (exit.length > 1024 || exit.toString('base64') !== e.Exit || e['Exit@odata.type'] !== 'Edm.Binary') return false;
+    if (exit.length) {
+      const x = JSON.parse(exit.toString());
+      const base = { kind: x.kind, oldOwner: x.oldOwner, oldEpoch: x.oldEpoch, invocation: x.invocation };
+      const canonical = x.kind === 'clean-release' ? { ...base, planDigest: x.planDigest } : x.kind === 'operator-recovery' ? { ...base,
+        originalMDigest: x.originalMDigest, planDigest: x.planDigest, domainDispositionDigest: x.domainDispositionDigest, operatorAttestationDigest: x.operatorAttestationDigest } : undefined;
+      if (JSON.stringify(canonical) !== exit.toString()) return false;
+    }
+    return e.Operation !== 'recover' && e.Binding === expectedBinding.toString('base64') && e.InitDigest === hash(['orka-init-v2', e.Binding, e.InitId]) &&
+      e.Digest === hash(['orka-m-v2', e.Binding, e.InitId, e.InitDigest, e.Owner, Number(e.Epoch), e.Invocation, e.Operation, e.Plan, e.State, e.Result, e.Exit]);
+  }
   const chunks = Array.from({ length: Number(e.Count) }, (_, i) => Buffer.from(String(e[`B${i}`]), 'base64'));
   const payload = Buffer.concat(chunks);
   return e.RowKey === `${e.T}_${Buffer.from(String(e.Id)).toString('base64url')}` && payload.length === e.Length &&
     chunks.every((b, i) => b.length <= 65536 && b.toString('base64') === e[`B${i}`] && e[`B${i}@odata.type`] === 'Edm.Binary') &&
     e.Digest === hash(['orka-data-v1', expectedBinding.toString('base64'), e.T, e.Id, payload.toString('base64')]);
 }
-export async function tableService(t: TestContext, kind: 'delivery' | 'ingress' = 'delivery') {
+export async function tableService(t: TestContext, kind: 'delivery' | 'ingress' = 'delivery', metadataFormat: 1 | 2 = 1) {
   const partition = kind === 'delivery' ? 'v1_delivery_c3RhYmxl' : 'v1_ingress_c3RhYmxl';
   const expectedBinding = kind === 'delivery' ? boundBytes : Buffer.from(JSON.stringify(['orka-table-v1', 'example123', 'journal', 'ingress', 'stable',
     ['App', 'Tenant', 'https://orka.example.invalid/', 'gateway', 'teams']]));
@@ -90,7 +106,7 @@ export async function tableService(t: TestContext, kind: 'delivery' | 'ingress' 
           }
         } else actions.push({ method: req.method!, ...(req.headers['if-match'] ? { etag: String(req.headers['if-match']) } : {}), entity: JSON.parse(body.toString()) });
         stats.lastActions = actions.length;
-        if (!actions.length || actions.length > 100 || actions.filter(a => a.entity.RowKey === 'M').length !== 1 || !actions.every(a => checkEntity(a.entity, partition, expectedBinding))) stats.violation = true;
+        if (!actions.length || actions.length > 100 || actions.filter(a => a.entity.RowKey === 'M').length !== 1 || !actions.every(a => checkEntity(a.entity, partition, expectedBinding, metadataFormat))) stats.violation = true;
       }
       let committed: boolean | undefined;
       const commit = () => {

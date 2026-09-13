@@ -12,6 +12,10 @@ lease, takeover, migration, deletion, pruning or hosting integration here.
 `createTableKernel(binding, dependencies, limits?)` constructs a handle
 **synchronously, without I/O**. Keep that handle even if a later operation rejects.
 An ambiguous acquisition must not disappear behind a rejected asynchronous opener.
+`createTableKernelV2(binding, dependencies, limits?)` provides the same operations
+with explicitly pinned metadata format 2. The original factory remains V1; neither
+factory detects, upgrades or falls back to the other's metadata format. Format is
+not a binding or limits option, and both use the same partition identity.
 
 The binding is one of:
 
@@ -92,13 +96,50 @@ with typed original ID, length, chunk count, digest and contiguous B0..B3 chunks
 Digests cover binding and **all application fields**, excluding service-generated
 Timestamp, ETags and informational metadata annotations.
 
-M decoding also enforces kernel lifecycle relationships, not just field types and
+V1 M decoding also enforces kernel lifecycle relationships, not just field types and
 digests. Epoch zero is empty genesis or a cancelled-first-acquire barrier; an
 initialize operation must retain its exact initialization invocation/plan. Owned
 positive epochs permit acquire/mutate/barrier, with no receipt at epoch one and an
 immediately preceding, different-owner release receipt thereafter. Owner-empty
 positive epochs permit only release/barrier with a same-epoch receipt. Release
 invocation/plan must match that receipt; barriers retain prior state and receipt.
+
+### Opt-in V2 metadata foundation
+
+Only M becomes `V=2`. It replaces Binary `Release` with Binary `Exit`, and uses
+`orka-init-v2` / `orka-m-v2` initialization/metadata digest domains. Binding, row
+keys and all data envelopes remain V1. Mixed Release/Exit fields are rejected.
+Existing V1 types, bytes, decoder rules and default factory behavior are unchanged.
+
+V2 exports `MetadataV2`, `StoredRecordV2`, `PlannerViewV2`, `PlannerV2` and the tagged
+`ExitReceipt` union. `MetadataV2.exit` is `undefined` before the first exit; otherwise
+it is one of these closed shapes (shown in exact wire property order):
+
+- `{kind: 'clean-release', oldOwner, oldEpoch, invocation, planDigest}`
+- `{kind: 'operator-recovery', oldOwner, oldEpoch, invocation, originalMDigest,
+  planDigest, domainDispositionDigest, operatorAttestationDigest}`
+
+Exit encoding is canonical UTF-8 JSON in canonical Binary, at most 1,024 decoded
+bytes. UUIDv4, positive safe epochs, lowercase SHA256 digests, exact property order
+and JSON roundtrip are required. No raw attestation or operator identity is stored.
+
+Genesis and first acquisition have no Exit. Later acquisitions require a preceding
+same-initialization exit at E−1 with a different owner, and preserve it exactly.
+Owned mutations/barriers preserve Exit. Owner-empty release requires a matching
+same-epoch clean receipt; a persisted `recover` requires a matching same-epoch
+recovery receipt. An unowned positive barrier preserves either exit kind at E.
+Normal acquisition still refuses any occupied owner and epoch overflow.
+
+Only a matching **clean** receipt can prove a late normal close after successor
+acquisition. A recovery tag cannot satisfy that proof even when its owner, epoch,
+invocation and plan fields match. Superseded proof remains unresolved. The same
+bounded scan, queue, exact-ETag barriers, invalidation and actual drain apply.
+
+Recovery-shaped metadata is supported for reading/validation and subsequent normal
+acquisition only. The normal transport refuses `recover` writes. This is **not an
+operator recovery implementation**: no recovery handle, `auditOwned`, domain
+recovery audit/result, V2 delivery wrapper, inbox or runtime selector is provided.
+The existing delivery journal below remains V1; it is not operator-recoverable.
 
 Reads request `application/json;odata=fullmetadata`. The raw decoder runs **before
 SDK normalization**, detecting fatal UTF-8/BOM errors, decoded duplicate JSON keys,
@@ -170,7 +211,7 @@ a fixture, nor an orchestration stop acknowledgement proves physical termination
 | Retained caller input/key bytes | 32 MiB; configurable from 1 byte to 256 MiB |
 | One caller input / read-key list | 256 KiB / 99 distinct typed keys |
 | Domain state / result | 64 KiB each |
-| Binding / release receipt | 16 KiB / 1 KiB |
+| Binding / release or Exit receipt | 16 KiB / 1 KiB |
 | Data payload | 4 contiguous binary chunks, each <=64 KiB, total <=256 KiB |
 | Transaction | <=100 actions **including exactly one M**; one partition, distinct rows |
 | Multipart request | Conservative pre-SDK budget plus <=4 MiB actual serialized UTF-8 bytes before auth/native write |

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { identity, validateScope as deliveryScope } from '../../delivery/identity.js';
 import { validateScope as ingressScope } from '../../ingress/codec.js';
 import { MAX_PAYLOAD_BYTES, MAX_RESPONSE_BYTES, TableError } from './types.js';
-import type { BoundTable, DataKey, DataRecord, Metadata, RecordValue, StoredRecord, TableBinding } from './types.js';
+import type { BoundTable, DataKey, DataRecord, ExitReceipt, Metadata, MetadataV2, RecordValue, RecordValueV2, StoredRecord, StoredRecordV2, TableBinding } from './types.js';
 
 export function fail(): never { throw new TableError('invalid-input'); }
 export function object(value: unknown, keys?: readonly string[]): Record<string, unknown> {
@@ -171,16 +171,19 @@ export function decodeObject(binding: BoundTable, input: unknown, row?: string, 
       result = data(binding, key, Buffer.concat(chunks));
     }
     if (hex(v.Digest) !== result.digest) fail();
-    const serviceNames = ['odata.metadata', 'odata.id', 'odata.editLink', 'odata.editlink', 'odata.type', 'odata.etag'];
-    for (const key of Object.keys(v)) {
-      if (serviceNames.includes(key)) continue;
-      if (key.endsWith('@odata.type')) {
-        const property = key.slice(0, -11); if (!Object.hasOwn(allowed, property) || allowed[property] !== v[key]) fail();
-      } else if (!Object.hasOwn(allowed, key)) fail();
-    }
-    for (const [key, type] of Object.entries(allowed)) if (['Edm.Binary', 'Edm.Int64'].includes(type) && v[`${key}@odata.type`] !== type) fail();
+    checkProperties(v, allowed);
     return { row: v.RowKey, ...service, value: result };
   } catch { throw new TableError('corrupt'); }
+}
+function checkProperties(v: Record<string, unknown>, allowed: Record<string, string>): void {
+  const serviceNames = ['odata.metadata', 'odata.id', 'odata.editLink', 'odata.editlink', 'odata.type', 'odata.etag'];
+  for (const key of Object.keys(v)) {
+    if (serviceNames.includes(key)) continue;
+    if (key.endsWith('@odata.type')) {
+      const property = key.slice(0, -11); if (!Object.hasOwn(allowed, property) || allowed[property] !== v[key]) fail();
+    } else if (!Object.hasOwn(allowed, key)) fail();
+  }
+  for (const [key, type] of Object.entries(allowed)) if (['Edm.Binary', 'Edm.Int64'].includes(type) && v[`${key}@odata.type`] !== type) fail();
 }
 export function decodeRecord(binding: BoundTable, body: Uint8Array, row?: string, headerETag?: string): StoredRecord {
   return decodeObject(binding, rawJSON(body), row, headerETag);
@@ -207,4 +210,88 @@ export function encodeRecord(binding: BoundTable, value: RecordValue): Record<st
     for (let i = 0; i < Math.ceil(value.payload.length / 65536); i++) entity[`B${i}`] = bin(value.payload.subarray(i * 65536, (i + 1) * 65536));
   }
   return entity;
+}
+
+/** V2 receipts are typed values with one canonical wire representation. */
+export function encodeExit(input: ExitReceipt | undefined): Buffer {
+  if (input === undefined) return Buffer.alloc(0);
+  const v = object(input);
+  const common = ['kind', 'oldOwner', 'oldEpoch', 'invocation'];
+  const keys = v.kind === 'clean-release' ? [...common, 'planDigest'] :
+    v.kind === 'operator-recovery' ? [...common, 'originalMDigest', 'planDigest', 'domainDispositionDigest', 'operatorAttestationDigest'] : fail();
+  object(v, keys);
+  const base = { kind: v.kind, oldOwner: uuid(v.oldOwner), oldEpoch: integer(v.oldEpoch, 1, Number.MAX_SAFE_INTEGER), invocation: uuid(v.invocation) };
+  const receipt = v.kind === 'clean-release' ? { ...base, planDigest: hex(v.planDigest) } : { ...base,
+    originalMDigest: hex(v.originalMDigest), planDigest: hex(v.planDigest), domainDispositionDigest: hex(v.domainDispositionDigest),
+    operatorAttestationDigest: hex(v.operatorAttestationDigest) };
+  return bytes(Buffer.from(JSON.stringify(receipt)), 1024);
+}
+export function decodeExit(input: Uint8Array): ExitReceipt | undefined {
+  try {
+    const raw = bytes(input, 1024); if (!raw.length) return undefined;
+    const receipt = rawJSON(raw) as ExitReceipt;
+    if (!encodeExit(receipt).equals(raw)) fail(); return receipt;
+  } catch { throw new TableError('corrupt'); }
+}
+export function initializationDigestV2(binding: BoundTable, id: string): string { return digest(['orka-init-v2', binding.bytes.toString('base64'), id]); }
+export function metadataV2(binding: BoundTable, value: Omit<MetadataV2, 'digest' | 'kind'>): MetadataV2 {
+  const m = { kind: 'metadata' as const, ...value };
+  return { ...m, digest: digest(['orka-m-v2', binding.bytes.toString('base64'), m.initId, m.initDigest, m.owner, m.epoch,
+    m.invocation, m.operation, m.plan, m.state.toString('base64'), m.result.toString('base64'), encodeExit(m.exit).toString('base64')]) };
+}
+export function decodeObjectV2(binding: BoundTable, input: unknown, row?: string, headerETag?: string): StoredRecordV2 {
+  try {
+    const v = object(input);
+    // Data retains the exact V1 decoder, but M can never fall back to it.
+    if (v.RowKey !== 'M') {
+      const record = decodeObject(binding, v, row, headerETag);
+      if (record.value.kind !== 'data') fail(); return { ...record, value: record.value };
+    }
+    const service = serviceFields(v);
+    if (v.PartitionKey !== binding.partition || (row !== undefined && row !== 'M') ||
+        (headerETag !== undefined && etag(headerETag) !== service.etag) || v.V !== 2) fail();
+    checkProperties(v, { PartitionKey: 'Edm.String', RowKey: 'Edm.String', Timestamp: 'Edm.DateTime', V: 'Edm.Int32', Digest: 'Edm.String',
+      Binding: 'Edm.Binary', InitId: 'Edm.String', InitDigest: 'Edm.String', Owner: 'Edm.String', Epoch: 'Edm.Int64',
+      Invocation: 'Edm.String', Operation: 'Edm.String', Plan: 'Edm.String', State: 'Edm.Binary', Result: 'Edm.Binary', Exit: 'Edm.Binary' });
+    const initId = uuid(v.InitId); const initDigest = hex(v.InitDigest);
+    if (!binary(v.Binding, 16384).equals(binding.bytes) || initializationDigestV2(binding, initId) !== initDigest ||
+        typeof v.Epoch !== 'string' || !/^(?:0|[1-9]\d{0,15})$/u.test(v.Epoch) ||
+        !['initialize', 'acquire', 'mutate', 'barrier', 'release', 'recover'].includes(v.Operation as string)) fail();
+    const result = metadataV2(binding, { initId, initDigest, owner: v.Owner === '' ? '' : uuid(v.Owner), epoch: integer(Number(v.Epoch), 0, Number.MAX_SAFE_INTEGER),
+      invocation: uuid(v.Invocation), operation: v.Operation as MetadataV2['operation'], plan: hex(v.Plan), state: binary(v.State, 65536),
+      result: binary(v.Result, 65536), exit: decodeExit(binary(v.Exit, 1024)) });
+    const exit = result.exit;
+    if (result.epoch === 0) {
+      if (result.owner || exit || result.state.length || result.result.length || !['initialize', 'barrier'].includes(result.operation)) fail();
+    } else if (result.owner) {
+      if (!['acquire', 'mutate', 'barrier'].includes(result.operation) ||
+          (result.epoch === 1 ? exit !== undefined : !exit || exit.oldEpoch !== result.epoch - 1 || exit.oldOwner === result.owner)) fail();
+      if (result.operation === 'acquire' && result.epoch === 1 && (result.state.length || result.result.length)) fail();
+    } else {
+      if (!exit || exit.oldEpoch !== result.epoch || !['release', 'recover', 'barrier'].includes(result.operation)) fail();
+      if (result.operation !== 'barrier' && (exit.kind !== (result.operation === 'release' ? 'clean-release' : 'operator-recovery') ||
+          exit.invocation !== result.invocation || exit.planDigest !== result.plan)) fail();
+    }
+    if (result.operation === 'initialize' && (result.invocation !== result.initId || result.plan !== digest(['initialize', result.initId]))) fail();
+    if (hex(v.Digest) !== result.digest) fail(); return { row: 'M', ...service, value: result };
+  } catch { throw new TableError('corrupt'); }
+}
+export function decodeRecordV2(binding: BoundTable, body: Uint8Array, row?: string, headerETag?: string): StoredRecordV2 {
+  return decodeObjectV2(binding, rawJSON(body), row, headerETag);
+}
+export function decodePageV2(binding: BoundTable, body: Uint8Array): StoredRecordV2[] {
+  try {
+    const page = object(rawJSON(body), ['odata.metadata', 'value']);
+    if (page['odata.metadata'] !== undefined && (typeof page['odata.metadata'] !== 'string' || page['odata.metadata'].length > 4096 ||
+      !/^https?:\/\/[^\s]+$/u.test(page['odata.metadata']))) fail();
+    if (!Array.isArray(page.value) || page.value.length > 1) fail();
+    return page.value.map((v: unknown) => decodeObjectV2(binding, v));
+  } catch { throw new TableError('corrupt'); }
+}
+export function encodeRecordV2(binding: BoundTable, value: RecordValueV2): Record<string, unknown> {
+  if (value.kind === 'data') return encodeRecord(binding, value);
+  const bin = (v: Uint8Array) => ({ type: 'Binary', value: Buffer.from(v).toString('base64') });
+  return { partitionKey: binding.partition, rowKey: 'M', V: 2, Digest: value.digest, Binding: bin(binding.bytes), InitId: value.initId, InitDigest: value.initDigest,
+    Owner: value.owner, Epoch: { type: 'Int64', value: String(value.epoch) }, Invocation: value.invocation, Operation: value.operation,
+    Plan: value.plan, State: bin(value.state), Result: bin(value.result), Exit: bin(encodeExit(value.exit)) };
 }

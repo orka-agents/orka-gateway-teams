@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import { createTableKernel } from '../src/storage/table/owner.js';
-import { deferred, eventually, stamp, syntheticToken, tableBinding, tableService } from './support/table-service.js';
+import { test as nodeTest } from 'node:test';
+import type { TestContext } from 'node:test';
+import { createTableKernel as createV1, createTableKernelV2 as createV2 } from '../src/storage/table/owner.js';
+import { deferred, eventually, stamp, syntheticToken, tableBinding, tableService as service } from './support/table-service.js';
+
+for (const format of [1, 2] as const) {
+const createTableKernel = format === 1 ? createV1 : createV2;
+const tableService = (t: TestContext) => service(t, 'delivery', format);
+const test = (name: string, run: (t: TestContext) => Promise<void>) => nodeTest(`V${format} ${name}`, run);
 
 const code = (e: unknown) => e instanceof Error && 'code' in e && e.code === 'unresolved' && !('cause' in e);
 const input = { input: Buffer.alloc(0), keys: [] };
@@ -138,4 +144,5 @@ for (const boundary of ['idle', 'planner', 'read', 'reconciliation'] as const) {
     assert.equal(s.stats.writes - writes, boundary === 'reconciliation' ? 1 : 0);
     assert.equal(s.stats.requests, s.stats.socketCloses); assert.equal(k.status().pending, 0);
   });
+}
 }
