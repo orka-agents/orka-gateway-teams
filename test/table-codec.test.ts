@@ -162,7 +162,10 @@ test('reachable M lifecycle shapes preserve opaque bytes and receipts across bar
 });
 test('decoded duplicate names, invalid UTF8, BOM and point ETag disagreement fail before projection', () => {
   const b = bindTable(binding); const text = JSON.stringify(fixture());
-  for (const bytes of [Buffer.from(text.replace('{', '{"Id":"item",')), Buffer.from(text.replace('{', '{"\\u0049d":"item",')),
+  // Prefix exactly one extra key; these are duplicate-key inputs, not string sanitizers.
+  const duplicates = ['{"Id":"item",' + text.slice(1), '{"\\u0049d":"item",' + text.slice(1)];
+  for (const duplicate of duplicates) assert.deepEqual(JSON.parse(duplicate), JSON.parse(text));
+  for (const bytes of [...duplicates.map(duplicate => Buffer.from(duplicate)),
     Buffer.concat([Buffer.from([0xff]), Buffer.from(text)]), Buffer.from('\ufeff' + text)]) {
     assert.throws(() => decodeRecord(b, bytes), (e: unknown) => e instanceof Error && e.message === 'Table storage: corrupt');
   }

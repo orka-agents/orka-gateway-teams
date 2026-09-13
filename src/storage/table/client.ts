@@ -120,7 +120,12 @@ export class OwnedTableClient {
             this.fence(request, body, kind);
             response = await this.native(request, body, token, { signal: signal.signal, deadline: context.deadline });
           } finally { clearTimeout(timer); context.signal.removeEventListener('abort', abort); }
-          if (kind.kind !== 'write' && !/^application\/json(?:\s*;[^\r\n]*)?$/iu.test(header(response.headers['content-type']) ?? '')) throw new TableError('corrupt');
+          if (kind.kind !== 'write') {
+            if (response.status !== 200 && !(kind.kind === 'read' && response.status === 404)) throw unavailable();
+            if (!/^application\/json(?:\s*;[^\r\n]*)?$/iu.test(header(response.headers['content-type']) ?? '')) {
+              throw response.status === 200 ? new TableError('corrupt') : unavailable();
+            }
+          }
           consume(response);
           // Raw bytes/ETags/errors never enter SDK normalization or high-level exception spans.
           if (kind.kind === 'write') {

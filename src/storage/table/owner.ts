@@ -186,7 +186,7 @@ class TableKernel {
   }
   private enqueue<T>(size: number, options: CallOptions | undefined, run: (context: WorkContext) => Promise<T>): Promise<T> {
     try {
-      this.capacity(size); if (options) object(options, ['signal', 'timeoutMs']);
+      this.capacity(size); if (options !== undefined) object(options, ['signal', 'timeoutMs']);
       const timeout = integer(options?.timeoutMs ?? this.limits.callTimeoutMs, 1, 300000);
       if (options?.signal !== undefined && !(options.signal instanceof AbortSignal)) fail();
       const signal = options?.signal ?? new AbortController().signal;
