@@ -7,6 +7,8 @@ import { createTracingClient, useInstrumenter } from '@azure/core-tracing';
 import type { Instrumenter, TracingContext } from '@azure/core-tracing';
 import { AzureLogger, getLogLevel, setLogLevel } from '@azure/logger';
 import { createTableKernel } from '../src/storage/table/owner.js';
+import { createTableDeliveryJournal } from '../src/delivery/table-journal.js';
+import { finalDelivery } from './fixtures/outgoing.js';
 import { OwnedTableClient } from '../src/storage/table/client.js';
 import { bindTable } from '../src/storage/table/codec.js';
 import { context, tableBinding, tableService, syntheticToken } from './support/table-service.js';
@@ -78,6 +80,29 @@ test('active recording instrumentation and verbose logs contain no private raw, 
   await k.mutate({ input: Buffer.from(marker), keys: [] }, () => ({ state: Buffer.from(marker), result: Buffer.from(marker),
     actions: [{ kind: 'create', key: { type: 'delivery', id: marker }, payload: Buffer.from(marker) }] }));
   await k.scan(); await k.read({ type: 'delivery', id: marker }); await k.close();
+  // Repeat the active instrumentation exercise through the production delivery
+  // journal. Private request fields must not reach any wire entity or M result.
+  const delivery = await tableService(t); let checkedActions = 0;
+  delivery.controls.hook = e => {
+    for (const action of e.actions) {
+      checkedActions++;
+      for (const field of ['State', 'Result', 'B0', 'B1', 'B2', 'B3']) {
+        const encoded = action.entity[field];
+        if (typeof encoded === 'string') assert.equal(Buffer.from(encoded, 'base64').includes(Buffer.from(marker)), false);
+      }
+      assert.equal(JSON.stringify(action.entity).includes(marker), false);
+    }
+    e.reply();
+  };
+  const init = createTableDeliveryJournal(tableBinding, delivery.dependencies); await init.initialize(); await init.close();
+  const journal = createTableDeliveryJournal(tableBinding, delivery.dependencies); await journal.open();
+  const request = { ...finalDelivery, accountId: 'Tenant', text: marker, metadata: { private: marker }, replyTarget: marker,
+    originatingEventId: marker, contextId: marker, taskRef: { namespace: marker, name: marker }, sessionRef: { namespace: marker, name: marker } };
+  const begin = await journal.begin(request); assert.equal(begin.kind, 'claimed');
+  if (begin.kind !== 'claimed') throw new Error('Expected fixture claim');
+  await journal.settle(begin.claim, { kind: 'delivered', providerMessageId: 'privacy-receipt' });
+  await journal.begin({ ...request, deliveryId: 'privacy-alias' }); inspect(journal.status()); await journal.close();
+  assert.ok(checkedActions >= 10);
   const client = new OwnedTableClient(bindTable(tableBinding), s.dependencies);
   s.controls.hook = e => { e.res.writeHead(200, { 'content-type': 'application/json' }); e.res.end(JSON.stringify({ unknown: marker })); };
   await client.read('M', context()).catch(inspect);
