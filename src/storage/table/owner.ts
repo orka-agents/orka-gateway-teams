@@ -37,6 +37,8 @@ class TableKernel {
   private pending = 0;
   private pendingBytes = 0;
   private closing?: Promise<void>;
+  private invalidated = false;
+  private readonly writePermission = new AbortController();
   private drain?: () => void;
   constructor(private readonly binding: BoundTable, dependencies: TableDependencies, limits: Partial<TableLimits>) {
     object(limits, Object.keys(DEFAULT_LIMITS)); this.limits = { ...DEFAULT_LIMITS, ...limits };
@@ -46,7 +48,7 @@ class TableKernel {
     this.client = new OwnedTableClient(binding, dependencies);
   }
   status() {
-    return Object.freeze({ lifecycle: this.closing && this.lifecycle !== 'closed' ? 'closing' : this.lifecycle,
+    return Object.freeze({ lifecycle: this.closing && this.lifecycle !== 'closed' ? 'closing' : this.invalidated && this.lifecycle !== 'closed' ? 'poisoned' : this.lifecycle,
       ownership: this.ownership, pending: this.pending, pendingBytes: this.pendingBytes });
   }
   initialize(options?: CallOptions): Promise<void> {
@@ -58,7 +60,7 @@ class TableKernel {
       const initId = randomUUID();
       const expected = metadata(this.binding, { initId, initDigest: initializationDigest(this.binding, initId), owner: '', epoch: 0,
         invocation: initId, operation: 'initialize', plan: digest(['initialize', initId]), state: Buffer.alloc(0), result: Buffer.alloc(0), release: Buffer.alloc(0) });
-      try { await this.client.write(expected, undefined, [], context); } catch { /* ACK is not authority. */ }
+      try { await this.write(expected, undefined, [], context); } catch { /* ACK is not authority. */ }
       const cleanup = this.cleanup();
       try {
         for (let i = 0; i < this.limits.reconciliationReads && eligible(cleanup.context); i++) {
@@ -95,7 +97,7 @@ class TableKernel {
     let row: string;
     try { row = key === 'M' ? 'M' : dataRow(this.binding, key); } catch { return Promise.reject(new TableError('invalid-input')); }
     return this.enqueue(Buffer.byteLength(row), options, async context => {
-      const current = this.ownership === 'owned' && this.lifecycle !== 'poisoned' ? await this.authority(context) : undefined;
+      const current = this.ownership === 'owned' && !this.invalidated && this.lifecycle !== 'poisoned' ? await this.authority(context) : undefined;
       const record = row === 'M' && current ? current : await this.readRecord(row, context);
       if (current && row !== 'M') await this.authority(context);
       return record;
@@ -152,6 +154,8 @@ class TableKernel {
       return result.kind === 'committed' ? { kind: 'committed', result: Buffer.from(expected.result) } : { kind: 'cancelled' };
     });
   }
+  /** Irreversible domain-audit failure. Completion cannot restore authority; close still drains. */
+  invalidate(): void { this.invalidated = true; this.lifecycle = 'poisoned'; this.writePermission.abort(); }
   close(): Promise<void> {
     if (this.closing) return this.closing;
     // Set the intake fence before cancelling queued work or waiting on active promises.
@@ -159,7 +163,7 @@ class TableKernel {
     this.closing = drained.then(async () => {
       let error: TableError | undefined;
       try {
-        if (this.lifecycle === 'poisoned' || this.ownership === 'possible') throw new TableError('unresolved');
+        if (this.invalidated || this.lifecycle === 'poisoned' || this.ownership === 'possible') throw new TableError('unresolved');
         if (this.ownership === 'owned') {
           const cleanup = this.cleanup();
           try {
@@ -216,11 +220,15 @@ class TableKernel {
     if (this.active || this.closing) return;
     const job = this.queue.shift(); if (!job) return;
     this.active = job; job.started = true;
+    const invalidatedAtStart = this.invalidated;
     const complete = (result: { value: unknown } | { error: TableError }) => {
       // Actual work has settled. Release its slot before publishing completion, so a
       // sequential caller can immediately reserve it even with a one-slot profile.
       this.finish(job); this.active = undefined;
-      if ('error' in result) job.reject(result.error);
+      // Fence work invalidated in flight; already-poisoned diagnostic reads
+      // retain their existing behavior. Mutations still require healthy ownership.
+      if (this.invalidated && !invalidatedAtStart) job.reject(new TableError('unresolved'));
+      else if ('error' in result) job.reject(result.error);
       else if (eligible(job.context)) job.resolve(result.value); else job.reject(new TableError('unavailable'));
       if (this.closing) this.drain?.(); else this.pump();
     };
@@ -229,14 +237,14 @@ class TableKernel {
     }).then(value => complete({ value }), error => complete({ error: error instanceof TableError ? error : new TableError('unavailable') }));
   }
   private requireUnowned(): void {
-    if (this.lifecycle === 'poisoned') throw new TableError('unresolved');
+    if (this.invalidated || this.lifecycle === 'poisoned') throw new TableError('unresolved');
     if (this.ownership !== 'none') throw new TableError('busy');
   }
   private requireOwned(audited: boolean): void {
-    if (this.lifecycle === 'poisoned') throw new TableError('unresolved');
+    if (this.invalidated || this.lifecycle === 'poisoned') throw new TableError('unresolved');
     if (this.ownership !== 'owned' || (audited && this.lifecycle !== 'envelope-audited')) throw new TableError('unready');
   }
-  private poison(): never { this.lifecycle = 'poisoned'; throw new TableError('unresolved'); }
+  private poison(): never { this.invalidate(); throw new TableError('unresolved'); }
   private async readRecord(row: string, context: WorkContext): Promise<StoredRecord | undefined> {
     try { return await this.client.read(row, context); } catch (error) {
       if (this.ownership === 'owned' && error instanceof TableError && error.code === 'corrupt') this.poison();
@@ -255,8 +263,15 @@ class TableKernel {
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.limits.cleanupTimeoutMs);
     return { context: { signal: controller.signal, deadline: performance.now() + this.limits.cleanupTimeoutMs }, done: () => clearTimeout(timer) };
   }
+  private write(expected: Metadata, originalETag: string | undefined, actions: readonly DataAction[], context: WorkContext): Promise<void> {
+    if (this.invalidated) throw new TableError('unresolved');
+    // Revoke pre-POST permission even across token awaits and independent cleanup
+    // contexts. Reads and actual token/request/socket drain remain independent.
+    return this.client.write(expected, originalETag, actions, { ...context, signal: AbortSignal.any([context.signal, this.writePermission.signal]) });
+  }
   private async transition(original: StoredRecord, expected: Metadata, actions: readonly DataAction[], context: WorkContext): Promise<Confirmed> {
-    try { await this.client.write(expected, original.etag, actions, context); } catch { /* Always reconcile; never resubmit original. */ }
+    if (this.invalidated) throw new TableError('unresolved');
+    try { await this.write(expected, original.etag, actions, context); } catch { /* Always reconcile; never resubmit original. */ }
     const cleanup = this.cleanup(); let barrier: Metadata | undefined;
     try {
       for (let i = 0; i < this.limits.reconciliationReads && eligible(cleanup.context); i++) {
@@ -273,9 +288,10 @@ class TableKernel {
         if (barrier && value.digest === barrier.digest) return { kind: 'cancelled', record: current };
         if (!same(current, original)) break;
         if (!barrier) {
+          if (this.invalidated) throw new TableError('unresolved');
           const invocation = randomUUID(); barrier = metadata(this.binding, { ...m(original), invocation, operation: 'barrier',
             plan: digest(['barrier', original.value.digest, expected.digest, invocation]) });
-          try { await this.client.write(barrier, original.etag, [], cleanup.context); } catch { /* 412 and lost ACK require another raw read. */ }
+          try { await this.write(barrier, original.etag, [], cleanup.context); } catch { /* 412 and lost ACK require another raw read. */ }
         }
       }
       return this.poison();

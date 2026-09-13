@@ -1,8 +1,9 @@
-# Azure Table storage kernel — library only
+# Azure Table storage — library only
 
 `src/storage/table/index.ts` exposes a bounded protocol/codec/ownership kernel.
-It is **not a selectable runtime backend** and is not an ingress store or delivery
-journal. SQLite remains the only shipped runtime backend. There is no Table CLI,
+`src/delivery/table-journal.ts` implements the delivery journal on that kernel.
+Neither is **a selectable runtime backend**; there is no Table ingress store yet.
+SQLite remains the only shipped runtime backend. There is no Table CLI,
 configuration selector, identity provider, Azure provisioning, recovery command,
 lease, takeover, migration, deletion, pruning or hosting integration here.
 
@@ -41,9 +42,10 @@ environment endpoint override or production TLS bypass.
 | `scan(options?)` | Owned, serialized whole-partition generic envelope audit, with exact M before/after checks. Returns the complete bounded snapshot or rejects; never returns a partial audit. |
 | `mutate({input, keys}, planner, options?)` | Snapshot bounded input/typed keys before queueing. Under serialization, read authoritative M and the requested rows, synchronously plan, copy/validate the plan, submit once, then reconcile. Requires a completed envelope audit. |
 | `close()` | Stop intake, remove queued/unissued work, drain actual active work and reconciliation, attempt healthy positively-owned release, and drain local transport even on failure. Idempotent: repeated calls return the same promise/result. |
+| `invalidate()` | Irreversible domain-audit failure. Stops future mutations and successful active completion, prevents clean release, but does not bypass actual work/transport drain on close. |
 
-Initialization deliberately has no domain-state argument. Future journals can
-recognize empty genesis and establish their initial state through an ordinary
+Initialization deliberately has no domain-state argument. Explicit domain initializers
+can recognize empty genesis and establish their initial state through an ordinary
 owned mutation after the generic envelope audit, before exposing domain readiness.
 This does not permit adoption or reset of existing storage.
 
@@ -65,7 +67,7 @@ Mutation outcomes are `{kind: 'committed', result: Buffer}` or
 `{kind: 'cancelled'}` (a positively confirmed cancellation barrier). Neither is a
 provider-send grant. A caller abort/deadline may reject before internal resolution;
 a later commit is reconciled but cannot return a second result or permission.
-Future journals own semantic interpretation, deduplication, references/counters,
+Domain journals own semantic interpretation, deduplication, references/counters,
 recovery and final forwarding/send eligibility. **Envelope-audited is not domain
 ready**, and does not establish an application's readiness.
 
@@ -223,7 +225,7 @@ change global tracing/logging. No private SDK hooks or REST implementation is us
 Batch ACK content is bounded then discarded, not parsed for commit authority.
 Detailed inner-status/Content-ID diagnostics are intentionally unavailable.
 **SDK success spans are not domain commit metrics.** Only exact M reconciliation
-can support journal outcomes; journals and their metrics are future work.
+can support journal outcomes; operational metrics remain future work.
 
 Focused checks, using Node >=24 and OpenSSL for ephemeral local TLS fixtures:
 
@@ -240,4 +242,110 @@ TLS/drain, active instrumentation privacy controls, bounds/backpressure, complet
 scans and lost-ACK/owner/barrier races. They do **not** contact Azure or use real
 credentials. Azure atomicity, primary-read consistency and service acceptance are
 document-backed assumptions exercised by a scripted local service, **not live
-Azure qualification**, physical-death proof or a complete journal-domain audit.
+Azure qualification** or physical-death proof. Delivery-domain audit coverage is
+described below; the generic kernel does not interpret journal payloads.
+
+## Delivery journal contract
+
+Import `createTableDeliveryJournal` from `src/delivery/table-journal.ts`. It takes
+only a delivery binding, the same trusted Table dependencies, and optional limits:
+`{maxPending, maxPendingBytes, kernel: Partial<TableLimits>}`. Construction is
+synchronous and I/O-free. It returns a retained handle satisfying
+`DeliveryJournalPort`; it does not alter the synchronous SQLite public APIs.
+
+- `initialize()` is explicit and single-use: generic initialize, acquire, full
+  scan, domain marker mutation, then drained release. Only this path accepts empty
+  genesis, with no other rows and first acquisition epoch one. Use a **fresh**
+  handle for open. Failed partial initialization stays present; there is no reset,
+  resume, adoption, migration or reinitialization path.
+- `open()` acquires unready, scans every retained envelope, validates the complete
+  domain graph and captures the current epoch before publishing readiness.
+  Concurrent close cannot publish late readiness. Keep the handle after rejection:
+  cleanup drains locally but may still leave possible or confirmed ownership.
+- `begin(request)` validates and hashes synchronously, then queues **only** the
+  three-field `RequestIdentity` (delivery ID, stable ID, digest). No outgoing text,
+  metadata, route, message or request body is queued or persisted by this journal.
+- `settle(claim, outcome)` synchronously validates and copies its inputs before
+  queueing. Valid opaque non-UUID public attempts return stale, not invalid-input;
+  only stored attempts must be UUIDv4.
+- `close()` synchronously retires readiness, removes never-issued queued work and
+  awaits active journal work, startup and kernel drain. It is idempotent and
+  preserves the same close promise. Safe errors attach no raw SDK/native cause.
+- `status()` is local and I/O-free: lifecycle, pending snapshot count/bytes and
+  nested kernel lifecycle/ownership certainty/count/bytes. It contains no IDs,
+  tokens, receipts or payload. It is not storage authority or termination proof.
+
+Begin preserves SQLite's shared alias namespace and ordering. It discovers the
+requested aliases, then supplies at most **seven** unique keys to one M-fenced
+mutation: those aliases, their target operations and self-aliases, and the
+requested operation. The planner rereads/verifies discovery and validates all
+these targets before checking conflict. Drift or domain corruption poisons the
+kernel instead of retrying lookup or returning a harmless conflict. Conflicts
+write no alias/operation. Compatible in-flight/terminal replays still add fresh
+aliases. Fresh and ready operations get new attempts. The largest transaction is
+M, one operation and two aliases; same-ID aliases collapse atomically.
+
+Settlement requires the exact attempt. Only sending transitions once; repeated
+same state/receipt is unchanged, all other terminal/old attempts are stale. On a
+new ownership epoch, old sending is **logically unknown**, without rewriting any
+data rows. The same old claim plus unknown is unchanged; late receipts/retryable
+outcomes are stale. Ready and recorded terminals survive restart. There is no
+bulk recovery, index, cleanup counter or manual recovery hook.
+
+### Delivery payloads and audit
+
+All domain bytes pass the kernel's strict UTF-8/raw JSON grammar (including decoded
+key duplicates and canonical numeric lexemes) and closed domain validation:
+
+- M.state: `{journal: 'teams-delivery', schema: 1, fingerprint: 1}`.
+- `delivery(stableId)`: `{schema: 1, fingerprint: 1, digest, attemptId,
+  attemptEpoch, state, providerMessageId}`. States are ready/sending/delivered/
+  rejected/unknown; receipt is non-null exactly for delivered. Epoch is positive,
+  safe and no later than the current ownership epoch.
+- `alias(identifier)`: `{schema: 1, idempotencyId}` targeting a stable operation.
+- M.result: schema-one initialize, begin (identity and result) or settle (claim,
+  outcome and result) record. Only safe IDs/digest/claim/receipt/status are retained.
+  Historical results are validated, **never** interpreted as current send grants.
+
+Full audit validates M.state/result, every operation, every alias (including
+unrelated ones), target existence and each operation's correct self-alias. It
+rejects unsupported control rows, orphan graphs, invalid identities/digests/
+UUIDs, future epochs and receipt/state mismatches before readiness. Recognizable
+unsupported domain versions report `unsupported-schema`. Other domain corruption
+reports `corrupt`; generic kernel corruption is not guessed from an `unresolved`
+error. A mismatched Table binding reports `corrupt`, unlike SQLite's separate
+`scope-mismatch`. Domain failures invalidate the kernel even when a synchronous
+planner exception would otherwise be normalized to `invalid-input`.
+
+### Delivery queue and timeout bridge
+
+The journal has its **own FIFO**, since a begin uses several kernel calls. Standard
+limits are 96 active-plus-queued operations and 32 MiB of retained snapshot bytes;
+configurable ranges are 1..1024 and 1..256 MiB. Kernel budgets remain independent.
+Snapshot-byte accounting is not a measurement of all transient codec/SDK memory.
+Saturation returns typed `busy` without enqueueing or poisoning the journal.
+Pure caller validation fails synchronously before queueing and also does not poison.
+The existing dispatcher still treats **any** journal error as fatal; this is not
+new nonfatal dispatcher backpressure. Its ordinary HTTP concurrency cap is 32.
+
+Kernel caller timeout is not port completion. On an admitted operation failure the
+journal immediately retires readiness and stops submissions, then awaits
+**kernel.close**, including actual token/native work and reconciliation, before
+rejecting the active port promise or releasing its journal slot. It never awaits
+its own close from inside that operation (which would self-deadlock). Positively
+reconciled healthy cleanup may release; uncertainty/domain corruption cannot.
+Never-settling trusted token work can indefinitely hold operation and shutdown.
+
+Delivery tests include public SQLite differential traces (independent attempt
+mapping), lost begin/receipt ACKs, both original/barrier orders, queued old-writer
+fencing, full graph corruption and 103 old sends with zero recovery data writes.
+Actual kernel caller timers are exercised while token, reconciliation and native
+destruction remain held. Sender/dispatcher tests use the real Teams SDK and native
+HTTPS with a trusted fixture-only POST mapping (production route validation still
+forbids explicit service ports); provider counts stay one for receipt/late-receipt
+and zero for pre-effect late-token or timed-out begin. Child fixtures retain Table
+service state across **controlled close/reopen handover** and demonstrate busy
+exclusion, unknown recovery and receipt replay, not physical crash recovery or a
+production worker-isolation architecture. Active recording instrumentation retains
+its positive leakage controls and exercises the production journal while asserting
+private request fields never enter wire entities or M.results.
