@@ -35,6 +35,16 @@ constraints, and is not run by the runtime test command. `npm run check` runs
 typecheck, runtime tests, and `npm run build`. Build output is in ignored `dist/`; optional preview files belong
 in ignored `bin/`. Do not commit binaries, credentials, or generated output.
 
+## Table kernel tests (library only)
+
+See [Table storage boundaries](docs/table-storage.md). The kernel lives entirely in
+`src/storage/table/`; do not expose it as a runtime backend before complete domain
+journals/audits exist. Focused check: `node --import tsx --test test/table-*.test.ts`.
+Tests exercise real public SDK/native HTTPS against an independently implemented
+local service; they use no Azure resources or real credentials. Preserve raw
+FULLmetadata validation, exact-M reconciliation, active-instrumentation privacy,
+nonexpiring ownership and actual-work drain. SDK ACKs are not commit authority.
+
 ## Optional packaging gates
 
 See [the deployment runbook](docs/deployment.md#scoped-verification) for exact

@@ -30,6 +30,10 @@ npm run check
 Individual commands: `npm test`, `npm run typecheck`, `npm run build`.
 Build output is written to ignored `dist/`.
 
+The [Azure Table protocol/ownership kernel](docs/table-storage.md) is library-only.
+It is not a selectable backend or a complete ingress/delivery journal; runtime
+storage remains SQLite. Its tests use local HTTPS fixtures, not live Azure.
+
 ## Deployment packaging
 
 Start with the [deployment runbook and prerequisite STOP gate](docs/deployment.md).
