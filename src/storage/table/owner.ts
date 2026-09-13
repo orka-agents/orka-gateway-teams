@@ -355,7 +355,6 @@ class TableKernel<F extends MetadataFormat> {
           if (!page.cursor) break;
           if (!tracking.cursor(page.cursor)) throw new TableError('incomplete'); cursor = page.cursor;
         }
-        if (!control) this.poison();
         this.auditCall(job, config.endPass, pass); await authority();
       }
       this.auditCall(job, config.finalize); this.checkAudit(job);

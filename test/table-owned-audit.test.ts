@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import * as api from '../src/storage/table/index.js';
 import type { OwnedAuditVisitor, StoredRecord, StoredRecordV2 } from '../src/storage/table/index.js';
 import { budget, code, emptyInput, emptyPlan, owned, putData, visitor } from './support/owned-audit.js';
-import { deferred, eventually, mDigest, stamp } from './support/table-service.js';
+import { deferred, eventually, mDigest } from './support/table-service.js';
 import { mDigestV2 } from './support/table-v2.js';
 
 for (const format of [1, 2] as const) {
