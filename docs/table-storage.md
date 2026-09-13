@@ -167,7 +167,7 @@ a fixture, nor an orchestration stop acknowledgement proves physical termination
 | Bound | Standard profile / hard envelope bound |
 |---|---|
 | Logical pending operations | 96 (supports inbox 32 + route 32 + relay 1); configurable 1..1024 |
-| Retained caller input/key bytes | 32 MiB; configurable finite 1..256 MiB |
+| Retained caller input/key bytes | 32 MiB; configurable from 1 byte to 256 MiB |
 | One caller input / read-key list | 256 KiB / 99 distinct typed keys |
 | Domain state / result | 64 KiB each |
 | Binding / release receipt | 16 KiB / 1 KiB |
@@ -320,8 +320,9 @@ planner exception would otherwise be normalized to `invalid-input`.
 ### Delivery queue and timeout bridge
 
 The journal has its **own FIFO**, since a begin uses several kernel calls. Standard
-limits are 96 active-plus-queued operations and 32 MiB of retained snapshot bytes;
-configurable ranges are 1..1024 and 1..256 MiB. Kernel budgets remain independent.
+limits are 96 active-plus-queued operations and 32 MiB of retained snapshot bytes.
+Configurable ranges are 1 to 1024 operations and 1 byte to 256 MiB, respectively.
+Kernel budgets remain independent.
 Snapshot-byte accounting is not a measurement of all transient codec/SDK memory.
 Saturation returns typed `busy` without enqueueing or poisoning the journal.
 Pure caller validation fails synchronously before queueing and also does not poison.
