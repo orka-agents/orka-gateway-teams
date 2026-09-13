@@ -11,6 +11,7 @@ type History = 'initialize' | 'claimed' | 'inFlight' | 'delivered' | 'rejected' 
   'recorded' | 'unchanged' | 'ready' | 'old sending' | 'old unknown' | 'opaque stale' | 'missing stale' |
   'digest conflict' | 'stable conflict' | 'delivery conflict';
 const receipt = { kind: 'delivered', providerMessageId: 'retained-receipt' } as const;
+const outcomes = [{ kind: 'retryable' }, { kind: 'rejected' }, { kind: 'unknown' }, receipt] as const;
 const otherAttempt = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 async function history(t: TestContext, kind: History) {
   const { s, j } = await opened(t);
@@ -122,3 +123,73 @@ for (const outcome of [{ kind: 'retryable' }, { kind: 'rejected' }, { kind: 'unk
     assert.equal(payload(s.rows.get(rowKey('delivery', request.idempotencyId))!).attemptId, first.claim.attemptId);
   });
 }
+
+for (const previous of ['recorded', 'unchanged'] as const) for (const outcome of outcomes) {
+  test(`retained stale cannot replace matching ${previous}/${outcome.kind} history`, async t => {
+    const { s, j } = await opened(t); const first = await j.begin(request);
+    assert.equal(first.kind, 'claimed'); if (first.kind !== 'claimed') throw new Error('Expected fixture claim');
+    assert.equal(await j.settle(first.claim, outcome), 'recorded');
+    if (previous === 'unchanged') assert.equal(await j.settle(first.claim, outcome), 'unchanged');
+    await j.close(); replaceControl(s, 'Result', { ...result(s), result: 'stale' });
+    await refuses(t, s);
+  });
+}
+for (const outcome of outcomes) test(`retained stale cannot match current-epoch sending/${outcome.kind}`, async t => {
+  const { s, j } = await opened(t); const first = await j.begin(request);
+  assert.equal(first.kind, 'claimed'); if (first.kind !== 'claimed') throw new Error('Expected fixture claim');
+  await j.close();
+  // The next acquisition advances M. Forge a digest-valid operation at that epoch
+  // so the audit must reject stale for effective sending, not for a future epoch.
+  changeOperation(s, { attemptEpoch: Number(s.rows.get('M')!.Epoch) + 1 });
+  replaceControl(s, 'Result', { schema: 1, operation: 'settle', claim: first.claim, outcome, result: 'stale' });
+  await refuses(t, s);
+});
+test('retained stale cannot replace old-sending unknown unchanged history', async t => {
+  const s = await history(t, 'old sending');
+  replaceControl(s, 'Result', { ...result(s), result: 'stale' }); await refuses(t, s);
+});
+
+for (const settled of outcomes) for (const attempted of outcomes) {
+  if (settled.kind === attempted.kind) continue;
+  test(`reachable stale ${settled.kind}/${attempted.kind} survives owned reopen`, async t => {
+    const { s, j } = await opened(t); const first = await j.begin(request);
+    assert.equal(first.kind, 'claimed'); if (first.kind !== 'claimed') throw new Error('Expected fixture claim');
+    assert.equal(await j.settle(first.claim, settled), 'recorded');
+    assert.equal(await j.settle(first.claim, attempted), 'stale'); await j.close();
+    const before = [...s.rows.entries()].filter(([key]) => key !== 'M'); const saved = s.rows.get('M')!.Result;
+    const next = createTableDeliveryJournal(tableBinding, s.dependencies); await next.open();
+    assert.equal(next.status().lifecycle, 'ready'); assert.equal(s.rows.get('M')!.Result, saved);
+    assert.deepEqual([...s.rows.entries()].filter(([key]) => key !== 'M'), before);
+    await next.close(); assert.equal(s.rows.get('M')!.Owner, '');
+  });
+}
+test('reachable stale for a different delivered receipt survives owned reopen', async t => {
+  const { s, j } = await opened(t); const first = await j.begin(request);
+  assert.equal(first.kind, 'claimed'); if (first.kind !== 'claimed') throw new Error('Expected fixture claim');
+  assert.equal(await j.settle(first.claim, receipt), 'recorded');
+  assert.equal(await j.settle(first.claim, { kind: 'delivered', providerMessageId: 'different-receipt' }), 'stale'); await j.close();
+  const next = createTableDeliveryJournal(tableBinding, s.dependencies); await next.open();
+  assert.deepEqual(await next.begin(request), receipt); await next.close();
+});
+for (const outcome of [{ kind: 'retryable' }, { kind: 'rejected' }, receipt] as const) {
+  test(`reachable old-sending stale/${outcome.kind} remains valid across another epoch`, async t => {
+    const { s, j } = await opened(t); const first = await j.begin(request);
+    assert.equal(first.kind, 'claimed'); if (first.kind !== 'claimed') throw new Error('Expected fixture claim');
+    await j.close(); const next = createTableDeliveryJournal(tableBinding, s.dependencies); await next.open();
+    assert.equal(await next.settle(first.claim, outcome), 'stale'); await next.close();
+    const before = [...s.rows.entries()].filter(([key]) => key !== 'M'); const saved = s.rows.get('M')!.Result;
+    const last = createTableDeliveryJournal(tableBinding, s.dependencies); await last.open();
+    assert.equal(s.rows.get('M')!.Result, saved); assert.deepEqual([...s.rows.entries()].filter(([key]) => key !== 'M'), before);
+    assert.deepEqual(await last.begin(request), { kind: 'unknown' }); await last.close();
+  });
+}
+test('reachable stale for a rotated UUID attempt survives while the new attempt is sending', async t => {
+  const { s, j } = await opened(t); const first = await j.begin(request);
+  assert.equal(first.kind, 'claimed'); if (first.kind !== 'claimed') throw new Error('Expected fixture claim');
+  assert.equal(await j.settle(first.claim, { kind: 'retryable' }), 'recorded'); const current = await j.begin(request);
+  assert.equal(current.kind, 'claimed'); if (current.kind !== 'claimed') throw new Error('Expected fixture claim');
+  assert.notEqual(current.claim.attemptId, first.claim.attemptId);
+  assert.equal(await j.settle(first.claim, receipt), 'stale'); await j.close();
+  const next = createTableDeliveryJournal(tableBinding, s.dependencies); await next.open();
+  assert.deepEqual(await next.begin(request), { kind: 'unknown' }); await next.close();
+});

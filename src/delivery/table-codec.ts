@@ -140,11 +140,18 @@ function auditResult(saved: Result, operations: ReadonlyMap<string, Operation>, 
         (result.kind === 'delivered' && operation.providerMessageId !== result.providerMessageId)) corrupt();
     return;
   }
-  if (saved.result === 'stale') return; // Opaque attempts and absent operations are legitimate stale results.
   const operation = operations.get(saved.claim.idempotencyId);
-  if (!operation || operation.attemptId !== saved.claim.attemptId) corrupt();
   const state = saved.outcome.kind === 'retryable' ? 'ready' : saved.outcome.kind;
   const receipt = saved.outcome.kind === 'delivered' ? saved.outcome.providerMessageId : null;
+  if (saved.result === 'stale') {
+    if (!operation || operation.attemptId !== saved.claim.attemptId) return;
+    // A matching attempt is stale only for a non-sending outcome mismatch.
+    // Old physical sending may already be logical unknown; do not reject it blindly.
+    const current = effectiveState(operation, epoch);
+    if (current === 'sending' || (current === state && operation.providerMessageId === receipt)) corrupt();
+    return;
+  }
+  if (!operation || operation.attemptId !== saved.claim.attemptId) corrupt();
   // Recorded settlement physically updates the row; unchanged may instead have
   // observed old sending as unknown without any rewrite.
   if ((saved.result === 'recorded' ? operation.state : effectiveState(operation, epoch)) !== state || operation.providerMessageId !== receipt) corrupt();
