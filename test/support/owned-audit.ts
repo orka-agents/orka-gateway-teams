@@ -6,7 +6,7 @@ import { boundBytes, hash, partition, stamp, tableBinding, tableService } from '
 export const budget = (overrides: Partial<OwnedAuditBudget> = {}): OwnedAuditBudget => ({
   maxPages: 20, maxPageBytes: 1024 * 1024, maxDurationMs: 30000, maxTrackingBytes: 128 * 1024, ...overrides,
 });
-export const visitor = () => ({ passes: 1 as const, record() {}, endPass() {}, finalize() {} });
+export const visitor = () => ({ passes: 1 as const, record(): undefined {}, endPass(): undefined {}, finalize(): undefined {} });
 export const code = (want: string) => (e: unknown) => e instanceof Error && 'code' in e && e.code === want &&
   e.message === 'Table storage: ' + want && !('cause' in e) && !('request' in e) && !('response' in e);
 export const emptyInput = { input: Buffer.alloc(0), keys: [] };

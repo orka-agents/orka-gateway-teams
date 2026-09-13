@@ -296,11 +296,25 @@ no continuation cycles. Empty continuation pages continue; no prefetch occurs.
 `finalize` runs only after all passes. Every delivered record, payload and receipt
 is an independent copy, not authoritative kernel state.
 
-Callbacks are trusted synchronous non-I/O code returning exactly `undefined`.
-Other returns and exceptions poison the handle; native Promise rejection handling
-uses an intrinsic reaction rather than reading arbitrary `.then` properties,
-including for thrown and cross-realm native Promises. Nothing is awaited or
-assimilated. Throwing the exact exported unique-symbol
+Callbacks are trusted synchronous non-I/O code returning exactly `undefined`;
+public V1/V2 callback return types enforce this rather than discarding results as
+`void`. Callbacks must not return or throw Promises, or start asynchronous work.
+Runtime checks remain necessary for JavaScript, unsafe casts and arbitrary throws.
+Other returns and exceptions poison the handle. Defensive rejection handling for
+ordinary returned, thrown and cross-realm native Promises is **best-effort**: the
+intrinsic reaction avoids instance `.then` getters, but still runs constructor/
+species machinery and assumes safe constructor/species and relevant intrinsics.
+Nothing is awaited or assimilated.
+
+Audit poisoning is separate from process-level rejection handling. For example,
+an already-rejected native Promise with a nonconfigurable throwing `constructor`
+getter can prevent rejection-handler registration. The audit rejects `unresolved`,
+poisons and cannot publish envelope-audited permission or clean-release ownership,
+but the Promise may remain unhandled and trigger process diagnostics (potentially
+including its private rejection reason) or termination. This boundary is **not a
+sandbox or universal Promise containment guarantee**; do not use untrusted callbacks.
+
+Throwing the exact exported unique-symbol
 `OWNED_AUDIT_BUDGET_EXHAUSTED` is the sole benign domain-allocator exhaustion
 signal; throwing `TableError('incomplete')` is **not** that signal. Same-kernel
 queued operations and `close()` synchronously throw and latch invalidation during

@@ -309,7 +309,7 @@ class TableKernel<F extends MetadataFormat> {
     this.checkAudit(job);
     return { signal: job.controller.signal, deadline: Math.min(job.context.deadline, performance.now() + config.requestTimeoutMs) };
   }
-  private auditCall(job: AuditJob, callback: (...args: never[]) => void, ...args: unknown[]): void {
+  private auditCall(job: AuditJob, callback: (...args: never[]) => undefined, ...args: unknown[]): void {
     this.checkAudit(job); let result: unknown;
     this.auditCallback = true;
     try {

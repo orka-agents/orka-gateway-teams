@@ -122,7 +122,7 @@ test('queued audit snapshots scalars and callback references, not the caller vis
   const { s, k } = await owned(t, 1); const gate = deferred(); let held = false;
   s.controls.hook = async e => { if (!held) { held = true; await gate.promise; } e.reply(); };
   const first = k.read('M'); await eventually(() => held); let callbacks = 0;
-  const v = { ...visitor(), record() { callbacks++; } }; const b = budget(); const o = { requestTimeoutMs: 30000 };
+  const v = { ...visitor(), record(): undefined { callbacks++; } }; const b = budget(); const o = { requestTimeoutMs: 30000 };
   const audit = k.auditOwned(v, b, o); v.record = () => { throw new Error('private callback detail'); }; b.maxPages = 1; b.maxPageBytes = 1; o.requestTimeoutMs = 0;
   gate.resolve(); await first; await audit; assert.equal(callbacks, 1); delete s.controls.hook; await k.close();
 });

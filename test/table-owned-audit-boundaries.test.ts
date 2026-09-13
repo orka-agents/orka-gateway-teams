@@ -108,7 +108,7 @@ for (const format of [1, 2] as const) for (const boundary of [1, 2, 3, 4]) test(
 for (const callback of ['record', 'endPass', 'finalize'] as const) test(`duration is checked after synchronous ${callback} even before timers can fire`, async t => {
   const { s, k } = await owned(t, 1); let callbacks = 0; let later = 0; let points = 0;
   s.controls.hook = e => { if (e.path.includes(",RowKey='M'")) points++; e.reply(); };
-  const v = { ...visitor(), record() { later++; }, endPass() { later++; }, finalize() { later++; }, [callback]() {
+  const v = { ...visitor(), record(): undefined { later++; }, endPass(): undefined { later++; }, finalize(): undefined { later++; }, [callback](): undefined {
     callbacks++; const entered = performance.now();
     while (performance.now() - entered < 1000) { /* Overrun from callback entry, strictly after admission. */ }
   } };
@@ -119,12 +119,12 @@ for (const callback of ['record', 'endPass', 'finalize'] as const) test(`duratio
 test('audit snapshots own descriptor values without invoking property get traps', async t => {
   const { k } = await owned(t, 1); let gets = 0; let records = 0;
   const handler = { get() { gets++; throw new Error('private property get detail'); } };
-  const v = new Proxy({ ...visitor(), record() { records++; } }, handler);
+  const v = new Proxy({ ...visitor(), record(): undefined { records++; } }, handler);
   const b = new Proxy(budget(), handler); const o = new Proxy({ requestTimeoutMs: 30000 }, handler);
   await k.auditOwned(v, b, o); assert.equal(gets, 0); assert.equal(records, 1); await k.close();
 });
 test('audit does not inspect callback function name, constructor or then properties', async t => {
-  const { k } = await owned(t, 1); let calls = 0; let getters = 0; const callback = () => { calls++; };
+  const { k } = await owned(t, 1); let calls = 0; let getters = 0; const callback = (): undefined => { calls++; };
   for (const key of ['name', 'constructor', 'then']) Object.defineProperty(callback, key, { get() { getters++; throw new Error('private function property'); } });
   await k.auditOwned({ passes: 1, record: callback, endPass: callback, finalize: callback }, budget());
   assert.equal(calls, 3); assert.equal(getters, 0); await k.close();
@@ -137,13 +137,15 @@ test('queued audit allocates tracking only when its FIFO job starts', async t =>
   assert.equal(k.status().pending, 2); assert.equal(s.stats.requests, requests); gate.resolve(); await read;
   await assert.rejects(audit, code('incomplete')); assert.equal(s.stats.requests, requests); delete s.controls.hook; await k.close();
 });
-test('native Promise containment errors still poison instead of becoming ordinary transport failures', async t => {
+test('fulfilled native Promise with throwing constructor still poisons; this does not test rejection handling', async t => {
   const { k } = await owned(t, 1);
-  await assert.rejects(k.auditOwned({ ...visitor(), record() {
+  const invalidRecord = () => {
     const promise = Promise.resolve();
     Object.defineProperty(promise, 'constructor', { get() { throw new Error('private native reaction detail'); } });
     return promise;
-  } }, budget()), code('unresolved'));
+  };
+  // Deliberately violate the public return type to retain the runtime poison check.
+  await assert.rejects(k.auditOwned({ ...visitor(), record: invalidRecord as unknown as () => undefined }, budget()), code('unresolved'));
   await assert.rejects(k.close(), code('unresolved'));
 });
 for (const reason of ['close', 'invalidate'] as const) test(`finalizer-scheduled ${reason} wins before FIFO publication`, async t => {

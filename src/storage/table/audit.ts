@@ -7,9 +7,9 @@ import type { OwnedAuditBudget, OwnedAuditOptions } from './types.js';
 
 export interface AuditConfig extends OwnedAuditBudget {
   passes: 1 | 2;
-  record: (pass: 1 | 2, record: Readonly<AnyStoredRecord>) => void;
-  endPass: (pass: 1 | 2) => void;
-  finalize: () => void;
+  record: (pass: 1 | 2, record: Readonly<AnyStoredRecord>) => undefined;
+  endPass: (pass: 1 | 2) => undefined;
+  finalize: () => undefined;
   signal: AbortSignal | undefined;
   requestTimeoutMs: number;
 }
@@ -60,7 +60,13 @@ export function auditConfig<F extends MetadataFormat>(visitor: AuditVisitorFor<F
 export function chargeAuditWork(total: number, amount: number, limit: number): number {
   if (amount > limit - total) throw new TableError('incomplete'); return total + amount;
 }
-/** No arbitrary then access or assimilation, including thrown/cross-realm native Promises. */
+/**
+ * Best-effort handling of ordinary returned/thrown/cross-realm native Promises.
+ * Avoids instance then getters, not constructor/species machinery; assumes safe
+ * constructor/species and relevant intrinsics. A tampered immutable Promise can
+ * still reject unhandled (process diagnostics/termination), separately from audit
+ * poisoning. Trusted synchronous callbacks are not sandboxed by this defense.
+ */
 export function containCallbackPromise(value: unknown): void {
   if (types.isPromise(value)) void Promise.prototype.then.call(value, () => undefined, () => undefined);
 }
