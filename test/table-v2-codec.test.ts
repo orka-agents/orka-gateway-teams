@@ -70,7 +70,7 @@ for (const kind of ['clean-release', 'operator-recovery'] as const) {
     JSON.stringify({ ...receipt, oldEpoch: 0 }), JSON.stringify({ ...receipt, invocation: 'bad' }), JSON.stringify({ ...receipt, planDigest: 'A'.repeat(64) }),
     canonical.replace('"oldEpoch":1', '"oldEpoch":1.0'), canonical.replace('"oldEpoch":1', '"oldEpoch":1e0'),
     canonical.replace('"oldEpoch":1', '"oldEpoch":-0'), canonical.replace('"oldEpoch":1', '"oldEpoch":9007199254740993'),
-    canonical.replace('{', '{ '), canonical + '\n', '{"kind":"' + kind + '",' + canonical.slice(1),
+    '{ ' + canonical.slice(1), canonical + '\n', '{"kind":"' + kind + '",' + canonical.slice(1),
     JSON.stringify(Object.fromEntries(Object.entries(receipt).reverse())), '\ufeff' + canonical,
     ...Object.keys(receipt).map(key => JSON.stringify(Object.fromEntries(Object.entries(receipt).filter(([k]) => k !== key)))),
   ];
