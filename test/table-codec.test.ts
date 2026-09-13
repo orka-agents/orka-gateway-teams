@@ -39,10 +39,10 @@ test('FULLmetadata preserves service Timestamp, per-row ETag and four binary chu
   }
 });
 for (const [field, lexeme, empty] of [
-  ['V', '1.0'], ['V', '1.0000000000000001'], ['V', '1e0'],
-  ['Length', '5.0'], ['Length', '5.0000000000000001'], ['Length', '5e0'],
-  ['Count', '1.0'], ['Count', '1e0'], ['Count', '1E+0'],
-  ['Length', '-0', true], ['Count', '-0', true], ['Length', '9007199254740993'],
+  ['V', '1.0', false], ['V', '1.0000000000000001', false], ['V', '1e0', false],
+  ['Length', '5.0', false], ['Length', '5.0000000000000001', false], ['Length', '5e0', false],
+  ['Count', '1.0', false], ['Count', '1e0', false], ['Count', '1E+0', false],
+  ['Length', '-0', true], ['Count', '-0', true], ['Length', '9007199254740993', false],
 ] as const) test(`point/page reject noncanonical ${field} number lexeme ${lexeme}`, () => {
   const record = fixture('item', Buffer.from(empty ? '' : 'hello'));
   const text = JSON.stringify(record).replace(`"${field}":${record[field]}`, `"${field}":${lexeme}`);
