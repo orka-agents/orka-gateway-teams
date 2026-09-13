@@ -16,6 +16,22 @@ export interface Metadata {
   invocation: string; operation: 'initialize' | 'acquire' | 'mutate' | 'barrier' | 'release';
   plan: string; state: Buffer; result: Buffer; release: Buffer; digest: string;
 }
+/** Latest ownership exit, not an authorization to perform operator recovery. */
+export interface CleanReleaseExit {
+  kind: 'clean-release'; oldOwner: string; oldEpoch: number; invocation: string; planDigest: string;
+}
+export interface OperatorRecoveryExit {
+  kind: 'operator-recovery'; oldOwner: string; oldEpoch: number; invocation: string;
+  originalMDigest: string; planDigest: string; domainDispositionDigest: string; operatorAttestationDigest: string;
+}
+export type ExitReceipt = CleanReleaseExit | OperatorRecoveryExit;
+export interface MetadataV2 extends Omit<Metadata, 'operation' | 'release'> {
+  operation: Metadata['operation'] | 'recover'; exit: ExitReceipt | undefined;
+}
+export type RecordValueV2 = MetadataV2 | DataRecord;
+export interface StoredRecordV2 extends Omit<StoredRecord, 'value'> { value: RecordValueV2 }
+export interface PlannerViewV2 extends Omit<PlannerView, 'records'> { records: readonly (StoredRecordV2 | undefined)[] }
+export type PlannerV2 = (view: PlannerViewV2) => Plan;
 export interface DataRecord extends DataKey { kind: 'data'; payload: Buffer; digest: string }
 export type RecordValue = Metadata | DataRecord;
 export interface StoredRecord { row: string; etag: string; timestamp: string; value: RecordValue }

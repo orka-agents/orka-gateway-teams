@@ -6,26 +6,30 @@ import { createHttpHeaders, defaultRetryPolicy, bearerTokenAuthenticationPolicyN
   logPolicyName, proxyPolicyName, redirectPolicyName, tracingPolicyName } from '@azure/core-rest-pipeline';
 import type { PipelineRequest, PipelineResponse } from '@azure/core-rest-pipeline';
 import { tlsVerificationEnabled } from '../../ingress/config.js';
-import { data, dataRow, decodePage, decodeRecord, encodeRecord, etag, fail, object, rawJSON } from './codec.js';
+import { data, dataRow, encodeRecord, etag, fail, object, rawJSON } from './codec.js';
 import { MAX_RESPONSE_BYTES, MAX_WIRE_BYTES, TableError } from './types.js';
-import type { BoundTable, DataAction, Metadata, StoredRecord, TableDependencies } from './types.js';
+import type { BoundTable, DataAction, TableDependencies } from './types.js';
+import { encodeMetadata, readPage, readRecord, receiptBytes } from './format.js';
+import type { MetadataFor, MetadataFormat, StoredFor } from './format.js';
 
 export interface WorkContext { signal: AbortSignal; deadline: number }
 export interface PageCursor { token: string; partition?: string; row?: string }
-export interface RawPage { records: StoredRecord[]; size: number; cursor?: PageCursor }
+export interface RawPage<F extends MetadataFormat = 1> { records: StoredFor<F>[]; size: number; cursor?: PageCursor }
 type RequestKind = { kind: 'read'; row: string } | { kind: 'page'; cursor?: PageCursor } | { kind: 'write'; initialize: boolean };
 interface NativeResponse { status: number; body: Buffer; headers: IncomingMessage['headers'] }
 function available(context: WorkContext): boolean { return !context.signal.aborted && performance.now() < context.deadline; }
 function unavailable(): TableError { return new TableError('unavailable'); }
 
 /** Public SDK serialization only. No caller can obtain or configure the SDK client. */
-export class OwnedTableClient {
+export class OwnedTableClient<F extends MetadataFormat = 1> {
   private readonly work = new Set<Promise<unknown>>();
   private closing?: Promise<void>;
   private readonly request: typeof https.request;
   private readonly token: TableDependencies['token'];
-  constructor(private readonly binding: BoundTable, dependencies: TableDependencies) {
+  private readonly format: F;
+  constructor(private readonly binding: BoundTable, dependencies: TableDependencies, ...format: [format: F] | (1 extends F ? [] : never)) {
     if (typeof dependencies.token !== 'function') fail();
+    this.format = (format[0] ?? 1) as F;
     this.token = dependencies.token; this.request = dependencies.request ?? https.request;
   }
   private track<T>(run: () => Promise<T>): Promise<T> {
@@ -33,24 +37,24 @@ export class OwnedTableClient {
     const promise = Promise.resolve().then(run).catch((e: unknown) => { throw e instanceof TableError ? e : unavailable(); });
     this.work.add(promise); void promise.then(() => this.work.delete(promise), () => this.work.delete(promise)); return promise;
   }
-  read(row: string, context: WorkContext): Promise<StoredRecord | undefined> {
+  read(row: string, context: WorkContext): Promise<StoredFor<F> | undefined> {
     return this.track(async () => {
       if (row !== 'M' && !/^(event|route|delivery|alias|control)_[A-Za-z0-9_-]{1,342}$/u.test(row)) fail();
-      let record: StoredRecord | undefined;
+      let record: StoredFor<F> | undefined;
       const sdk = this.sdk({ kind: 'read', row }, context, response => {
         if (response.status === 404 && errorCode(response) === 'EntityNotFound') return;
         if (response.status !== 200) throw unavailable();
-        record = decodeRecord(this.binding, response.body, row, header(response.headers.etag));
+        record = readRecord(this.format, this.binding, response.body, row, header(response.headers.etag));
       });
       await sdk.getEntity(this.binding.partition, row); return record;
     });
   }
-  page(context: WorkContext, cursor?: PageCursor): Promise<RawPage> {
+  page(context: WorkContext, cursor?: PageCursor): Promise<RawPage<F>> {
     return this.track(async () => {
-      let page: RawPage | undefined; let parts: Omit<PageCursor, 'token'> = {};
+      let page: RawPage<F> | undefined; let parts: Omit<PageCursor, 'token'> = {};
       const sdk = this.sdk({ kind: 'page', ...(cursor ? { cursor } : {}) }, context, response => {
         if (response.status !== 200) throw unavailable();
-        page = { records: decodePage(this.binding, response.body), size: response.body.length };
+        page = { records: readPage(this.format, this.binding, response.body), size: response.body.length };
         const partition = continuation(response.headers['x-ms-continuation-nextpartitionkey']);
         const row = continuation(response.headers['x-ms-continuation-nextrowkey']);
         parts = { ...(partition !== undefined ? { partition } : {}), ...(row !== undefined ? { row } : {}) };
@@ -69,15 +73,17 @@ export class OwnedTableClient {
       } finally { await iterator.return?.(); }
     });
   }
-  write(m: Metadata, originalETag: string | undefined, actions: readonly DataAction[], context: WorkContext): Promise<void> {
+  write(m: MetadataFor<F>, originalETag: string | undefined, actions: readonly DataAction[], context: WorkContext): Promise<void> {
     // Inputs here are kernel-owned; copy actions and validate their closed shapes before any SDK/auth work.
     let transaction: TransactionAction[];
     try {
+      // Recovery-shaped metadata is readable, not writable through this normal-owner transport.
+      if (this.format === 2 && m.operation === 'recover') fail();
       if (!Array.isArray(actions) || actions.length > 99 || (originalETag === undefined && actions.length)) fail();
       if (originalETag !== undefined) etag(originalETag);
-      const entity = encodeRecord(this.binding, m) as TableEntity;
+      const entity = encodeMetadata(this.format, this.binding, m) as TableEntity;
       transaction = [originalETag === undefined ? ['create', entity] : ['update', entity, 'Replace', { etag: originalETag }]];
-      let upper = 8192 + 4 * Math.ceil((this.binding.bytes.length + m.state.length + m.result.length + m.release.length) / 3) + 16;
+      let upper = 8192 + 4 * Math.ceil((this.binding.bytes.length + m.state.length + m.result.length + receiptBytes(m).length) / 3) + 16;
       const rows = new Set(['M']);
       for (const action of actions) {
         object(action, action.kind === 'replace' ? ['kind', 'key', 'payload', 'etag'] : ['kind', 'key', 'payload']);

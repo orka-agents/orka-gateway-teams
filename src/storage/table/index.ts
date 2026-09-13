@@ -1,6 +1,8 @@
 /** Library-only storage kernel. Not an ingress/delivery journal or a selectable runtime backend. */
-export { createTableKernel } from './owner.js';
+export { createTableKernel, createTableKernelV2 } from './owner.js';
 export { DEFAULT_LIMITS, TableError } from './types.js';
 export type { CallOptions, DataAction, DataKey, DataRecord, DataType, Metadata, MutationInput, MutationResult,
-  Plan, Planner, PlannerView, StoredRecord, TableBinding, TableDependencies, TableErrorCode, TableLimits } from './types.js';
+  Plan, Planner, PlannerView, StoredRecord, TableBinding, TableDependencies, TableErrorCode, TableLimits,
+  CleanReleaseExit, OperatorRecoveryExit, ExitReceipt, MetadataV2, RecordValueV2, StoredRecordV2, PlannerViewV2, PlannerV2 } from './types.js';
 export type TableKernel = ReturnType<typeof import('./owner.js').createTableKernel>;
+export type TableKernelV2 = ReturnType<typeof import('./owner.js').createTableKernelV2>;

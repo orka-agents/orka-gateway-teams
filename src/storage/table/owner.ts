@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { bindTable, bytes, dataRow, digest, etag, fail, initializationDigest, integer, metadata, object } from './codec.js';
+import { bindTable, bytes, dataRow, digest, etag, fail, integer, object } from './codec.js';
 import { OwnedTableClient } from './client.js';
 import type { WorkContext } from './client.js';
 import { DEFAULT_LIMITS, MAX_PAYLOAD_BYTES, MAX_STATE_BYTES, MAX_WIRE_BYTES, TableError } from './types.js';
-import type { BoundTable, CallOptions, DataAction, DataKey, Metadata, MutationInput, MutationResult, Plan, Planner, StoredRecord, TableBinding, TableDependencies, TableLimits } from './types.js';
+import type { BoundTable, CallOptions, DataAction, DataKey, MutationInput, MutationResult, Plan, TableBinding, TableDependencies, TableLimits } from './types.js';
+import { cleanRelease, initDigest, makeMetadata, matchingCleanReceipt } from './format.js';
+import type { AnyMetadata as Metadata, AnyStoredRecord as StoredRecord, MetadataFor, MetadataFormat, PlannerFor, StoredFor } from './format.js';
 
 type Lifecycle = 'unowned' | 'acquiring' | 'owned-unready' | 'envelope-audited' | 'reconciling' | 'poisoned' | 'closing' | 'closed';
 type Job = { run: (context: WorkContext) => Promise<unknown>; resolve: (value: unknown) => void; reject: (error: TableError) => void;
@@ -17,20 +19,26 @@ function eligible(context: WorkContext): boolean { return !context.signal.aborte
 function snapshotRecord(record: StoredRecord | undefined): StoredRecord | undefined {
   if (!record) return undefined;
   const value = record.value;
-  return { ...record, value: value.kind === 'data' ? { ...value, payload: Buffer.from(value.payload) } :
-    { ...value, state: Buffer.from(value.state), result: Buffer.from(value.result), release: Buffer.from(value.release) } };
+  if (value.kind === 'data') return { ...record, value: { ...value, payload: Buffer.from(value.payload) } };
+  const buffers = { state: Buffer.from(value.state), result: Buffer.from(value.result) };
+  return 'release' in value ? { ...record, value: { ...value, ...buffers, release: Buffer.from(value.release) } } :
+    { ...record, value: { ...value, ...buffers, exit: value.exit ? { ...value.exit } : undefined } };
 }
 
 /** Synchronous construction keeps possibly acquired ownership reachable even when acquire rejects. */
-export function createTableKernel(binding: TableBinding, dependencies: TableDependencies, limits: Partial<TableLimits> = {}): TableKernel {
-  return new TableKernel(bindTable(binding), dependencies, limits);
+export function createTableKernel(binding: TableBinding, dependencies: TableDependencies, limits: Partial<TableLimits> = {}): TableKernel<1> {
+  return new TableKernel(bindTable(binding), dependencies, limits, 1);
 }
-class TableKernel {
+/** Opt-in metadata V2; never adopts or upgrades a V1 history. */
+export function createTableKernelV2(binding: TableBinding, dependencies: TableDependencies, limits: Partial<TableLimits> = {}): TableKernel<2> {
+  return new TableKernel(bindTable(binding), dependencies, limits, 2);
+}
+class TableKernel<F extends MetadataFormat> {
   private lifecycle: Lifecycle = 'unowned';
   private ownership: 'none' | 'possible' | 'owned' = 'none';
   private owner = '';
   private fence?: StoredRecord;
-  private readonly client: OwnedTableClient;
+  private readonly client: OwnedTableClient<F>;
   private readonly limits: TableLimits;
   private readonly queue: Job[] = [];
   private active: Job | undefined;
@@ -40,12 +48,12 @@ class TableKernel {
   private invalidated = false;
   private readonly writePermission = new AbortController();
   private drain?: () => void;
-  constructor(private readonly binding: BoundTable, dependencies: TableDependencies, limits: Partial<TableLimits>) {
+  constructor(private readonly binding: BoundTable, dependencies: TableDependencies, limits: Partial<TableLimits>, private readonly format: F) {
     object(limits, Object.keys(DEFAULT_LIMITS)); this.limits = { ...DEFAULT_LIMITS, ...limits };
     integer(this.limits.maxPending, 1, 1024); integer(this.limits.maxPendingBytes, 1, 256 * 1024 * 1024);
     integer(this.limits.callTimeoutMs, 1, 300000); integer(this.limits.cleanupTimeoutMs, 1, 300000);
     integer(this.limits.reconciliationReads, 2, 16); integer(this.limits.scanPages, 1, 100000); integer(this.limits.scanBytes, 1, 256 * 1024 * 1024);
-    this.client = new OwnedTableClient(binding, dependencies);
+    this.client = new OwnedTableClient(binding, dependencies, format);
   }
   status() {
     return Object.freeze({ lifecycle: this.closing && this.lifecycle !== 'closed' ? 'closing' : this.invalidated && this.lifecycle !== 'closed' ? 'poisoned' : this.lifecycle,
@@ -58,8 +66,9 @@ class TableKernel {
       if (records.length) throw new TableError('exists');
       if (!eligible(context)) throw new TableError('not-submitted');
       const initId = randomUUID();
-      const expected = metadata(this.binding, { initId, initDigest: initializationDigest(this.binding, initId), owner: '', epoch: 0,
-        invocation: initId, operation: 'initialize', plan: digest(['initialize', initId]), state: Buffer.alloc(0), result: Buffer.alloc(0), release: Buffer.alloc(0) });
+      const expected = makeMetadata(this.format, this.binding, { initId, initDigest: initDigest(this.format, this.binding, initId), owner: '', epoch: 0,
+        invocation: initId, operation: 'initialize', plan: digest(['initialize', initId]), state: Buffer.alloc(0), result: Buffer.alloc(0),
+        ...(this.format === 1 ? { release: Buffer.alloc(0) } : { exit: undefined }) });
       try { await this.write(expected, undefined, [], context); } catch { /* ACK is not authority. */ }
       const cleanup = this.cleanup();
       try {
@@ -84,7 +93,7 @@ class TableKernel {
       if (previous.owner !== '') throw new TableError('busy');
       if (!eligible(context)) throw new TableError('not-submitted');
       this.owner = randomUUID(); const invocation = randomUUID();
-      const expected = metadata(this.binding, { ...previous, owner: this.owner, epoch: integer(previous.epoch + 1, 1, Number.MAX_SAFE_INTEGER),
+      const expected = makeMetadata(this.format, this.binding, { ...previous, owner: this.owner, epoch: integer(previous.epoch + 1, 1, Number.MAX_SAFE_INTEGER),
         invocation, operation: 'acquire', plan: digest(['acquire', previous.digest, this.owner, invocation]) });
       this.ownership = 'possible'; this.lifecycle = 'acquiring';
       const result = await this.transition(original, expected, [], context);
@@ -93,17 +102,17 @@ class TableKernel {
       this.ownership = 'owned'; this.lifecycle = 'owned-unready';
     });
   }
-  read(key: DataKey | 'M', options?: CallOptions): Promise<StoredRecord | undefined> {
+  read(key: DataKey | 'M', options?: CallOptions): Promise<StoredFor<F> | undefined> {
     let row: string;
     try { row = key === 'M' ? 'M' : dataRow(this.binding, key); } catch { return Promise.reject(new TableError('invalid-input')); }
     return this.enqueue(Buffer.byteLength(row), options, async context => {
       const current = this.ownership === 'owned' && !this.invalidated && this.lifecycle !== 'poisoned' ? await this.authority(context) : undefined;
       const record = row === 'M' && current ? current : await this.readRecord(row, context);
       if (current && row !== 'M') await this.authority(context);
-      return record;
+      return record as StoredFor<F> | undefined;
     });
   }
-  scan(options?: CallOptions): Promise<readonly StoredRecord[]> {
+  scan(options?: CallOptions): Promise<readonly StoredFor<F>[]> {
     return this.enqueue(0, options, async context => {
       this.requireOwned(false); this.lifecycle = 'owned-unready';
       try {
@@ -111,14 +120,14 @@ class TableKernel {
         const control = records.find(r => r.row === 'M');
         if (!control || !same(before, control)) this.poison();
         const after = await this.authority(context); if (!same(before, after)) this.poison();
-        if (!eligible(context)) throw new TableError('incomplete'); this.lifecycle = 'envelope-audited'; return records;
+        if (!eligible(context)) throw new TableError('incomplete'); this.lifecycle = 'envelope-audited'; return records as StoredFor<F>[];
       } catch (error) {
         if (error instanceof TableError && ['corrupt', 'unresolved'].includes(error.code)) this.poison();
         throw new TableError('incomplete');
       }
     });
   }
-  mutate(input: MutationInput, planner: Planner, options?: CallOptions): Promise<MutationResult> {
+  mutate(input: MutationInput, planner: PlannerFor<F>, options?: CallOptions): Promise<MutationResult> {
     let snapshot: MutationInput; let size: number;
     try {
       object(input, ['input', 'keys']); if (!Array.isArray(input.keys) || input.keys.length > 99 || typeof planner !== 'function') fail();
@@ -137,7 +146,7 @@ class TableKernel {
       let plan: Plan;
       try {
         // Planner never receives the authoritative M or retained input buffers.
-        const proposed = planner({ input: bytes(snapshot.input, MAX_PAYLOAD_BYTES), state: Buffer.from(m(original).state), records: records.map(snapshotRecord) });
+        const proposed = planner({ input: bytes(snapshot.input, MAX_PAYLOAD_BYTES), state: Buffer.from(m(original).state), records: records.map(snapshotRecord) } as Parameters<PlannerFor<F>>[0]);
         if (proposed instanceof Promise) {
           // Invalid trusted planners cannot surface a later raw rejection. Their external work is not a supported kernel operation.
           void Promise.prototype.then.call(proposed, () => undefined, () => undefined); fail();
@@ -146,7 +155,7 @@ class TableKernel {
       } catch { throw new TableError('invalid-input'); }
       if (!eligible(context)) throw new TableError('not-submitted');
       const invocation = randomUUID();
-      const expected = metadata(this.binding, { ...m(original), invocation, operation: 'mutate', state: Buffer.from(plan.state), result: Buffer.from(plan.result),
+      const expected = makeMetadata(this.format, this.binding, { ...m(original), invocation, operation: 'mutate', state: Buffer.from(plan.state), result: Buffer.from(plan.result),
         plan: digest(['mutate', invocation, original.value.digest, plan.actions.map(a => [a.kind, a.key.type, a.key.id,
           a.kind === 'replace' ? a.etag : '', Buffer.from(a.payload).toString('base64')]), Buffer.from(plan.state).toString('base64'), Buffer.from(plan.result).toString('base64')]) });
       this.lifecycle = 'reconciling';
@@ -171,8 +180,7 @@ class TableKernel {
           try {
             const original = await this.authority(cleanup.context); const previous = m(original); const invocation = randomUUID();
             const plan = digest(['release', previous.digest, invocation]);
-            const release = Buffer.from(JSON.stringify([previous.owner, previous.epoch, invocation, plan]));
-            const expected = metadata(this.binding, { ...previous, owner: '', invocation, operation: 'release', plan, release });
+            const expected = makeMetadata(this.format, this.binding, cleanRelease(previous, invocation, plan));
             const result = await this.transition(original, expected, [], cleanup.context);
             if (result.kind !== 'committed') throw new TableError('unresolved');
             this.fence = result.record; this.owner = ''; this.ownership = 'none';
@@ -270,7 +278,7 @@ class TableKernel {
     if (this.invalidated) throw new TableError('unresolved');
     // Revoke pre-POST permission even across token awaits and independent cleanup
     // contexts. Reads and actual token/request/socket drain remain independent.
-    return this.client.write(expected, originalETag, actions, { ...context, signal: AbortSignal.any([context.signal, this.writePermission.signal]) });
+    return this.client.write(expected as MetadataFor<F>, originalETag, actions, { ...context, signal: AbortSignal.any([context.signal, this.writePermission.signal]) });
   }
   private async transition(original: StoredRecord, expected: Metadata, actions: readonly DataAction[], context: WorkContext): Promise<Confirmed> {
     if (this.invalidated) throw new TableError('unresolved');
@@ -287,12 +295,12 @@ class TableKernel {
         if (value.digest === expected.digest) return { kind: 'committed', record: current };
         // Release has owner-empty M. A later owner may already have advanced M, but must preserve this exact receipt.
         if (expected.operation === 'release' && value.initId === expected.initId && value.initDigest === expected.initDigest &&
-            value.epoch > expected.epoch && value.owner !== this.owner && value.release.equals(expected.release)) return { kind: 'committed', record: current };
+            value.epoch > expected.epoch && value.owner !== this.owner && matchingCleanReceipt(value, expected)) return { kind: 'committed', record: current };
         if (barrier && value.digest === barrier.digest) return { kind: 'cancelled', record: current };
         if (!same(current, original)) break;
         if (!barrier) {
           if (this.invalidated) throw new TableError('unresolved');
-          const invocation = randomUUID(); barrier = metadata(this.binding, { ...m(original), invocation, operation: 'barrier',
+          const invocation = randomUUID(); barrier = makeMetadata(this.format, this.binding, { ...m(original), invocation, operation: 'barrier',
             plan: digest(['barrier', original.value.digest, expected.digest, invocation]) });
           try { await this.write(barrier, original.etag, [], cleanup.context); } catch { /* 412 and lost ACK require another raw read. */ }
         }

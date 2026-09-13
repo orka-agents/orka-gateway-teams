@@ -6,7 +6,7 @@ import { createHttpHeaders } from '@azure/core-rest-pipeline';
 import { createTracingClient, useInstrumenter } from '@azure/core-tracing';
 import type { Instrumenter, TracingContext } from '@azure/core-tracing';
 import { AzureLogger, getLogLevel, setLogLevel } from '@azure/logger';
-import { createTableKernel } from '../src/storage/table/owner.js';
+import { createTableKernel, createTableKernelV2 } from '../src/storage/table/owner.js';
 import { createTableDeliveryJournal } from '../src/delivery/table-journal.js';
 import { finalDelivery } from './fixtures/outgoing.js';
 import { OwnedTableClient } from '../src/storage/table/client.js';
@@ -80,6 +80,12 @@ test('active recording instrumentation and verbose logs contain no private raw, 
   await k.mutate({ input: Buffer.from(marker), keys: [] }, () => ({ state: Buffer.from(marker), result: Buffer.from(marker),
     actions: [{ kind: 'create', key: { type: 'delivery', id: marker }, payload: Buffer.from(marker) }] }));
   await k.scan(); await k.read({ type: 'delivery', id: marker }); await k.close();
+  const v2 = await tableService(t, 'delivery', 2); const k2 = createTableKernelV2(tableBinding, v2.dependencies);
+  await k2.initialize(); await k2.acquire(); await k2.scan();
+  await k2.mutate({ input: Buffer.from(marker), keys: [] }, () => ({ state: Buffer.from(marker), result: Buffer.from(marker),
+    actions: [{ kind: 'create', key: { type: 'delivery', id: marker }, payload: Buffer.from(marker) }] }));
+  await k2.scan(); await k2.read({ type: 'delivery', id: marker }); await k2.close();
+  assert.equal(v2.rows.get('M')?.V, 2);
   // Repeat the active instrumentation exercise through the production delivery
   // journal. Private request fields must not reach any wire entity or M result.
   const delivery = await tableService(t); let checkedActions = 0;
@@ -103,11 +109,13 @@ test('active recording instrumentation and verbose logs contain no private raw, 
   await journal.settle(begin.claim, { kind: 'delivered', providerMessageId: 'privacy-receipt' });
   await journal.begin({ ...request, deliveryId: 'privacy-alias' }); inspect(journal.status()); await journal.close();
   assert.ok(checkedActions >= 10);
-  const client = new OwnedTableClient(bindTable(tableBinding), s.dependencies);
-  s.controls.hook = e => { e.res.writeHead(200, { 'content-type': 'application/json' }); e.res.end(JSON.stringify({ unknown: marker })); };
-  await client.read('M', context()).catch(inspect);
-  s.controls.request = (() => { throw hidden; }) as typeof https.request;
-  await client.read('M', context()).catch(inspect); await client.close();
+  for (const [format, service] of [[1, s], [2, v2]] as const) {
+    const client = new OwnedTableClient(bindTable(tableBinding), service.dependencies, format);
+    service.controls.hook = e => { e.res.writeHead(200, { 'content-type': 'application/json' }); e.res.end(JSON.stringify({ unknown: marker })); };
+    await client.read('M', context()).catch(inspect);
+    service.controls.request = (() => { throw hidden; }) as typeof https.request;
+    await client.read('M', context()).catch(inspect); await client.close();
+  }
   assert.equal(hits, 0); assert.equal(encodedSpanHits, 0); assert.equal(spans > startSpans, true); assert.equal(ended, spans);
   assert.equal(logs > startLogs, true); assert.equal(getLogLevel(), 'verbose');
 });
