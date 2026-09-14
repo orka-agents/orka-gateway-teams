@@ -198,6 +198,13 @@ test('real Table-backed registered SDK runtime persists input/reply and replays 
     }
     for (const path of [config.dbPath, config.outbound!.dbPath, `${config.outbound!.dbPath}.owner.sqlite`]) assert.equal(existsSync(path), false);
   }
+  function assertDrained() {
+    for (const service of [inboxService, deliveryService]) {
+      assert.equal(service.stats.requests, service.stats.requestCloses);
+      assert.equal(service.stats.requests, service.stats.socketCloses);
+      assert.equal(service.stats.conditionFailure === '', true);
+    }
+  }
   runtime = await start();
   assert.equal((await post(runtime.port, auth.token())).status, 200);
   await until(ingressCompleted); assert.ok(inboundAuthenticated); assert.ok(saved?.replyTarget && saved.replyTarget !== 'conformance');
@@ -210,9 +217,9 @@ test('real Table-backed registered SDK runtime persists input/reply and replays 
     const response = await deliver(runtime!, config, body); assert.equal(response.status, 200);
     assert.ok(JSON.stringify(await response.json()) === JSON.stringify(deliveryReceipt)); assertHistory();
   }
-  await duplicates(); await stopAndClose(); assertHistory();
+  await duplicates(); await stopAndClose(); assertHistory(); assertDrained();
   // Same services, maps, bindings and initialized data; only runtime/handle instances change.
-  runtime = await start(); await duplicates(); await stopAndClose(); assertHistory();
+  runtime = await start(); await duplicates(); await stopAndClose(); assertHistory(); assertDrained();
 });
 
 test('same App public token closure supports string, StringLike and factory; invalid acquisitions never send', async (t) => {
