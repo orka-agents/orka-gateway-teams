@@ -20,9 +20,22 @@ type Lifecycle = 'new' | 'initializing' | 'opening' | 'ready' | 'failed' | 'clos
 const aliasKey = (id: string): DataKey => ({ type: 'alias', id });
 const operationKey = (id: string): DataKey => ({ type: 'delivery', id });
 function safeError(error: unknown): DeliveryJournalError {
-  if (error instanceof DeliveryJournalError) return new DeliveryJournalError(error.code);
-  if (error instanceof TableError && ['invalid-input', 'corrupt', 'missing', 'exists', 'busy', 'closed'].includes(error.code))
-    return new DeliveryJournalError(error.code as 'invalid-input' | 'corrupt' | 'missing' | 'exists' | 'busy' | 'closed');
+  try {
+    if (error instanceof DeliveryJournalError) {
+      const code = error.code;
+      switch (code) {
+        case 'invalid-input': case 'missing': case 'exists': case 'busy': case 'scope-mismatch':
+        case 'unsupported-schema': case 'corrupt': case 'unavailable': case 'closed':
+          return new DeliveryJournalError(code);
+      }
+    } else if (error instanceof TableError) {
+      const code = error.code;
+      switch (code) {
+        case 'invalid-input': case 'corrupt': case 'missing': case 'exists': case 'busy': case 'closed':
+          return new DeliveryJournalError(code);
+      }
+    }
+  } catch { /* Caller exceptions can throw during classification; discard them. */ }
   return new DeliveryJournalError('unavailable');
 }
 
