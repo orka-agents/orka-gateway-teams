@@ -27,7 +27,7 @@ export function subscribeAuditAbort(signal: AbortSignal, listener: () => void): 
   return () => subscription[Symbol.dispose]();
 }
 
-function fields(value: unknown, allowed: readonly string[]): Record<string, unknown> {
+export function auditFields(value: unknown, allowed: readonly string[]): Record<string, unknown> {
   if (!value || typeof value !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) fail();
   const snapshot: Record<string, unknown> = Object.create(null);
   for (const key of Reflect.ownKeys(value)) {
@@ -40,9 +40,9 @@ function fields(value: unknown, allowed: readonly string[]): Record<string, unkn
 }
 /** Descriptor validation precedes admission; retain no original visitor/budget/options object. */
 export function auditConfig<F extends MetadataFormat>(visitor: AuditVisitorFor<F>, budget: OwnedAuditBudget, options?: OwnedAuditOptions): AuditConfig {
-  const v = fields(visitor, ['passes', 'record', 'endPass', 'finalize']);
-  const b = fields(budget, ['maxPages', 'maxPageBytes', 'maxDurationMs', 'maxTrackingBytes']);
-  const o = options === undefined ? Object.create(null) as Record<string, unknown> : fields(options, ['signal', 'requestTimeoutMs']);
+  const v = auditFields(visitor, ['passes', 'record', 'endPass', 'finalize']);
+  const b = auditFields(budget, ['maxPages', 'maxPageBytes', 'maxDurationMs', 'maxTrackingBytes']);
+  const o = options === undefined ? Object.create(null) as Record<string, unknown> : auditFields(options, ['signal', 'requestTimeoutMs']);
   for (const key of ['passes', 'record', 'endPass', 'finalize']) if (!Object.hasOwn(v, key)) fail();
   for (const key of ['maxPages', 'maxPageBytes', 'maxDurationMs', 'maxTrackingBytes']) if (!Object.hasOwn(b, key)) fail();
   if ((v.passes !== 1 && v.passes !== 2) || typeof v.record !== 'function' || typeof v.endPass !== 'function' || typeof v.finalize !== 'function') fail();

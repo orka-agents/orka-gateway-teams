@@ -58,6 +58,13 @@ export interface OwnedAuditVisitor {
 export interface OwnedAuditVisitorV2 extends Omit<OwnedAuditVisitor, 'record'> {
   record(this: void, pass: 1 | 2, record: Readonly<StoredRecordV2>): undefined;
 }
+/** Exact foreign V2 M identity; observation only, never authorization or ownership. */
+export interface ForeignOwnerFenceV2 {
+  initId: string; initDigest: string; owner: string; epoch: number; mDigest: string; etag: string;
+}
+export type ForeignInspectionBudget = OwnedAuditBudget;
+export type ForeignInspectionOptions = OwnedAuditOptions;
+export type ForeignInspectionVisitorV2 = OwnedAuditVisitorV2;
 /** Only this exact thrown value marks trusted domain-allocator exhaustion. */
 export const OWNED_AUDIT_BUDGET_EXHAUSTED: unique symbol = Symbol('owned-audit-budget-exhausted');
 export interface TableDependencies {

@@ -36,8 +36,11 @@ operator recovery execution remain unimplemented; SQLite is still the only
 runtime-selectable backend. The inbox requires explicit full-history audit/index
 budgets and accepts a fail-closed armed-crash availability tradeoff. V2 delivery
 keeps legacy complete-scan budgets and may retain ownership after interrupted
-startup rather than erase an unchecked recovery commitment. Tests use local HTTPS
-fixtures, not live Azure.
+startup rather than erase an unchecked recovery commitment. The separate
+[one-shot V2 foreign-owner inspector](docs/table-storage.md#one-shot-v2-foreign-owner-envelope-inspection)
+is GET-only with explicit budgets and actual drain; completion proves envelopes
+under a supplied fence, not domain validity, cross-pass equality, recovery authority
+or owner termination. Tests use local HTTPS fixtures, not live Azure.
 
 ## Deployment packaging
 

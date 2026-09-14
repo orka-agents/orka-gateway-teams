@@ -46,6 +46,13 @@ Tests exercise real public SDK/native HTTPS against an independently implemented
 local service; they use no Azure resources or real credentials. Preserve raw
 FULLmetadata validation, exact-M reconciliation, active-instrumentation privacy,
 nonexpiring ownership and actual-work drain. SDK ACKs are not commit authority.
+The separate V2 foreign-owner inspector must remain GET-only on every path, one-shot
+and ownership-free, with exact supplied M fences and actual token/native/iterator
+drain. Keep generic traversal mechanics shared without moving owned admission,
+permission retirement, callback poison or FIFO publication into the helper.
+`test/table-foreign-inspection*.test.ts` exercises native boundaries and zero-write
+failure/close paths; its compile-contract file verifies strict synchronous visitors.
+Envelope completion is not domain/cross-pass proof, recovery authority or termination.
 Inbox changes must preserve the exact planner-byte refresh manifest, complete
 body-free graph audit, independent queue/working ledgers and clock-before-restart
 projection. Do not copy the V1 delivery wrapper's unconditional close bridge into an

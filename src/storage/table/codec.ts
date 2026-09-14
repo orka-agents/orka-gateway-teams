@@ -48,10 +48,10 @@ export function dataRow(binding: BoundTable, key: DataKey): string {
 export function etag(value: unknown): string {
   if (typeof value !== 'string' || value.length > 256 || !/^(?:W\/)?"[\x21\x23-\x7e]+"$/u.test(value)) fail(); return value;
 }
-function uuid(value: unknown): string {
+export function uuid(value: unknown): string {
   if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value)) fail(); return value;
 }
-function hex(value: unknown): string { if (typeof value !== 'string' || !/^[0-9a-f]{64}$/u.test(value)) fail(); return value; }
+export function hex(value: unknown): string { if (typeof value !== 'string' || !/^[0-9a-f]{64}$/u.test(value)) fail(); return value; }
 function binary(value: unknown, max: number): Buffer {
   if (typeof value !== 'string' || value.length > 4 * Math.ceil(max / 3)) fail();
   const result = Buffer.from(value, 'base64'); if (result.toString('base64') !== value || result.length > max) fail(); return result;

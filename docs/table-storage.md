@@ -1,6 +1,7 @@
 # Azure Table storage — library only
 
-`src/storage/table/index.ts` exposes a bounded protocol/codec/ownership kernel.
+`src/storage/table/index.ts` exposes a bounded protocol/codec/ownership kernel
+and a separate GET-only V2 foreign-owner envelope inspector.
 `src/delivery/table-journal.ts` implements explicit V1 and V2 delivery journals on that kernel.
 `src/ingress/table-store.ts` implements the [V2 inbox](table-inbox.md), with a
 body-free two-pass domain audit and durable handoff arm. None is **a selectable
@@ -139,8 +140,8 @@ bounded scan, queue, exact-ETag barriers, invalidation and actual drain apply.
 
 Recovery-shaped metadata is supported for reading/validation and subsequent normal
 acquisition only. The normal transport refuses `recover` writes. This is **not an
-operator recovery implementation**: no recovery handle, foreign-owner inspection,
-recovery writer or runtime selector is provided. The V2 inbox can validate retained
+operator recovery implementation**: the separate foreign-owner inspector below
+provides envelope observation only, not a recovery handle, writer or runtime selector. The V2 inbox can validate retained
 recovery results and their complete graph/data commitments. The explicit V2
 delivery factory below validates the exact retained snapshot's recovery commitment
 at startup only. Neither reader authorizes or executes recovery.
@@ -400,6 +401,134 @@ M alone does not establish cross-pass row membership, ETag/digest consistency,
 domain graph correctness or application Ready; those are domain visitor duties.
 The [inbox auditor](table-inbox.md#persisted-layout-and-complete-audit) implements
 those graph checks, while its store separately owns startup and forwarding eligibility.
+
+## One-shot V2 foreign-owner envelope inspection
+
+`createTableForeignInspectorV2(binding, dependencies, expected)` is a separate,
+synchronously retained, I/O-free library factory. It fixes V2 metadata and V1 data
+rows; it neither discovers nor adopts a foreign fence. Its additive public types are:
+
+```ts
+interface ForeignOwnerFenceV2 {
+  initId: string;
+  initDigest: string;
+  owner: string;
+  epoch: number;
+  mDigest: string;
+  etag: string;
+}
+type ForeignInspectionBudget = OwnedAuditBudget;
+type ForeignInspectionOptions = OwnedAuditOptions;
+type ForeignInspectionVisitorV2 = OwnedAuditVisitorV2;
+```
+
+The returned handle exposes **only**:
+
+```ts
+inspect(visitor: ForeignInspectionVisitorV2,
+  budget: ForeignInspectionBudget,
+  options?: ForeignInspectionOptions): Promise<void>;
+status(): Readonly<{
+  lifecycle: 'new' | 'inspecting' | 'completed' | 'failed' | 'closing' | 'closed';
+  ownership: 'none';
+  pending: 0 | 1;
+}>;
+close(): Promise<void>;
+```
+
+The legacy `Owned` names in the aliased visitor/budget types grant no ownership.
+The inspector has no initialize/acquire/mutate/release/barrier/recover, normal
+kernel, write client, grant or Ready capability. Its supplied native Table path
+issues **GET only**, including error, cancellation and close paths. It never calls
+normal-owner close; `close()` drains only the private read transport. Trusted token
+acquisition may perform authentication I/O of its own: this is not a sandbox for
+arbitrary supplied code or a claim of globally read-only execution.
+
+Construction validates and privately snapshots the closed binding, full scope and
+exact fence **before inspecting dependency fields**. Inputs must have own enumerable
+data descriptors, with no missing/extra/accessor/nonenumerable/symbol fields.
+Canonical account/table casing and the existing scope/16 KiB binding limits apply.
+Require UUIDv4 initialization and nonempty owner IDs, a positive safe-integer epoch,
+lowercase SHA256 digests and an exact validated nonwildcard ETag. `initDigest` must
+match the V2 initialization recipe for that binding and `initId`. Malformed input
+or reflection exceptions produce cause-free `invalid-input`, without I/O. Caller
+mutation cannot change the captured partition, identity or fence.
+
+There is exactly **one valid admission per handle**, with no queue/retry/resume.
+Visitor/budget/options are validated and copied synchronously before admission;
+invalid preflight returns a rejected `invalid-input` promise without consuming a
+new handle or doing I/O. Overlap and a second valid inspection return
+`not-submitted`; once close begins, all inspection calls return `closed` without
+reflecting their inputs. A valid already-aborted request **does consume** the handle
+and fails `incomplete` without Table I/O. Unlike owned queued work, it is not a
+never-started `not-submitted` operation. `status()` is pure and returns a frozen,
+three-field snapshot with no IDs, raw state, cursors or error objects.
+
+Every pass performs a separate before-M point read, complete serial traversal,
+`endPass`, then a separate after-M read. Each M observation must pass the actual
+V2 raw lifecycle/binding decoder and match the original initialization, owner,
+epoch, full application M digest and exact ETag. Each traversal requires exactly
+one matching M. Empty continuation pages are not EOF. Raw bounds, strict physical
+row order, cursor cycles/nonprogress and copied record/payload/receipt delivery
+are the same shared mechanics as owned audit; owned admission/authority/FIFO and
+publication policies remain separate. `finalize` runs only after all final fences.
+
+All four budget fields are required; **there is no default full-history profile**.
+They have the exact [owned-audit meanings and ceilings](#explicit-owned-streaming-audit):
+`maxPages` and `maxPageBytes` are cumulative across passes; `maxDurationMs` is the
+admission-relative monotonic operation eligibility, including callbacks;
+`maxTrackingBytes` charges the same initial 80,926 bytes and overlapping growth
+reservations, not caller closure/index memory or RSS. Native page retention is
+capped before accepting excess bytes at `min(512 KiB, remainingPageBytes)`; a
+truncated body is never decoded as trusted input. Separate M point bodies are
+bounded to 512 KiB and excluded from the page-byte budget. Success performs exactly
+**2 × passes** M point reads; failure does not issue extra reads for symmetry.
+`requestTimeoutMs` remains 30,000 by default, bounded to 1..300,000; each request
+uses the earlier request/operation deadline, without a reset between passes.
+
+Callbacks have `this: void`, are invoked unbound and must return exactly
+`undefined`. They are trusted synchronous, non-I/O code: no asynchronous work,
+returned/thrown Promises or thenables. The same best-effort native Promise
+constructor/species limitation described above applies, not universal rejection
+containment. Calling this inspector's `inspect` or `close` from a callback
+synchronously latches and throws `unresolved`, even when caught, without recursive
+cleanup. Only `status` is permitted reentrantly. Only the exact thrown
+`OWNED_AUDIT_BUDGET_EXHAUSTED` sentinel is benign allocator exhaustion;
+callback-thrown `TableError('incomplete')` and other throws/returns are `unresolved`.
+
+Internal budgets, external cancellation and active close yield `incomplete`;
+request-only timeout/transport failure yields cause-free `unavailable`. Corruption,
+missing/duplicate/mismatched M and callback violations yield sticky `unresolved`,
+overriding an already-latched benign cancellation when a contradiction is observed.
+No raw exception, signal reason, body, cursor or SDK detail is logged or attached
+as an error cause. A failed handle stays consumed.
+
+Both the admitted `inspect` promise and `close` wait for **actual token, native
+request/socket and iterator completion**. Cancellation latches failure and aborts
+private work, stopping further requests/callbacks, but `pending` remains 1 through
+actual drain, even while status is `failed` or `closing`. Completion rechecks
+cancellation/deadline/close/failure after the final callback and again at publication;
+late success cannot win. A never-settling trusted token dependency can prevent both
+promises from settling indefinitely. Close is memoized and harmless before any
+admission or after completion. Previous inspection mismatch alone does not make
+close reject: resolved close proves only local drain. A transport-drain failure
+returns cause-free `unavailable`, not fabricated drain or foreign-owner release.
+
+**Records and derived state are provisional until `inspect()` succeeds.** Success
+means only the requested raw envelope traversal completed under its declared fence
+and budgets. Opaque raw-valid but domain-invalid payloads and partial domain
+initialization may pass. Two generic passes **do not prove equal data membership,
+ETags, timestamps or digests across passes**. A later domain visitor must separately
+budget and verify cross-pass versions/membership and the complete domain graph;
+there is no new index, recovery proposal, authorization or domain-ready output.
+
+The expected fence is not a credential, lock, physical-termination proof, snapshot
+isolation or durable assertion about later storage. Inspection may precede
+operational termination verification. Later recovery still requires independently
+authorized old-process termination/prevented restart, successor-start inhibition,
+complete domain validation and fresh exact conditional execution. No such recovery
+writer, operator workflow, runtime selection, identity/RBAC change or live Azure
+qualification ships with this inspector.
 
 ## SDK and qualification boundaries
 
