@@ -1,10 +1,9 @@
 import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
-import { test } from 'node:test';
+import { describe, test } from 'node:test';
 import type { TestContext } from 'node:test';
 import type { BeginDeliveryResult } from '../src/delivery/types.js';
-import { createTableDeliveryJournal } from '../src/delivery/table-journal.js';
-import { initialized, request } from './support/table-delivery.js';
+import { deliveryFormat, request } from './support/table-delivery.js';
 import { tableBinding } from './support/table-service.js';
 import { httpsFixture } from './support/ingress-https.js';
 
@@ -32,10 +31,12 @@ function worker(t: TestContext, config: object) {
     },
   };
 }
+for (const format of [1, 2] as const) describe(`V${format} delivery process handover`, () => {
+const { create: createTableDeliveryJournal, initialized } = deliveryFormat(format);
 for (const mode of ['claim', 'deliver'] as const) test(`controlled process handover after ${mode} preserves history and provider count`, { timeout: 30000 }, async t => {
   const s = await initialized(t); let posts = 0;
   const provider = await httpsFixture(t, (req, res) => { posts++; req.resume(); res.end('{"id":"process-receipt"}'); });
-  const config = { tableUrl: s.fixture.baseUrl, tableCA: s.fixture.ca.toString(), providerUrl: provider.baseUrl, providerCA: provider.ca.toString() };
+  const config = { format, tableUrl: s.fixture.baseUrl, tableCA: s.fixture.ca.toString(), providerUrl: provider.baseUrl, providerCA: provider.ca.toString() };
   const old = worker(t, { ...config, mode }); const first = await old.next(); assert.equal(first.kind, 'result');
   const contender = worker(t, { ...config, mode: 'replay' }); assert.deepEqual(await contender.next(), { kind: 'error', code: 'busy' }); assert.equal(await contender.exit, 0);
   assert.notEqual(s.rows.get('M')?.Owner, ''); assert.equal(posts, mode === 'deliver' ? 1 : 0);
@@ -51,4 +52,5 @@ for (const mode of ['claim', 'deliver'] as const) test(`controlled process hando
     assert.equal(await j.settle(first.result.claim, { kind: 'delivered', providerMessageId: 'late-process' }), 'stale');
   }
   assert.equal((await j.begin(request)).kind, mode === 'deliver' ? 'delivered' : 'unknown'); await j.close();
+});
 });

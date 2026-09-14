@@ -39,8 +39,8 @@ in ignored `bin/`. Do not commit binaries, credentials, or generated output.
 
 See [Table storage boundaries](docs/table-storage.md). The kernel lives entirely in
 `src/storage/table/`; the [V2 inbox](docs/table-inbox.md) lives under
-`src/ingress/table-*.ts`. Both it and the V1 Table delivery journal remain library-only;
-operator recovery, V2 delivery integration and runtime selection are separate work.
+`src/ingress/table-*.ts`. Both it and the explicit V1/V2 Table delivery journals remain
+library-only; operator recovery execution and runtime selection are separate work.
 Focused check: `node --import tsx --test test/table-*.test.ts`.
 Tests exercise real public SDK/native HTTPS against an independently implemented
 local service; they use no Azure resources or real credentials. Preserve raw
@@ -48,7 +48,7 @@ FULLmetadata validation, exact-M reconciliation, active-instrumentation privacy,
 nonexpiring ownership and actual-work drain. SDK ACKs are not commit authority.
 Inbox changes must preserve the exact planner-byte refresh manifest, complete
 body-free graph audit, independent queue/working ledgers and clock-before-restart
-projection. Do not copy the delivery wrapper's unconditional close bridge into an
+projection. Do not copy the V1 delivery wrapper's unconditional close bridge into an
 armed inbox: unknown/possible arms or clock debt require invalidation before kernel
 close. Closing may publish only private cleanup progress, never a grant or Ready.
 Keep SQLite differential traces separate from the documented armed-crash adaptation;

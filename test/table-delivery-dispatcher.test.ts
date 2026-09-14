@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { describe, test } from 'node:test';
 import { setImmediate as turn } from 'node:timers/promises';
-import { createTableDeliveryJournal } from '../src/delivery/table-journal.js';
 import { createDeliveryDispatcher } from '../src/outbound/dispatcher.js';
 import { fixtureProviderSender, providerServiceUrl } from './support/table-delivery-provider.js';
-import { opened, request, scope } from './support/table-delivery.js';
+import { deliveryFormat, request, scope } from './support/table-delivery.js';
 import { deferred, eventually, tableBinding } from './support/table-service.js';
 import { httpsFixture } from './support/ingress-https.js';
 
+for (const format of [1, 2] as const) describe(`V${format} Table/provider dispatcher`, () => {
+const { create: createTableDeliveryJournal, opened } = deliveryFormat(format);
 for (const scenario of ['receipt', 'late-token', 'late-receipt'] as const) test(`real SDK provider ${scenario}: retirement precedes queued Table finalization, no late duplicate POST`, { timeout: 20000 }, async t => {
   const { s, j } = await opened(t); const token = deferred<string>(); const tokenEntered = deferred();
   const blockerGate = deferred(); const blockerEntered = deferred(); const providerGate = deferred(); const providerEntered = deferred();
@@ -69,4 +70,20 @@ test('real sender cannot POST after a begin caller timer; dispatcher stop owns a
   const stop = dispatcher.stop().then(() => { stopped = true; }); await turn();
   assert.equal(responded, false); assert.equal(stopped, false); assert.equal(posts, 0);
   gate.resolve('synthetic.private.table.canary'); await delivery; await stop; await j.close(); assert.equal(posts, 0);
+});
+
+test('immutable historical receipt replays before changed routing policy and never calls the real provider', async t => {
+  const { s, j } = await opened(t); const begin = await j.begin(request);
+  assert.equal(begin.kind, 'claimed'); if (begin.kind !== 'claimed') throw new Error('Fixture claim missing');
+  await j.settle(begin.claim, { kind: 'delivered', providerMessageId: 'immutable' }); await j.close();
+  const next = createTableDeliveryJournal(tableBinding, s.dependencies); await next.open();
+  let posts = 0; let routes = 0; let tokens = 0;
+  const tls = await httpsFixture(t, (req, res) => { posts++; req.resume(); res.end('{"id":"unexpected"}'); });
+  const sender = fixtureProviderSender(tls.baseUrl, tls.ca, async () => { tokens++; return 'synthetic.provider.token'; });
+  const dispatcher = createDeliveryDispatcher({ journal: next, sender, scope, serviceUrls: [], recipientIds: [], getRoute: () => { routes++; return undefined; } });
+  const result = await dispatcher.deliver(request);
+  assert.equal(result.status === 'delivered' && result.providerMessageId === 'immutable', true);
+  assert.equal(routes, 0); assert.equal(tokens, 0); assert.equal(posts, 0);
+  await dispatcher.stop(); await next.close();
+});
 });

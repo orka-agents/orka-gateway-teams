@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { describe, test } from 'node:test';
 import type { TestContext } from 'node:test';
-import { createTableDeliveryJournal } from '../src/delivery/table-journal.js';
 import type { DeliveryOutcome } from '../src/delivery/types.js';
-import { code, opened, payload, replaceControl, replacePayload, request, rowKey } from './support/table-delivery.js';
+import { code, deliveryFormat, payload, replacePayload, request, rowKey } from './support/table-delivery.js';
 import { tableBinding, tableService } from './support/table-service.js';
 
+for (const format of [1, 2] as const) describe(`V${format} delivery retained results`, () => {
+const { create: createTableDeliveryJournal, opened, replaceControl } = deliveryFormat(format);
 type Service = Awaited<ReturnType<typeof tableService>>;
 type History = 'initialize' | 'claimed' | 'inFlight' | 'delivered' | 'rejected' | 'unknown' |
   'recorded' | 'unchanged' | 'ready' | 'old sending' | 'old unknown' | 'opaque stale' | 'missing stale' |
@@ -192,4 +193,5 @@ test('reachable stale for a rotated UUID attempt survives while the new attempt 
   assert.equal(await j.settle(first.claim, receipt), 'stale'); await j.close();
   const next = createTableDeliveryJournal(tableBinding, s.dependencies); await next.open();
   assert.deepEqual(await next.begin(request), { kind: 'unknown' }); await next.close();
+});
 });

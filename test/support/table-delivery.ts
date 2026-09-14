@@ -1,9 +1,10 @@
 import type { TestContext } from 'node:test';
-import { createTableDeliveryJournal } from '../../src/delivery/table-journal.js';
+import { createTableDeliveryJournal, createTableDeliveryJournalV2 } from '../../src/delivery/table-journal.js';
 import type { TableDeliveryJournalLimits } from '../../src/delivery/table-journal.js';
 import { DeliveryJournalError } from '../../src/delivery/types.js';
 import { finalDelivery } from '../fixtures/outgoing.js';
-import { boundBytes, hash, mDigest, partition, stamp, tableBinding, tableService } from './table-service.js';
+import { boundBytes, hash, mDigest, partition, stamp, tableBinding, tableService, wireM } from './table-service.js';
+import { mDigestV2, wireM2 } from './table-v2.js';
 
 export const request = { ...finalDelivery, accountId: 'Tenant' };
 export const scope = { appId: 'App', tenantId: 'Tenant' };
@@ -21,8 +22,11 @@ export function replacePayload(s: Awaited<ReturnType<typeof tableService>>, type
   s.rows.set(rowKey(type, id), dataEntity(type, id, value));
 }
 export function replaceControl(s: Awaited<ReturnType<typeof tableService>>, field: 'State' | 'Result', value: unknown) {
+  replaceControlFor(1, s, field, value);
+}
+function replaceControlFor(format: 1 | 2, s: Awaited<ReturnType<typeof tableService>>, field: 'State' | 'Result', value: unknown) {
   const m = { ...s.rows.get('M')!, [field]: (Buffer.isBuffer(value) ? value : Buffer.from(JSON.stringify(value))).toString('base64') };
-  s.rows.set('M', stamp({ ...m, Digest: mDigest(m) }, 90001));
+  s.rows.set('M', stamp({ ...m, Digest: (format === 1 ? mDigest : mDigestV2)(m) }, 90001));
 }
 export async function initialized(t: TestContext) {
   const s = await tableService(t); const init = createTableDeliveryJournal(tableBinding, s.dependencies);
@@ -32,4 +36,18 @@ export async function opened(t: TestContext, limits: TableDeliveryJournalLimits 
   const s = await initialized(t); const j = createTableDeliveryJournal(tableBinding, s.dependencies, limits); await j.open();
   t.after(async () => { await j.close().catch(() => undefined); });
   return { s, j };
+}
+/** Explicit format parameter controls the factory, HTTPS oracle and EVERY M rewrite. */
+export function deliveryFormat(format: 1 | 2) {
+  const create = format === 1 ? createTableDeliveryJournal : createTableDeliveryJournalV2;
+  const service = (t: TestContext) => tableService(t, 'delivery', format);
+  const initialized = async (t: TestContext) => {
+    const s = await service(t); const init = create(tableBinding, s.dependencies); await init.initialize(); await init.close(); return s;
+  };
+  const opened = async (t: TestContext, limits: TableDeliveryJournalLimits = {}) => {
+    const s = await initialized(t); const j = create(tableBinding, s.dependencies, limits); await j.open();
+    t.after(async () => { await j.close().catch(() => undefined); }); return { s, j };
+  };
+  return { create, tableService: service, initialized, opened, wireM: format === 1 ? wireM : wireM2,
+    replaceControl: (s: Awaited<ReturnType<typeof tableService>>, field: 'State' | 'Result', value: unknown) => replaceControlFor(format, s, field, value) };
 }

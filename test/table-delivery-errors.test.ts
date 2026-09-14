@@ -1,12 +1,11 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import { createTableDeliveryJournal } from '../src/delivery/table-journal.js';
+import { describe, test } from 'node:test';
 import type { TableDeliveryJournalLimits } from '../src/delivery/table-journal.js';
 import { DeliveryJournalError } from '../src/delivery/types.js';
 import type { DeliveryJournalErrorCode } from '../src/delivery/types.js';
 import { TableError } from '../src/storage/table/types.js';
-import { code } from './support/table-delivery.js';
-import { tableBinding, tableService } from './support/table-service.js';
+import { code, deliveryFormat } from './support/table-delivery.js';
+import { tableBinding } from './support/table-service.js';
 
 interface ExceptionCase { name: string; create: () => unknown; expected: DeliveryJournalErrorCode }
 const cases: ExceptionCase[] = [
@@ -49,6 +48,8 @@ for (const [value, expected] of [
   ['unavailable', 'unavailable'], ['incomplete', 'unavailable'], ['unresolved', 'unavailable'], ['not-submitted', 'unavailable'], ['unready', 'unavailable'],
 ] as const) cases.push({ name: `ordinary TableError ${value}`, create: () => new TableError(value), expected });
 
+for (const format of [1, 2] as const) describe(`V${format} delivery error containment`, () => {
+const { create: createTableDeliveryJournal, tableService } = deliveryFormat(format);
 for (const path of ['limits ownKeys', 'limits descriptor', 'dependency token getter', 'dependency request getter'] as const)
   test(`delivery factory contains exceptions from ${path} without I/O`, async t => {
     const s = await tableService(t);
@@ -94,4 +95,5 @@ for (const [name, create] of [
   catch (error) { try { safe = code('unavailable')(error); } catch { /* No hostile assertion output. */ } }
   assert.equal(s.stats.tokens, 0); assert.equal(s.stats.requests, 0); assert.equal(s.stats.writes, 0);
   assert.equal(safe, true); assert.equal(inspections, 0);
+});
 });

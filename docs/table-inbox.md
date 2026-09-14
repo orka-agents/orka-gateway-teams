@@ -7,9 +7,10 @@ its synchronous APIs, schemas, configuration and relay behavior are unchanged.
 
 There is no Table CLI, automatic initialization/adoption, V1 migration, lease,
 pruning, operator recovery command, HA promise or Azure hosting integration. The
-Table delivery journal still uses V1 metadata; a recoverable two-store runtime is
-separate work. These libraries do not provision storage or provide a production
-storage-token identity.
+Table delivery journal has explicit V1 and V2 factories; V2 validates retained
+recovery commitments at startup only. A recoverable two-store runtime is separate
+work. These libraries do not provision storage or provide a production storage-token
+identity.
 
 ## Construction and lifecycle
 

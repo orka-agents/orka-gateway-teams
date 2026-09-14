@@ -1,10 +1,11 @@
-import { object, rawJSON } from '../storage/table/codec.js';
-import type { StoredRecord } from '../storage/table/types.js';
+import { digest, object, rawJSON } from '../storage/table/codec.js';
+import type { BoundTable, Metadata, MetadataV2, StoredRecord, StoredRecordV2 } from '../storage/table/types.js';
 import { identity, validateClaim, validateOutcome } from './identity.js';
 import type { RequestIdentity } from './identity.js';
 import { DeliveryJournalError } from './types.js';
 import type { BeginDeliveryResult, DeliveryClaim, DeliveryOutcome, SettlementResult } from './types.js';
 
+type DomainRecord = StoredRecord | StoredRecordV2;
 export interface Operation {
   schema: 1; fingerprint: 1; digest: string; attemptId: string; attemptEpoch: number;
   state: 'ready' | 'sending' | 'delivered' | 'rejected' | 'unknown'; providerMessageId: string | null;
@@ -42,14 +43,19 @@ export function validateMarker(bytes: Uint8Array): void {
     if (v.journal !== 'teams-delivery') corrupt(); version(v.schema); version(v.fingerprint);
   });
 }
-export function decodeAlias(record: StoredRecord): Alias {
+// Keep the legacy overload last for V1 parameter-type introspection.
+export function decodeAlias(record: DomainRecord): Alias;
+export function decodeAlias(record: StoredRecord): Alias;
+export function decodeAlias(record: DomainRecord): Alias {
   return stored(() => {
     if (record.value.kind !== 'data' || record.value.type !== 'alias') corrupt(); identity(record.value.id);
     const v = shape(rawJSON(record.value.payload), ['schema', 'idempotencyId']); version(v.schema);
     return { schema: 1, idempotencyId: identity(v.idempotencyId) };
   });
 }
-export function decodeOperation(record: StoredRecord, epoch: number): Operation {
+export function decodeOperation(record: DomainRecord, epoch: number): Operation;
+export function decodeOperation(record: StoredRecord, epoch: number): Operation;
+export function decodeOperation(record: DomainRecord, epoch: number): Operation {
   return stored(() => {
     if (record.value.kind !== 'data' || record.value.type !== 'delivery') corrupt(); identity(record.value.id);
     const v = shape(rawJSON(record.value.payload), ['schema', 'fingerprint', 'digest', 'attemptId', 'attemptEpoch', 'state', 'providerMessageId']);
@@ -96,7 +102,31 @@ export function decodeResult(bytes: Uint8Array): Result {
  * Historical results are validated as data, never used as send authority. */
 export function audit(records: readonly StoredRecord[], genesis = false): number {
   const m = records.find(r => r.row === 'M'); if (!m || m.value.kind !== 'metadata') corrupt();
-  const metadata = m.value;
+  return auditGraph(records, m.value, genesis);
+}
+/** Startup only: the private kernel has just acquired and its complete scan proves
+ * the exact acquire fence. Historical Exit is not a commitment to later mutations. */
+export function auditV2Startup(binding: BoundTable, records: readonly StoredRecordV2[], genesis = false): number {
+  const m = records.find(r => r.row === 'M'); if (!m || m.value.kind !== 'metadata') corrupt();
+  const metadata = m.value; const exit = metadata.exit;
+  if (!metadata.owner || metadata.operation !== 'acquire' ||
+      (exit ? metadata.epoch - 1 !== exit.oldEpoch || metadata.owner === exit.oldOwner : metadata.epoch !== 1)) corrupt();
+  const epoch = auditGraph(records, metadata, genesis);
+  if (exit?.kind === 'operator-recovery') {
+    const b = binding.bytes.toString('base64'); let h = digest(['orka-recovery-data-v2', b]);
+    let count = 0; let previous: string | undefined;
+    for (const record of records) {
+      if (record.row === 'M') continue;
+      if (record.value.kind !== 'data' || (previous !== undefined && record.row <= previous)) corrupt();
+      h = digest(['orka-recovery-row-v2', h, record.row, record.value.digest]); previous = record.row; count++;
+    }
+    const data = digest(['orka-recovery-data-end-v2', h, count]);
+    const expected = digest(['orka-delivery-recovery-v2', b, metadata.state.toString('base64'), metadata.result.toString('base64'), data, count, 'epoch-restart']);
+    if (expected !== exit.domainDispositionDigest) corrupt();
+  }
+  return epoch;
+}
+function auditGraph(records: readonly DomainRecord[], metadata: Metadata | MetadataV2, genesis: boolean): number {
   if (genesis) {
     if (records.length !== 1 || metadata.epoch !== 1 || metadata.state.length || metadata.result.length) corrupt();
     return metadata.epoch;

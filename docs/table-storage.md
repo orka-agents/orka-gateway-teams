@@ -1,7 +1,7 @@
 # Azure Table storage — library only
 
 `src/storage/table/index.ts` exposes a bounded protocol/codec/ownership kernel.
-`src/delivery/table-journal.ts` implements the V1 delivery journal on that kernel.
+`src/delivery/table-journal.ts` implements explicit V1 and V2 delivery journals on that kernel.
 `src/ingress/table-store.ts` implements the [V2 inbox](table-inbox.md), with a
 body-free two-pass domain audit and durable handoff arm. None is **a selectable
 runtime backend**. SQLite remains the only shipped runtime backend. There is no Table CLI,
@@ -140,10 +140,10 @@ bounded scan, queue, exact-ETag barriers, invalidation and actual drain apply.
 Recovery-shaped metadata is supported for reading/validation and subsequent normal
 acquisition only. The normal transport refuses `recover` writes. This is **not an
 operator recovery implementation**: no recovery handle, foreign-owner inspection,
-recovery writer, V2 delivery wrapper or runtime selector is provided. The V2 inbox
-can validate retained recovery results and their complete graph/data commitments;
-that reader does not authorize or execute recovery. The existing delivery journal
-below remains V1; it is not operator-recoverable.
+recovery writer or runtime selector is provided. The V2 inbox can validate retained
+recovery results and their complete graph/data commitments. The explicit V2
+delivery factory below validates the exact retained snapshot's recovery commitment
+at startup only. Neither reader authorizes or executes recovery.
 
 Reads request `application/json;odata=fullmetadata`. The raw decoder runs **before
 SDK normalization**, detecting fatal UTF-8/BOM errors, decoded duplicate JSON keys,
@@ -437,11 +437,34 @@ is documented separately. The generic kernel does not interpret journal payloads
 
 ## Delivery journal contract
 
-Import `createTableDeliveryJournal` from `src/delivery/table-journal.ts`. It takes
-only a delivery binding, the same trusted Table dependencies, and optional limits:
+Import `createTableDeliveryJournal` (V1) or `createTableDeliveryJournalV2` (V2)
+from `src/delivery/table-journal.ts`. Both take a delivery binding, the same trusted
+Table dependencies, and optional limits:
 `{maxPending, maxPendingBytes, kernel: Partial<TableLimits>}`. Construction is
-synchronous and I/O-free. It returns a retained handle satisfying
-`DeliveryJournalPort`; it does not alter the synchronous SQLite public APIs.
+synchronous and I/O-free. Both return a retained handle satisfying
+`DeliveryJournalPort`; neither alters the synchronous SQLite public APIs. Format
+is pinned privately at construction, not selected by binding, limits or stored data.
+
+| Factory / stored metadata | Behavior |
+|---|---|
+| V1 / M1 | Existing format, bytes, limits and normal behavior. |
+| V2 / M2 with V1 data envelopes | Supported after complete startup validation. |
+| V1 / M2 or V2 / M1 | Reject before acquisition writes; no migration or fallback. |
+| Explicit initialize / existing M or orphan rows | Refuse; no adoption/reset. |
+| Normal open / bare or partial genesis | Refuse; only the successful initializer handle may install the marker. |
+
+```ts
+const initializer = createTableDeliveryJournalV2(binding, dependencies);
+await initializer.initialize(); // installs schema-one domain marker, then closes
+const journal = createTableDeliveryJournalV2(binding, dependencies);
+try {
+  await journal.open();
+  const begin = await journal.begin(request);
+  // Only a current claimed outcome can proceed through ordinary dispatch checks.
+} finally {
+  await journal.close(); // keep and drain the handle even when open rejects
+}
+```
 
 - `initialize()` is explicit and single-use: generic initialize, acquire, full
   scan, domain marker mutation, then drained release. Only this path accepts empty
@@ -450,8 +473,9 @@ synchronous and I/O-free. It returns a retained handle satisfying
   resume, adoption, migration or reinitialization path.
 - `open()` acquires unready, scans every retained envelope, validates the complete
   domain graph and captures the current epoch before publishing readiness.
-  Concurrent close cannot publish late readiness. Keep the handle after rejection:
-  cleanup drains locally but may still leave possible or confirmed ownership.
+  V2 additionally verifies any operator-recovery commitment at this fresh-acquire
+  boundary. Concurrent close cannot publish late readiness. Keep the handle after
+  rejection: cleanup drains locally but may still leave possible or confirmed ownership.
 - `begin(request)` validates and hashes synchronously, then queues **only** the
   three-field `RequestIdentity` (delivery ID, stable ID, digest). No outgoing text,
   metadata, route, message or request body is queued or persisted by this journal.
@@ -507,6 +531,65 @@ error. A mismatched Table binding reports `corrupt`, unlike SQLite's separate
 `scope-mismatch`. Domain failures invalidate the kernel even when a synchronous
 planner exception would otherwise be normalized to `invalid-input`.
 
+### V2 delivery recovery reader and startup release guard
+
+V2 changes only metadata lifecycle/envelopes, not delivery marker, result, operation
+or alias schemas. Opening preserves exact accepted state/result and physical data
+bytes, including valid historical JSON whitespace. There is no recovery-tagged
+delivery result. Old physical sending remains physically sending and becomes
+logically unknown; a recovery fixture does not grant resend permission.
+
+After its private kernel freshly acquires, the V2 wrapper requires owned `acquire`
+metadata with current epoch exactly `Exit.oldEpoch + 1` (or epoch one without Exit).
+It fully validates the ordinary graph and retained result, then, for an
+`operator-recovery` Exit only, computes this commitment using SHA256 of UTF-8
+`JSON.stringify(value)`:
+
+```text
+B = canonical binding bytes, base64
+h = digest(['orka-recovery-data-v2', B])
+for each physical data row in strictly increasing row-key order:
+  h = digest(['orka-recovery-row-v2', h, rowKey, envelopeDigest])
+D = digest(['orka-recovery-data-end-v2', h, count])
+expected = digest(['orka-delivery-recovery-v2', B,
+  exactStateBase64, exactResultBase64, D, count, 'epoch-restart'])
+```
+
+All data rows contribute, including unrelated operation/alias subgraphs. M, ETags
+and timestamps do not. A mismatch refuses readiness and invalidates release. The
+fold reuses the complete bounded scan; it does not serialize a second giant graph.
+Absent/clean Exits need no recovery hash but still require complete startup audit.
+
+**This check is startup-only, not an invariant of historical Exit versus current
+content.** Later legitimate begin/settle may change rows and M.result while retaining
+the old Exit. They are not compared with that stale commitment. A later clean close
+replaces the validated recovery Exit; another open audits the current graph without
+requiring a superseded historical receipt. An owned barrier can describe later
+mutated content, not necessarily the snapshot committed by a historical recovery
+Exit. Matching a digest proves consistency, not operator authority, physical death,
+protection against restored history or an everlasting audit ledger.
+
+Before acquisition can submit, V2 establishes a startup-proof obligation. Only a
+complete successful domain audit, or the same successful initializer's complete
+epoch-one empty-genesis proof, discharges it. On failed/incomplete startup or close
+during acquisition/scanning, the wrapper **synchronously invalidates before its
+first kernel close** while that obligation remains. This prevents cleanup from
+replacing an unchecked recovery Exit with a clean receipt. Late work cannot restore
+readiness or erase invalidation. Close still retains actual token, request,
+reconciliation and native drain; it is not a timeout-as-completion escape hatch.
+Closing a never-started handle is harmless. Successfully validated startup can
+release normally; V1 startup cleanup behavior is unchanged.
+
+**Availability consequence:** an interrupted V2 startup can retain an installed
+owner and block ordinary reopening even when the incomplete scan never established
+whether a recovery Exit existed. A failed close is not release evidence. There is
+no automatic takeover, reset, recovery executor or runtime configuration here.
+
+Delivery deliberately retains legacy `scan()` limits (10,000 pages / 64 MiB by
+default and the existing caller deadline), not the inbox's streaming/index audit.
+A complete valid history may exceed those operational budgets and fail to open.
+This slice does not qualify full-capacity history, RSS, latency or live Azure use.
+
 ### Delivery queue and timeout bridge
 
 The journal has its **own FIFO**, since a begin uses several kernel calls. Standard
@@ -527,7 +610,7 @@ its own close from inside that operation (which would self-deadlock). Positively
 reconciled healthy cleanup may release; uncertainty/domain corruption cannot.
 Never-settling trusted token work can indefinitely hold operation and shutdown.
 
-Delivery tests include public SQLite differential traces (independent attempt
+Both delivery factories run public SQLite differential traces (independent attempt
 mapping), lost begin/receipt ACKs, both original/barrier orders, queued old-writer
 fencing, full graph corruption and 103 old sends with zero recovery data writes.
 Actual kernel caller timers are exercised while token, reconciliation and native
@@ -539,4 +622,10 @@ service state across **controlled close/reopen handover** and demonstrate busy
 exclusion, unknown recovery and receipt replay, not physical crash recovery or a
 production worker-isolation architecture. Active recording instrumentation retains
 its positive leakage controls and exercises the production journal while asserting
-private request fields never enter wire entities or M.results.
+private request fields never enter wire entities or M.results. Shared hostile
+exception tests exercise both factories with safe known-code mappings, cause-free
+fallback and zero unintended I/O. V2-specific reader fixtures cover independent
+literal recovery vectors, exact-byte padding, coherent unrelated-subgraph deletion,
+malformed Exits, startup-only comparison, incomplete scan release bypasses and
+held acquisition/token/native-close drain. These fixtures read recovery-shaped
+histories; they neither execute recovery nor establish termination authority.

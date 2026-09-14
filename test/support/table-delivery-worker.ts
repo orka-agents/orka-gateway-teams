@@ -1,16 +1,17 @@
 import https from 'node:https';
 import type { IncomingMessage } from 'node:http';
-import { createTableDeliveryJournal } from '../../src/delivery/table-journal.js';
+import { createTableDeliveryJournal, createTableDeliveryJournalV2 } from '../../src/delivery/table-journal.js';
 import { DeliveryJournalError } from '../../src/delivery/types.js';
 import { fixtureProviderSender, providerServiceUrl } from './table-delivery-provider.js';
 import { createDeliveryDispatcher } from '../../src/outbound/dispatcher.js';
 import { finalDelivery } from '../fixtures/outgoing.js';
 
-interface Config { tableUrl: string; tableCA: string; providerUrl: string; providerCA: string; mode: 'claim' | 'deliver' | 'replay' }
+interface Config { format: 1 | 2; tableUrl: string; tableCA: string; providerUrl: string; providerCA: string; mode: 'claim' | 'deliver' | 'replay' }
 process.once('message', (input: Config) => { void run(input); });
 async function run(config: Config) {
   const scope = { appId: 'App', tenantId: 'Tenant' }; const request = { ...finalDelivery, accountId: 'Tenant' };
-  const journal = createTableDeliveryJournal({ account: 'Example123', table: 'Journal', storeId: 'stable', kind: 'delivery', scope }, {
+  const create = config.format === 2 ? createTableDeliveryJournalV2 : createTableDeliveryJournal;
+  const journal = create({ account: 'Example123', table: 'Journal', storeId: 'stable', kind: 'delivery', scope }, {
     token: async () => 'synthetic.private.table.canary',
     request: ((url: URL, options: https.RequestOptions, callback: (response: IncomingMessage) => void) =>
       https.request(new URL(url.pathname + url.search, config.tableUrl), { ...options, hostname: '127.0.0.1', servername: 'localhost', ca: config.tableCA }, callback)) as typeof https.request,
