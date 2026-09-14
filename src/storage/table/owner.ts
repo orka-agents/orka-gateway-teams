@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { bindTable, bytes, dataRow, digest, etag, fail, integer, object } from './codec.js';
 import { OwnedTableClient } from './client.js';
-import type { PageCursor, WorkContext } from './client.js';
-import { DEFAULT_LIMITS, MAX_PAYLOAD_BYTES, MAX_RESPONSE_BYTES, MAX_STATE_BYTES, MAX_WIRE_BYTES, OWNED_AUDIT_BUDGET_EXHAUSTED, TableError } from './types.js';
+import type { WorkContext } from './client.js';
+import { DEFAULT_LIMITS, MAX_PAYLOAD_BYTES, MAX_STATE_BYTES, MAX_WIRE_BYTES, OWNED_AUDIT_BUDGET_EXHAUSTED, TableError } from './types.js';
 import type { BoundTable, CallOptions, DataAction, DataKey, MutationInput, MutationResult, OwnedAuditBudget, OwnedAuditOptions, Plan, TableBinding, TableDependencies, TableLimits } from './types.js';
-import { auditConfig, chargeAuditWork, containCallbackPromise, signalAborted, subscribeAuditAbort } from './audit.js';
+import { auditConfig, containCallbackPromise, signalAborted, subscribeAuditAbort } from './audit.js';
 import type { AuditConfig } from './audit.js';
-import { AuditTracking } from './audit-tracking.js';
+import { runAuditTraversal, snapshotRecord } from './audit-traversal.js';
 import { cleanRelease, initDigest, makeMetadata, matchingCleanReceipt } from './format.js';
 import type { AnyMetadata as Metadata, AnyStoredRecord as StoredRecord, AuditVisitorFor, MetadataFor, MetadataFormat, PlannerFor, StoredFor } from './format.js';
 
@@ -21,14 +21,6 @@ function m(record: StoredRecord | undefined): Metadata {
 }
 function same(a: StoredRecord, b: StoredRecord): boolean { return a.etag === b.etag && a.value.digest === b.value.digest; }
 function eligible(context: WorkContext): boolean { return !context.signal.aborted && performance.now() < context.deadline; }
-function snapshotRecord(record: StoredRecord | undefined): StoredRecord | undefined {
-  if (!record) return undefined;
-  const value = record.value;
-  if (value.kind === 'data') return { ...record, value: { ...value, payload: Buffer.from(value.payload) } };
-  const buffers = { state: Buffer.from(value.state), result: Buffer.from(value.result) };
-  return 'release' in value ? { ...record, value: { ...value, ...buffers, release: Buffer.from(value.release) } } :
-    { ...record, value: { ...value, ...buffers, exit: value.exit ? { ...value.exit } : undefined } };
-}
 
 /** Synchronous construction keeps possibly acquired ownership reachable even when acquire rejects. */
 export function createTableKernel(binding: TableBinding, dependencies: TableDependencies, limits: Partial<TableLimits> = {}): TableKernel<1> {
@@ -335,28 +327,13 @@ class TableKernel<F extends MetadataFormat> {
       if (!matches(current)) this.poison(); this.checkAudit(job);
     };
     try {
-      const tracking = new AuditTracking(config.maxTrackingBytes, () => this.checkAudit(job));
-      let pages = 0; let size = 0;
-      for (const pass of config.passes === 1 ? [1] as const : [1, 2] as const) {
-        tracking.clear(); await authority(); let cursor: PageCursor | undefined; let control = false;
-        for (;;) {
-          this.checkAudit(job);
-          if (config.maxPageBytes - size < 1) throw new TableError('incomplete');
-          pages = chargeAuditWork(pages, 1, config.maxPages);
-          const page = await this.client.page(this.auditRequest(job, config), cursor, {
-            maxBytes: Math.min(MAX_RESPONSE_BYTES, config.maxPageBytes - size), exhaust: () => this.cancel(job, new TableError('incomplete')),
-          });
-          const record = page.records[0];
-          if (record?.row === 'M') { if (control || !matches(record)) this.poison(); control = true; }
-          if (!page.cursor && !control) this.poison();
-          this.checkAudit(job);
-          size = chargeAuditWork(size, page.size, config.maxPageBytes);
-          if (record) { tracking.row(record.row); this.auditCall(job, config.record, pass, snapshotRecord(record)); }
-          if (!page.cursor) break;
-          if (!tracking.cursor(page.cursor)) throw new TableError('incomplete'); cursor = page.cursor;
-        }
-        this.auditCall(job, config.endPass, pass); await authority();
-      }
+      await runAuditTraversal(config, {
+        check: () => this.checkAudit(job), authority, matches, contradiction: () => this.poison(),
+        page: (cursor, allowance) => this.client.page(this.auditRequest(job, config), cursor, allowance),
+        exhaust: () => this.cancel(job, new TableError('incomplete')),
+        record: (pass, record) => this.auditCall(job, config.record, pass, record),
+        endPass: pass => this.auditCall(job, config.endPass, pass),
+      });
       this.auditCall(job, config.finalize); this.checkAudit(job);
     } catch (error) {
       if (error instanceof TableError && (error.code === 'corrupt' || error.code === 'unresolved')) this.poison();
