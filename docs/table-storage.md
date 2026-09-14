@@ -1,9 +1,10 @@
 # Azure Table storage — library only
 
 `src/storage/table/index.ts` exposes a bounded protocol/codec/ownership kernel.
-`src/delivery/table-journal.ts` implements the delivery journal on that kernel.
-Neither is **a selectable runtime backend**; there is no Table ingress store yet.
-SQLite remains the only shipped runtime backend. There is no Table CLI,
+`src/delivery/table-journal.ts` implements the V1 delivery journal on that kernel.
+`src/ingress/table-store.ts` implements the [V2 inbox](table-inbox.md), with a
+body-free two-pass domain audit and durable handoff arm. None is **a selectable
+runtime backend**. SQLite remains the only shipped runtime backend. There is no Table CLI,
 configuration selector, identity provider, Azure provisioning, recovery command,
 lease, takeover, migration, deletion, pruning or hosting integration here.
 
@@ -138,9 +139,11 @@ bounded scan, queue, exact-ETag barriers, invalidation and actual drain apply.
 
 Recovery-shaped metadata is supported for reading/validation and subsequent normal
 acquisition only. The normal transport refuses `recover` writes. This is **not an
-operator recovery implementation**: no recovery handle, foreign-owner audit,
-domain recovery audit/result, V2 delivery wrapper, inbox or runtime selector is provided.
-The existing delivery journal below remains V1; it is not operator-recoverable.
+operator recovery implementation**: no recovery handle, foreign-owner inspection,
+recovery writer, V2 delivery wrapper or runtime selector is provided. The V2 inbox
+can validate retained recovery results and their complete graph/data commitments;
+that reader does not authorize or execute recovery. The existing delivery journal
+below remains V1; it is not operator-recoverable.
 
 Reads request `application/json;odata=fullmetadata`. The raw decoder runs **before
 SDK normalization**, detecting fatal UTF-8/BOM errors, decoded duplicate JSON keys,
@@ -394,7 +397,9 @@ This is not an indefinitely frozen snapshot for arbitrary later asynchronous
 continuations. Future domain callers must serialize their own operations and
 synchronously recheck eligibility before publishing a private projection. Stable
 M alone does not establish cross-pass row membership, ETag/digest consistency,
-domain graph correctness or application Ready; those are future visitor duties.
+domain graph correctness or application Ready; those are domain visitor duties.
+The [inbox auditor](table-inbox.md#persisted-layout-and-complete-audit) implements
+those graph checks, while its store separately owns startup and forwarding eligibility.
 
 ## SDK and qualification boundaries
 
@@ -427,7 +432,8 @@ scans and lost-ACK/owner/barrier races. They do **not** contact Azure or use rea
 credentials. Azure atomicity, primary-read consistency and service acceptance are
 document-backed assumptions exercised by a scripted local service, **not live
 Azure qualification** or physical-death proof. Delivery-domain audit coverage is
-described below; the generic kernel does not interpret journal payloads.
+described below; [inbox-domain coverage](table-inbox.md#resource-and-qualification-boundaries)
+is documented separately. The generic kernel does not interpret journal payloads.
 
 ## Delivery journal contract
 
