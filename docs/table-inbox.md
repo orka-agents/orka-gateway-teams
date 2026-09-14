@@ -168,11 +168,17 @@ caller-owned claim body merely to retain its work credit.
 Close may finish confirmed **private cleanup-only** publication—for example, a claim
 whose commit preceded close but whose refresh was still running—so it can clear the
 arm through a coherent index. It exposes no Ready, grant or ordinary success and
-starts no new ordinary work. Unknown/possible arming, an uncleared arm, failed sample,
-unflushed observation or corruption invalidates the kernel **before** its drain/close,
-preventing a fabricated clean release. Interrupted startup with unknown arm state
-also takes this conservative path. Caller/runtime ownership of actual Orka HTTP
-drain remains separate from store close.
+starts no new ordinary work. Unknown/possible arming, an uncleared arm, a failed
+armed-handoff sample, an unflushed observation or corruption invalidates the kernel
+**before** its drain/close, preventing a fabricated clean release. Interrupted startup
+with unknown arm state also takes this conservative path. Caller/runtime ownership
+of actual Orka HTTP drain remains separate from store close.
+
+An ordinary clock callback failure during open, claim, admission or settlement occurs
+before that operation submits a domain mutation or exposes new forwarding permission.
+It retires readiness; if the arm is positively known clear and no earlier handoff
+clock debt remains, the store may drain and release cleanly. Such a pre-submission
+failure does not create final-handoff debt by itself.
 
 ### Accepted armed-crash availability tradeoff
 
