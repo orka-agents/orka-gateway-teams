@@ -48,15 +48,15 @@ export interface OwnedAuditBudget {
   maxPages: number; maxPageBytes: number; maxDurationMs: number; maxTrackingBytes: number;
 }
 export interface OwnedAuditOptions { signal?: AbortSignal; requestTimeoutMs?: number }
-/** Trusted synchronous non-I/O callbacks: return exactly undefined; never return/throw Promises or start async work. */
+/** Trusted synchronous non-I/O callbacks, invoked unbound: return exactly undefined; never return/throw Promises or start async work. */
 export interface OwnedAuditVisitor {
   passes: 1 | 2;
-  record(pass: 1 | 2, record: Readonly<StoredRecord>): undefined;
-  endPass(pass: 1 | 2): undefined;
-  finalize(): undefined;
+  record(this: void, pass: 1 | 2, record: Readonly<StoredRecord>): undefined;
+  endPass(this: void, pass: 1 | 2): undefined;
+  finalize(this: void): undefined;
 }
 export interface OwnedAuditVisitorV2 extends Omit<OwnedAuditVisitor, 'record'> {
-  record(pass: 1 | 2, record: Readonly<StoredRecordV2>): undefined;
+  record(this: void, pass: 1 | 2, record: Readonly<StoredRecordV2>): undefined;
 }
 /** Only this exact thrown value marks trusted domain-allocator exhaustion. */
 export const OWNED_AUDIT_BUDGET_EXHAUSTED: unique symbol = Symbol('owned-audit-budget-exhausted');

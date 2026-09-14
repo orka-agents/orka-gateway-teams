@@ -7,9 +7,9 @@ import type { OwnedAuditBudget, OwnedAuditOptions } from './types.js';
 
 export interface AuditConfig extends OwnedAuditBudget {
   passes: 1 | 2;
-  record: (pass: 1 | 2, record: Readonly<AnyStoredRecord>) => undefined;
-  endPass: (pass: 1 | 2) => undefined;
-  finalize: () => undefined;
+  record: (this: void, pass: 1 | 2, record: Readonly<AnyStoredRecord>) => undefined;
+  endPass: (this: void, pass: 1 | 2) => undefined;
+  finalize: (this: void) => undefined;
   signal: AbortSignal | undefined;
   requestTimeoutMs: number;
 }

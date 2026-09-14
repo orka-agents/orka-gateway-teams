@@ -12,8 +12,10 @@ for (const format of [1, 2] as const) {
     const { s, k } = await owned(t, format); const row = putData(s); const trace: string[] = [];
     s.controls.hook = e => { trace.push(e.path.includes(",RowKey='M'") ? 'M' : 'page'); e.reply(); };
     await k.auditOwned({ passes, record(pass, record) {
-      assert.equal(k.status().lifecycle, 'owned-unready'); trace.push(String(pass) + ':' + record.row);
-    }, endPass(pass) { trace.push('end' + pass); }, finalize() { trace.push('finalize'); assert.equal(k.status().lifecycle, 'owned-unready'); } }, budget());
+      assert.equal(this, undefined); assert.equal(k.status().lifecycle, 'owned-unready'); trace.push(String(pass) + ':' + record.row);
+    }, endPass(pass) { assert.equal(this, undefined); trace.push('end' + pass); }, finalize() {
+      assert.equal(this, undefined); trace.push('finalize'); assert.equal(k.status().lifecycle, 'owned-unready');
+    } }, budget());
     const passTrace = (p: number) => ['M', 'page', p + ':M', 'page', p + ':' + row, 'end' + p, 'M'];
     assert.deepEqual(trace, [...passTrace(1), ...(passes === 2 ? passTrace(2) : []), 'finalize']);
     assert.equal(k.status().lifecycle, 'envelope-audited'); delete s.controls.hook; await k.close();

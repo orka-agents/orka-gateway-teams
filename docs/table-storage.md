@@ -298,8 +298,12 @@ is an independent copy, not authoritative kernel state.
 
 Callbacks are trusted synchronous non-I/O code returning exactly `undefined`;
 public V1/V2 callback return types enforce this rather than discarding results as
-`void`. Callbacks must not return or throw Promises, or start asynchronous work.
-Runtime checks remain necessary for JavaScript, unsafe casts and arbitrary throws.
+`void`. The kernel snapshots function references and invokes them unbound, with
+`undefined` as the receiver; it does not retain or bind the original visitor.
+The callback signatures declare `this: void`. Use closures or arrow functions for
+state rather than depending on a visitor receiver. Callbacks must not return or
+throw Promises, or start asynchronous work. Runtime checks remain necessary for
+JavaScript, unsafe casts and arbitrary throws.
 Other returns and exceptions poison the handle. Defensive rejection handling for
 ordinary returned, thrown and cross-realm native Promises is **best-effort**: the
 intrinsic reaction avoids instance `.then` getters, but still runs constructor/
