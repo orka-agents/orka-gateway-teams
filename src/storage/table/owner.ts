@@ -1,15 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import { bindTable, bytes, dataRow, digest, etag, fail, integer, object } from './codec.js';
 import { OwnedTableClient } from './client.js';
-import type { WorkContext } from './client.js';
-import { DEFAULT_LIMITS, MAX_PAYLOAD_BYTES, MAX_STATE_BYTES, MAX_WIRE_BYTES, TableError } from './types.js';
-import type { BoundTable, CallOptions, DataAction, DataKey, MutationInput, MutationResult, Plan, TableBinding, TableDependencies, TableLimits } from './types.js';
+import type { PageCursor, WorkContext } from './client.js';
+import { DEFAULT_LIMITS, MAX_PAYLOAD_BYTES, MAX_RESPONSE_BYTES, MAX_STATE_BYTES, MAX_WIRE_BYTES, OWNED_AUDIT_BUDGET_EXHAUSTED, TableError } from './types.js';
+import type { BoundTable, CallOptions, DataAction, DataKey, MutationInput, MutationResult, OwnedAuditBudget, OwnedAuditOptions, Plan, TableBinding, TableDependencies, TableLimits } from './types.js';
+import { auditConfig, chargeAuditWork, containCallbackPromise, signalAborted, subscribeAuditAbort } from './audit.js';
+import type { AuditConfig } from './audit.js';
+import { AuditTracking } from './audit-tracking.js';
 import { cleanRelease, initDigest, makeMetadata, matchingCleanReceipt } from './format.js';
-import type { AnyMetadata as Metadata, AnyStoredRecord as StoredRecord, MetadataFor, MetadataFormat, PlannerFor, StoredFor } from './format.js';
+import type { AnyMetadata as Metadata, AnyStoredRecord as StoredRecord, AuditVisitorFor, MetadataFor, MetadataFormat, PlannerFor, StoredFor } from './format.js';
 
 type Lifecycle = 'unowned' | 'acquiring' | 'owned-unready' | 'envelope-audited' | 'reconciling' | 'poisoned' | 'closing' | 'closed';
-type Job = { run: (context: WorkContext) => Promise<unknown>; resolve: (value: unknown) => void; reject: (error: TableError) => void;
+type JobBase = { run: (context: WorkContext) => Promise<unknown>; resolve: (value: unknown) => void; reject: (error: TableError) => void;
   context: WorkContext; bytes: number; started: boolean; finished: boolean; timer: ReturnType<typeof setTimeout>; removeAbort: () => void };
+type AuditJob = JobBase & { kind: 'audit'; controller: AbortController; failure?: TableError };
+type Job = (JobBase & { kind: 'legacy' }) | AuditJob;
 interface Confirmed { kind: 'committed' | 'cancelled'; record: StoredRecord }
 function m(record: StoredRecord | undefined): Metadata {
   if (!record || record.row !== 'M' || record.value.kind !== 'metadata') throw new TableError('corrupt'); return record.value;
@@ -42,6 +47,8 @@ class TableKernel<F extends MetadataFormat> {
   private readonly limits: TableLimits;
   private readonly queue: Job[] = [];
   private active: Job | undefined;
+  private auditCallback = false;
+  private auditHandoff = false;
   private pending = 0;
   private pendingBytes = 0;
   private closing?: Promise<void>;
@@ -103,6 +110,7 @@ class TableKernel<F extends MetadataFormat> {
     });
   }
   read(key: DataKey | 'M', options?: CallOptions): Promise<StoredFor<F> | undefined> {
+    this.guardAuditCallback();
     let row: string;
     try { row = key === 'M' ? 'M' : dataRow(this.binding, key); } catch { return Promise.reject(new TableError('invalid-input')); }
     return this.enqueue(Buffer.byteLength(row), options, async context => {
@@ -127,7 +135,28 @@ class TableKernel<F extends MetadataFormat> {
       }
     });
   }
+  /** Unlike legacy calls, completion owns actual work drain, including cancellation. */
+  auditOwned(visitor: AuditVisitorFor<F>, budget: OwnedAuditBudget, options?: OwnedAuditOptions): Promise<void> {
+    this.guardAuditCallback();
+    let config: AuditConfig;
+    try { config = auditConfig(visitor, budget, options); } catch { return Promise.reject(new TableError('invalid-input')); }
+    try {
+      this.capacity(0);
+      if (config.signal && signalAborted(config.signal)) throw new TableError('not-submitted');
+      const controller = new AbortController(); const deadline = performance.now() + config.maxDurationMs;
+      return new Promise<void>((resolve, reject) => {
+        const abort = () => this.cancel(job, new TableError(job.started ? 'incomplete' : 'not-submitted'));
+        const job: AuditJob = { kind: 'audit', controller, run: () => this.runAudit(job, config), resolve: () => resolve(), reject,
+          context: { signal: controller.signal, deadline }, bytes: 0, started: false, finished: false,
+          timer: setTimeout(() => this.cancel(job, new TableError('incomplete')), config.maxDurationMs),
+          removeAbort: () => {} };
+        if (config.signal) job.removeAbort = subscribeAuditAbort(config.signal, abort);
+        this.pending++; this.queue.push(job); this.pump();
+      });
+    } catch (error) { return Promise.reject(error instanceof TableError ? error : new TableError('invalid-input')); }
+  }
   mutate(input: MutationInput, planner: PlannerFor<F>, options?: CallOptions): Promise<MutationResult> {
+    this.guardAuditCallback();
     let snapshot: MutationInput; let size: number;
     try {
       object(input, ['input', 'keys']); if (!Array.isArray(input.keys) || input.keys.length > 99 || typeof planner !== 'function') fail();
@@ -166,8 +195,10 @@ class TableKernel<F extends MetadataFormat> {
   /** Irreversible domain-audit failure. Completion cannot restore authority; close still drains. */
   invalidate(): void {
     this.invalidated = true; if (this.lifecycle !== 'closed') this.lifecycle = 'poisoned'; this.writePermission.abort();
+    if (this.active?.kind === 'audit') this.cancel(this.active, new TableError('unresolved'));
   }
   close(): Promise<void> {
+    this.guardAuditCallback();
     if (this.closing) return this.closing;
     // Set the intake fence before cancelling queued work or waiting on active promises.
     const drained = new Promise<void>(resolve => { if (this.active) this.drain = resolve; else resolve(); });
@@ -193,6 +224,7 @@ class TableKernel<F extends MetadataFormat> {
       this.lifecycle = 'closed'; if (error) throw error;
     });
     for (const job of [...this.queue]) this.cancel(job, new TableError('not-submitted'));
+    if (this.active?.kind === 'audit') this.cancel(this.active, new TableError('incomplete'));
     return this.closing;
   }
   private capacity(size: number): void {
@@ -200,6 +232,7 @@ class TableKernel<F extends MetadataFormat> {
     if (this.pending >= this.limits.maxPending || this.pendingBytes + size > this.limits.maxPendingBytes) throw new TableError('not-submitted');
   }
   private enqueue<T>(size: number, options: CallOptions | undefined, run: (context: WorkContext) => Promise<T>): Promise<T> {
+    this.guardAuditCallback();
     try {
       this.capacity(size); if (options !== undefined) object(options, ['signal', 'timeoutMs']);
       const timeout = integer(options?.timeoutMs ?? this.limits.callTimeoutMs, 1, 300000);
@@ -209,7 +242,7 @@ class TableKernel<F extends MetadataFormat> {
       const context = { signal, deadline: performance.now() + timeout };
       return new Promise<T>((resolve, reject) => {
         const abort = () => this.cancel(job, new TableError(job.started ? 'unavailable' : 'not-submitted'));
-        const job: Job = { run, resolve: value => resolve(value as T), reject, bytes: size, context, started: false, finished: false,
+        const job: Job = { kind: 'legacy', run, resolve: value => resolve(value as T), reject, bytes: size, context, started: false, finished: false,
           timer: setTimeout(abort, timeout), removeAbort: () => signal.removeEventListener('abort', abort) };
         signal.addEventListener('abort', abort, { once: true });
         this.pending++; this.pendingBytes += size; this.queue.push(job); this.pump();
@@ -218,6 +251,11 @@ class TableKernel<F extends MetadataFormat> {
   }
   private cancel(job: Job, error: TableError): void {
     if (job.finished) return;
+    if (job.kind === 'audit') {
+      if (error.code === 'unresolved' || !job.failure) job.failure = error;
+      job.controller.abort();
+      if (job.started) return;
+    }
     job.reject(error);
     if (!job.started) {
       const index = this.queue.indexOf(job); if (index < 0) return;
@@ -228,11 +266,24 @@ class TableKernel<F extends MetadataFormat> {
     job.finished = true; clearTimeout(job.timer); job.removeAbort(); this.pending--; this.pendingBytes -= job.bytes;
   }
   private pump(): void {
-    if (this.active || this.closing) return;
+    if (this.active || this.closing || this.auditHandoff) return;
     const job = this.queue.shift(); if (!job) return;
     this.active = job; job.started = true;
     const invalidatedAtStart = this.invalidated;
     const complete = (result: { value: unknown } | { error: TableError }) => {
+      if (job.kind === 'audit') {
+        // Publish only at actual FIFO completion. Poison overrides even a benign
+        // native budget latch observed before a delayed request/socket close.
+        try { this.checkAudit(job); } catch { /* The safe failure is latched. */ }
+        const error = job.failure ?? ('error' in result ? result.error : undefined);
+        this.finish(job); this.active = undefined; this.auditHandoff = true;
+        if (error) job.reject(error);
+        else { this.lifecycle = 'envelope-audited'; job.resolve(undefined); }
+        // Direct completion reactions run before the next queued mutation. New
+        // admissions cannot bypass this handoff. Legacy-only scheduling is intact.
+        queueMicrotask(() => { this.auditHandoff = false; if (this.closing) this.drain?.(); else this.pump(); });
+        return;
+      }
       // Actual work has settled. Release its slot before publishing completion, so a
       // sequential caller can immediately reserve it even with a one-slot profile.
       this.finish(job); this.active = undefined;
@@ -244,8 +295,73 @@ class TableKernel<F extends MetadataFormat> {
       if (this.closing) this.drain?.(); else this.pump();
     };
     void Promise.resolve().then(() => {
-      if (!eligible(job.context)) throw new TableError('not-submitted'); return job.run(job.context);
+      if (job.kind === 'legacy' && !eligible(job.context)) throw new TableError('not-submitted');
+      return job.run(job.context);
     }).then(value => complete({ value }), error => complete({ error: error instanceof TableError ? error : new TableError('unavailable') }));
+  }
+  private guardAuditCallback(): void { if (this.auditCallback) this.poison(); }
+  private checkAudit(job: AuditJob): void {
+    if (this.invalidated || this.lifecycle === 'poisoned') this.cancel(job, new TableError('unresolved'));
+    else if (this.closing || !eligible(job.context)) this.cancel(job, new TableError('incomplete'));
+    if (job.failure) throw job.failure;
+  }
+  private auditRequest(job: AuditJob, config: AuditConfig): WorkContext {
+    this.checkAudit(job);
+    return { signal: job.controller.signal, deadline: Math.min(job.context.deadline, performance.now() + config.requestTimeoutMs) };
+  }
+  private auditCall(job: AuditJob, callback: (this: void, ...args: never[]) => undefined, ...args: unknown[]): void {
+    this.checkAudit(job); let result: unknown;
+    this.auditCallback = true;
+    try {
+      try { result = Reflect.apply(callback, undefined, args); }
+      catch (error) {
+        if (error === OWNED_AUDIT_BUDGET_EXHAUSTED) { this.cancel(job, new TableError('incomplete')); throw new TableError('incomplete'); }
+        try { containCallbackPromise(error); } finally { this.poison(); }
+      }
+      if (result !== undefined) { try { containCallbackPromise(result); } finally { this.poison(); } }
+    } finally { this.auditCallback = false; }
+    this.checkAudit(job);
+  }
+  private async runAudit(job: AuditJob, config: AuditConfig): Promise<void> {
+    this.requireOwned(false); this.lifecycle = 'owned-unready';
+    const fence = this.fence!; const value = m(fence);
+    const frozen = { etag: fence.etag, digest: value.digest, owner: value.owner, epoch: value.epoch };
+    const matches = (record: StoredRecord | undefined): boolean => !!record && record.row === 'M' && record.etag === frozen.etag &&
+      record.value.kind === 'metadata' && record.value.digest === frozen.digest && record.value.owner === frozen.owner && record.value.epoch === frozen.epoch;
+    const authority = async () => {
+      const current = await this.client.read('M', this.auditRequest(job, config));
+      // Classify observed authority contradiction before selecting a prior benign
+      // cancellation latch. No further I/O is issued just to obtain symmetry.
+      if (!matches(current)) this.poison(); this.checkAudit(job);
+    };
+    try {
+      const tracking = new AuditTracking(config.maxTrackingBytes, () => this.checkAudit(job));
+      let pages = 0; let size = 0;
+      for (const pass of config.passes === 1 ? [1] as const : [1, 2] as const) {
+        tracking.clear(); await authority(); let cursor: PageCursor | undefined; let control = false;
+        for (;;) {
+          this.checkAudit(job);
+          if (config.maxPageBytes - size < 1) throw new TableError('incomplete');
+          pages = chargeAuditWork(pages, 1, config.maxPages);
+          const page = await this.client.page(this.auditRequest(job, config), cursor, {
+            maxBytes: Math.min(MAX_RESPONSE_BYTES, config.maxPageBytes - size), exhaust: () => this.cancel(job, new TableError('incomplete')),
+          });
+          const record = page.records[0];
+          if (record?.row === 'M') { if (control || !matches(record)) this.poison(); control = true; }
+          if (!page.cursor && !control) this.poison();
+          this.checkAudit(job);
+          size = chargeAuditWork(size, page.size, config.maxPageBytes);
+          if (record) { tracking.row(record.row); this.auditCall(job, config.record, pass, snapshotRecord(record)); }
+          if (!page.cursor) break;
+          if (!tracking.cursor(page.cursor)) throw new TableError('incomplete'); cursor = page.cursor;
+        }
+        this.auditCall(job, config.endPass, pass); await authority();
+      }
+      this.auditCall(job, config.finalize); this.checkAudit(job);
+    } catch (error) {
+      if (error instanceof TableError && (error.code === 'corrupt' || error.code === 'unresolved')) this.poison();
+      throw error instanceof TableError ? error : new TableError('unavailable');
+    }
   }
   private requireUnowned(): void {
     if (this.invalidated || this.lifecycle === 'poisoned') throw new TableError('unresolved');

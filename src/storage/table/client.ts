@@ -15,7 +15,9 @@ import type { MetadataFor, MetadataFormat, StoredFor } from './format.js';
 export interface WorkContext { signal: AbortSignal; deadline: number }
 export interface PageCursor { token: string; partition?: string; row?: string }
 export interface RawPage<F extends MetadataFormat = 1> { records: StoredFor<F>[]; size: number; cursor?: PageCursor }
-type RequestKind = { kind: 'read'; row: string } | { kind: 'page'; cursor?: PageCursor } | { kind: 'write'; initialize: boolean };
+/** Internal owned-audit gate, never a legacy response-limit override. */
+export interface AuditPageAllowance { maxBytes: number; exhaust: () => void }
+type RequestKind = { kind: 'read'; row: string } | { kind: 'page'; cursor?: PageCursor; allowance?: AuditPageAllowance } | { kind: 'write'; initialize: boolean };
 interface NativeResponse { status: number; body: Buffer; headers: IncomingMessage['headers'] }
 function available(context: WorkContext): boolean { return !context.signal.aborted && performance.now() < context.deadline; }
 function unavailable(): TableError { return new TableError('unavailable'); }
@@ -49,10 +51,13 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
       await sdk.getEntity(this.binding.partition, row); return record;
     });
   }
-  page(context: WorkContext, cursor?: PageCursor): Promise<RawPage<F>> {
+  page(context: WorkContext, cursor?: PageCursor, allowance?: AuditPageAllowance): Promise<RawPage<F>> {
     return this.track(async () => {
+      let exhausted = false; let corrupt = false;
+      if (allowance && (!Number.isSafeInteger(allowance.maxBytes) || allowance.maxBytes < 1 || allowance.maxBytes > MAX_RESPONSE_BYTES)) fail();
+      const gate = allowance ? { maxBytes: allowance.maxBytes, exhaust: () => { exhausted = true; allowance.exhaust(); } } : undefined;
       let page: RawPage<F> | undefined; let parts: Omit<PageCursor, 'token'> = {};
-      const sdk = this.sdk({ kind: 'page', ...(cursor ? { cursor } : {}) }, context, response => {
+      const sdk = this.sdk({ kind: 'page', ...(cursor ? { cursor } : {}), ...(gate ? { allowance: gate } : {}) }, context, response => {
         if (response.status !== 200) throw unavailable();
         page = { records: readPage(this.format, this.binding, response.body), size: response.body.length };
         const partition = continuation(response.headers['x-ms-continuation-nextpartitionkey']);
@@ -63,14 +68,24 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
       const iterator = sdk.listEntities({ queryOptions: { filter: `PartitionKey eq '${this.binding.partition}'` } })
         .byPage({ maxPageSize: 1, ...(cursor ? { continuationToken: cursor.token } : {}) });
       try {
-        const result = await iterator.next(); if (!page || result.done) throw new TableError('incomplete');
-        const token = result.value.continuationToken;
-        if (token !== undefined) {
-          if (token.length > 8192 || (!parts.partition && !parts.row)) throw new TableError('corrupt');
-          page.cursor = { token, ...parts };
-        } else if (parts.partition || parts.row) throw new TableError('incomplete');
-        return page;
-      } finally { await iterator.return?.(); }
+        try {
+          const result = await iterator.next(); if (!page || result.done) throw new TableError('incomplete');
+          const token = result.value.continuationToken;
+          if (token !== undefined) {
+            if (token.length > 8192 || (!parts.partition && !parts.row)) throw new TableError('corrupt');
+            page.cursor = { token, ...parts };
+          } else if (parts.partition || parts.row) throw new TableError('incomplete');
+          return page;
+        } catch (error) {
+          if (allowance && error instanceof TableError && error.code === 'corrupt') corrupt = true;
+          throw error;
+        } finally { await iterator.return?.(); }
+      } catch (error) {
+        // Cleanup cannot erase already observed corruption or the native body
+        // gate. A truncated body must never become decoder input.
+        if (corrupt) throw new TableError('corrupt');
+        if (exhausted) throw new TableError('incomplete'); throw error;
+      }
     });
   }
   write(m: MetadataFor<F>, originalETag: string | undefined, actions: readonly DataAction[], context: WorkContext): Promise<void> {
@@ -124,7 +139,7 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
             catch { throw unavailable(); }
             if (!available(context) || signal.signal.aborted || typeof token !== 'string' || token.length > 8192 || !/^[A-Za-z0-9._~+/-]+=*$/u.test(token)) throw unavailable();
             this.fence(request, body, kind);
-            response = await this.native(request, body, token, { signal: signal.signal, deadline: context.deadline });
+            response = await this.native(request, body, token, { signal: signal.signal, deadline: context.deadline }, kind.kind === 'page' ? kind.allowance : undefined);
           } finally { clearTimeout(timer); context.signal.removeEventListener('abort', abort); }
           if (kind.kind !== 'write') {
             if (response.status !== 200 && !(kind.kind === 'read' && response.status === 404)) throw unavailable();
@@ -172,14 +187,14 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
       }
     }
   }
-  private native(request: PipelineRequest, body: string, token: string, context: WorkContext): Promise<NativeResponse> {
+  private native(request: PipelineRequest, body: string, token: string, context: WorkContext, allowance?: AuditPageAllowance): Promise<NativeResponse> {
     return new Promise((resolve, reject) => {
       let req: ClientRequest | undefined; let response: IncomingMessage | undefined; let result: NativeResponse | undefined;
-      let failed = false; let requestClosed = false; let socketClosed = true;
+      let failed = false; let exhausted = false; let requestClosed = false; let socketClosed = true;
       const finish = () => {
         if (!requestClosed || !socketClosed) return;
         context.signal.removeEventListener('abort', abort);
-        if (failed || !result) reject(unavailable()); else resolve(result);
+        if (exhausted) reject(new TableError('incomplete')); else if (failed || !result) reject(unavailable()); else resolve(result);
       };
       const abort = () => { failed = true; response?.destroy(); req?.destroy(); };
       try {
@@ -201,6 +216,10 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
           }
           if (res.headers['content-encoding'] !== undefined && res.headers['content-encoding'] !== 'identity') { abort(); return; }
           res.on('data', (part: Buffer) => {
+            if (allowance && part.length > allowance.maxBytes - size) {
+              if (!exhausted) { exhausted = true; allowance.exhaust(); }
+              abort(); return;
+            }
             size += part.length;
             if (size > MAX_RESPONSE_BYTES || !available(context)) abort(); else chunks.push(Buffer.from(part));
           });

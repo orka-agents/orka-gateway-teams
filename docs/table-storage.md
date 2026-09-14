@@ -44,6 +44,7 @@ environment endpoint override or production TLS bypass.
 | `acquire(options?)` | Read M, require owner-empty, increment the checked epoch, conditionally install a fresh private owner UUID, and reconcile. Leaves ownership **unready**. Never initializes. |
 | `read(keyOrM, options?)` | Raw validated point read. Owned healthy reads validate M's exact fence; unowned/poisoned reads are diagnostic, not permission to write. |
 | `scan(options?)` | Owned, serialized whole-partition generic envelope audit, with exact M before/after checks. Returns the complete bounded snapshot or rejects; never returns a partial audit. |
+| `auditOwned(visitor, budget, options?)` | Owned, serialized one/two-pass streaming envelope audit with explicit cumulative budgets and actual-drain completion. No complete record array or domain projection. |
 | `mutate({input, keys}, planner, options?)` | Snapshot bounded input/typed keys before queueing. Under serialization, read authoritative M and the requested rows, synchronously plan, copy/validate the plan, submit once, then reconcile. Requires a completed envelope audit. |
 | `close()` | Stop intake, remove queued/unissued work, drain actual active work and reconciliation, attempt healthy positively-owned release, and drain local transport even on failure. Idempotent: repeated calls return the same promise/result. |
 | `invalidate()` | Irreversible domain-audit failure. Stops future mutations and successful active completion, prevents clean release, but does not bypass actual work/transport drain on close. |
@@ -137,8 +138,8 @@ bounded scan, queue, exact-ETag barriers, invalidation and actual drain apply.
 
 Recovery-shaped metadata is supported for reading/validation and subsequent normal
 acquisition only. The normal transport refuses `recover` writes. This is **not an
-operator recovery implementation**: no recovery handle, `auditOwned`, domain
-recovery audit/result, V2 delivery wrapper, inbox or runtime selector is provided.
+operator recovery implementation**: no recovery handle, foreign-owner audit,
+domain recovery audit/result, V2 delivery wrapper, inbox or runtime selector is provided.
 The existing delivery journal below remains V1; it is not operator-recoverable.
 
 Reads request `application/json;odata=fullmetadata`. The raw decoder runs **before
@@ -219,7 +220,7 @@ a fixture, nor an orchestration stop acknowledgement proves physical termination
 | Caller deadline | 30 s default, configurable 1..300,000 ms (also per call) |
 | Reconciliation cleanup phase | Separate 30 s default, configurable 1..300,000 ms; outlives caller cancellation |
 | Reconciliation | At most 4 raw reads by default (configurable 2..16) and one barrier write |
-| Audit | 10,000 one-entity pages / 64 MiB raw bytes by default; configurable finite limits |
+| Legacy `scan()` | 10,000 one-entity pages / 64 MiB raw bytes by default; configurable finite limits |
 | Continuation | <=2048 ASCII characters per service component, <=8192 opaque SDK token characters |
 
 Fixed layouts have at most 13 custom properties on M and 10 on data, safely below
@@ -252,6 +253,148 @@ hard-real-time scheduler guarantees. Native request **and socket close** are awa
 The trusted token callback is also awaited even after cancellation: a callback
 that never settles can permanently prevent drain. There is no timeout-as-drain
 escape hatch or claim of owning arbitrary work created by external callbacks.
+
+## Explicit owned streaming audit
+
+Both explicit handles expose `auditOwned(visitor, budget, options?): Promise<void>`.
+V1 uses `OwnedAuditVisitor` / `StoredRecord`; V2 uses the separate
+`OwnedAuditVisitorV2` / `StoredRecordV2`. The closed visitor has `passes: 1 | 2`,
+`record(pass, record)`, `endPass(pass)` and `finalize()` callbacks. Inputs must be
+plain/null-prototype objects with own enumerable data descriptors; all callbacks,
+required budget scalars and optional settings are validated and snapshotted before
+admission. Invalid configuration does not retire existing permission or do I/O.
+
+All four `OwnedAuditBudget` fields are required positive safe integers:
+
+| Field | Meaning / engineering ceiling |
+|---|---|
+| `maxPages` | Attempted collection requests across all passes, including empty pages; <=`Number.MAX_SAFE_INTEGER` |
+| `maxPageBytes` | Complete collection-response body bytes, including JSON/base64 overhead, across all passes; <=`Number.MAX_SAFE_INTEGER` |
+| `maxDurationMs` | Admission-relative monotonic eligibility, including queue wait; <=2,147,483,647 ms |
+| `maxTrackingBytes` | Kernel cursor/hash/row representation capacity and growth overlap; <=256 MiB |
+
+There is **no default audit profile** and no domain index allocation option.
+A valid profile can be too small to complete even a small history. Totals use
+subtraction-before-addition checks and never reset between passes. This new method
+does not inherit the legacy `scan()` aggregate ceilings or `callTimeoutMs`.
+`OwnedAuditOptions` accepts only an optional native `signal` and
+`requestTimeoutMs` (default 30,000; 1..300,000 ms). Each request uses the earlier
+of its own deadline and the admission deadline. M point bodies are excluded from
+`maxPageBytes`: a successful audit performs exactly **2 × passes** point reads,
+each <=512 KiB, in addition to the collection body allowance. Headers/TLS/socket
+overhead are not body counters. The audit-only native page gate checks before
+retaining a chunk beyond `min(512 KiB, remainingPageBytes)`, aborts and drains,
+and preserves `incomplete` through SDK/iterator cleanup. It never decodes a
+budget-truncated body. A final received chunk/socket buffering can exceed the
+abort threshold; this is not exact network billing.
+
+A job starts only with healthy positive ownership, retiring any prior generic
+permission. It freezes private owner/epoch/ETag/digest for every pass. Each pass
+performs a **separate** before-M read, serial traversal, `endPass`, and separate
+after-M read. Traversal requires one matching M, strictly increasing row keys and
+no continuation cycles. Empty continuation pages continue; no prefetch occurs.
+`finalize` runs only after all passes. Every delivered record, payload and receipt
+is an independent copy, not authoritative kernel state.
+
+Callbacks are trusted synchronous non-I/O code returning exactly `undefined`;
+public V1/V2 callback return types enforce this rather than discarding results as
+`void`. The kernel snapshots function references and invokes them unbound, with
+`undefined` as the receiver; it does not retain or bind the original visitor.
+The callback signatures declare `this: void`. Use closures or arrow functions for
+state rather than depending on a visitor receiver. Callbacks must not return or
+throw Promises, or start asynchronous work. Runtime checks remain necessary for
+JavaScript, unsafe casts and arbitrary throws.
+Other returns and exceptions poison the handle. Defensive rejection handling for
+ordinary returned, thrown and cross-realm native Promises is **best-effort**: the
+intrinsic reaction avoids instance `.then` getters, but still runs constructor/
+species machinery and assumes safe constructor/species and relevant intrinsics.
+Nothing is awaited or assimilated.
+
+Audit poisoning is separate from process-level rejection handling. For example,
+an already-rejected native Promise with a nonconfigurable throwing `constructor`
+getter can prevent rejection-handler registration. The audit rejects `unresolved`,
+poisons and cannot publish envelope-audited permission or clean-release ownership,
+but the Promise may remain unhandled and trigger process diagnostics (potentially
+including its private rejection reason) or termination. This boundary is **not a
+sandbox or universal Promise containment guarantee**; do not use untrusted callbacks.
+
+Throwing the exact exported unique-symbol
+`OWNED_AUDIT_BUDGET_EXHAUSTED` is the sole benign domain-allocator exhaustion
+signal; throwing `TableError('incomplete')` is **not** that signal. Same-kernel
+queued operations and `close()` synchronously throw and latch invalidation during
+a callback, even if the visitor catches the error. Only `status()` and
+`invalidate()` are allowed. Arbitrary domain allocations or secret asynchronous
+work started by trusted callbacks are outside kernel resource accounting.
+
+### Tracking charge proof
+
+`audit-tracking.ts` reserves a fixed **80,860 bytes** at job start, before any
+collection receive, plus its hash-table capacity:
+
+- Old accepted cursor: `2 × (8192 + 2048 + 2048) = 24,576` bytes.
+- Incoming SDK cursor: `2 × (10976 + 2048 + 2048) = 30,144` bytes. The pinned
+  SDK creates base64 of JSON `{nextPartitionKey,nextRowKey}` before the client
+  checks token length. Each permitted 2048-character printable ASCII component
+  can double from JSON quote/backslash escaping; with 39 syntax bytes this is
+  `2 × (2048 + 2048) + 39 = 8231` JSON bytes, then
+  `4 × ceil(8231 / 3) = 10976` base64 characters. The accepted/retained token limit
+  remains **8192**; an oversized incoming token still poisons, without further
+  requests. Old-plus-incoming cursor reservation is **54,720 bytes**, including
+  both UTF-16 token/header representations.
+- Reusable, unpooled hash input: `3 × 8192 = 24,576` bytes, enough UTF-8 storage
+  for the maximum token's UTF-16 code units; a 32-byte digest and 128 bytes for
+  the temporary 64-character hex digest. Total hash scratch **24,736 bytes**.
+- Two unpooled last-row buffers: `2 × 2 × (8 + 1 + 342) = 1,404` bytes, covering
+  old/new overlap for the longest typed row (`delivery_` plus encoded identity).
+
+The open-addressed SHA256 set is a single unpooled `Buffer.alloc(33 × C)`:
+one explicit occupancy byte and 32 digest bytes per bucket, power-of-two capacity
+and load <=1/2. All-zero hashes are ordinary occupied entries. Initial `C=2`
+requires **66** more bytes: 80,926 total. Doubling from C to 2C must first fit
+**33 × (C + 2C)** in the remaining ledger, not just the steady-state capacity.
+The old buffer reference is dropped before releasing that reservation. For the
+first growth, the total required is **81,058** (80,860 + 198), not 80,992.
+Probes and rehash loops check eligibility. Pass boundaries clear/reuse existing
+capacity; pages and body totals remain cumulative.
+
+This is a conservative representation/capacity proof, **not guessed JS Set/Map
+entry sizes, measured heap/RSS or a guarantee of immediate GC**. The one-page,
+one-record, native response, SDK and short-lived single SHA256 context working
+sets remain separately bounded; no hash context or decoded record is retained
+per cursor. There is no unbudgeted per-row cross-pass map.
+
+### Failure and publication boundary
+
+Audit uses a discriminated job in the existing FIFO, not another queue. An active
+abort, timeout, invalidation or close stops later requests/callbacks but retains
+its promise and work slot until token/native/socket/iterator work actually settles.
+The audit-specific native abort subscription resists an earlier caller listener's
+`stopImmediatePropagation()`, without invoking caller signal getter/method
+overrides. The subscription is disposed on actual completion or queued removal;
+legacy cancellation is unchanged.
+Never-started caller cancellation/close removes the queued audit immediately with
+`not-submitted`; admission deadline exhaustion is `incomplete`. The kernel does
+not close itself or its client to manufacture audit drain. A never-settling token
+callback can prevent audit and external close from finishing indefinitely.
+
+Budgets, sentinel exhaustion, active caller cancellation/close and ordinary
+nonprogress give `incomplete`; per-request timeout/transport alone gives
+`unavailable`. Healthy known ownership may later release after drain and fresh
+exact authority proof. Observed corruption, missing/duplicate/mismatching M,
+authority drift, invalidation and callback violations sticky-poison with
+`unresolved`, overriding a prior benign failure even after late drain. No extra
+reads are fetched after cancellation to make accounting symmetric. Legacy
+poisoned diagnostic reads and early caller rejection remain unchanged.
+
+Envelope-audited is published only at the final eligible FIFO completion, after
+finalization and actual drain. An audit-specific deferred pump handoff lets the
+**direct promise completion continuation** run before the next FIFO mutation;
+new admissions cannot bypass that handoff. Legacy-only scheduling is unchanged.
+This is not an indefinitely frozen snapshot for arbitrary later asynchronous
+continuations. Future domain callers must serialize their own operations and
+synchronously recheck eligibility before publishing a private projection. Stable
+M alone does not establish cross-pass row membership, ETag/digest consistency,
+domain graph correctness or application Ready; those are future visitor duties.
 
 ## SDK and qualification boundaries
 
