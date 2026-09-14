@@ -25,7 +25,7 @@ export function advanceClock(state: Readonly<InboxState>, time: number, epoch: n
 /** Structurally decoded inputs only. These local cross-reference fences are not a complete
  * graph audit. Missing seals cannot enable active rows; terminal/explicit rows need no seal
  * to remain ineligible. A supplied seal must match, even for those sticky physical states. */
-export function projectEvent(event: Readonly<EventPayload>, state: Readonly<InboxState>, seal?: Readonly<SealPayload>): EffectiveEventState {
+export function projectEvent(event: Readonly<Omit<EventPayload, 'body'>>, state: Readonly<InboxState>, seal?: Readonly<SealPayload>): EffectiveEventState {
   if (event.order > state.records || event.received > state.lastNow || event.attemptEpoch > state.restartEpoch) {
     throw new TableError('corrupt');
   }
