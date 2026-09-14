@@ -63,11 +63,11 @@ export function validateRoute(value: unknown): ReplyRoute {
   return { serviceUrl: httpsBase(input.serviceUrl, true), channelId: 'msteams', bot: { id: identity(bot.id), role: 'bot' },
     conversation: { id: identity(conversation.id), conversationType: 'personal', tenantId: identity(conversation.tenantId) } };
 }
-export function matchRoute(event: EventEnvelope, route: ReplyRoute, scope: Readonly<IngressScope>): void {
+export function matchRoute(event: EventEnvelope, route: Pick<ReplyRoute, 'bot' | 'conversation'>, scope: Readonly<IngressScope>): void {
   if (event.accountId !== scope.tenantId || route.conversation.tenantId !== scope.tenantId ||
       event.contextId !== route.conversation.id || event.sender.id === route.bot.id) invalid();
 }
-export function fingerprint(event: EventEnvelope, route: ReplyRoute, scope: Readonly<IngressScope>): string {
+export function fingerprint(event: EventEnvelope, route: Pick<ReplyRoute, 'bot'>, scope: Readonly<IngressScope>): string {
   return digest(encode([scope.appId, scope.tenantId, event.protocolVersion, event.externalEventId, event.eventType,
     event.accountId, event.contextId, event.sender.id, event.text, route.bot.id, event.occurredAt ?? null]));
 }

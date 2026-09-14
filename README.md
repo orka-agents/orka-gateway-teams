@@ -30,10 +30,12 @@ npm run check
 Individual commands: `npm test`, `npm run typecheck`, `npm run build`.
 Build output is written to ignored `dist/`.
 
-The [Azure Table kernel and complete delivery journal](docs/table-storage.md) are
-library-only. The Table ingress store and runtime integration are not implemented;
-SQLite remains the only runtime-selectable backend. Tests use local HTTPS fixtures,
-not live Azure.
+The [Azure Table kernel and delivery journal](docs/table-storage.md), and the
+[V2 Table inbox](docs/table-inbox.md), are library-only. Runtime integration and
+operator recovery execution remain unimplemented; SQLite is still the only
+runtime-selectable backend. The inbox requires explicit full-history audit/index
+budgets and accepts a fail-closed armed-crash availability tradeoff. Tests use
+local HTTPS fixtures, not live Azure.
 
 ## Deployment packaging
 
