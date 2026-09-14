@@ -11,6 +11,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { Client } from '@microsoft/teams.common/http';
 import type { Token } from '@microsoft/teams.common/http';
 import { initializeDeliveryJournal, openDeliveryJournal } from '../src/delivery/journal.js';
+import { createTableDeliveryJournalV2 } from '../src/delivery/table-journal.js';
 import { startIngressRuntime } from '../src/ingress/main.js';
 import type { IngressRuntime } from '../src/ingress/main.js';
 import { ConfigurationError } from '../src/ingress/config.js';
@@ -18,6 +19,7 @@ import type { ServeConfig } from '../src/ingress/config.js';
 import { startReceiver } from '../src/ingress/server.js';
 import type { ReceiverDependencies } from '../src/ingress/server.js';
 import { initializeIngressStore, openIngressStore } from '../src/ingress/store.js';
+import { createTableIngressStore } from '../src/ingress/table-store.js';
 import { safeSdkLogger } from '../src/ingress/logger.js';
 import type { ProviderPost } from '../src/outbound/sender.js';
 import type { EventEnvelope } from '../src/protocol/types.js';
@@ -25,6 +27,9 @@ import { finalDelivery, finalMessage } from './fixtures/outgoing.js';
 import { expectedEvent } from './fixtures/incoming.js';
 import { authFixture, deferred, post, receiverConfig, scope, serviceUrl } from './support/ingress-auth.js';
 import { httpsFixture } from './support/ingress-https.js';
+import { auditBudget, indexBudget } from './support/table-ingress-audit.js';
+import { payload, rowKey } from './support/table-ingress-store.js';
+import { ingressBinding, tableBinding, tableService } from './support/table-service.js';
 
 const journalScope = { appId: scope.appId, tenantId: scope.tenantId };
 const route = { serviceUrl, channelId: 'msteams' as const, bot: { id: receiverConfig.recipientIds[0]!, role: 'bot' as const },
@@ -115,6 +120,99 @@ test('real registered SDK input -> inbox -> HTTPS Orka -> V1 reply -> SDK HTTPS 
   assert.equal((await (await deliver(runtime, f.config, { ...body, idempotencyId: 'fresh', deliveryId: 'fresh' })).json() as { status: string }).status, 'nonRetryableError');
   assert.equal((await (await deliver(runtime, f.config, { ...body, text: 'changed' })).json() as { status: string }).status, 'nonRetryableError');
   assert.equal(sends, 1); assert.equal(tokenCalls, 1);
+});
+
+test('real Table-backed registered SDK runtime persists input/reply and replays duplicates after clean fresh-handle restart', { timeout: 20000 }, async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'teams-table-runtime-'));
+  const handles: { close(): Promise<void> }[] = []; const errors: unknown[] = []; let runtime: IngressRuntime | undefined;
+  async function stopAndClose() {
+    const stopped = await Promise.allSettled([Promise.resolve().then(() => runtime?.stop()), runtime?.done]);
+    const closed = await Promise.allSettled(handles.map(handle => Promise.resolve().then(() => handle.close())));
+    for (const outcome of [...stopped, ...closed]) if (outcome.status === 'rejected') errors.push(outcome.reason);
+    assert.equal(errors.length, 0, 'Table runtime must open and close cleanly; no reset or takeover');
+  }
+  // Register before the fixtures so their HTTPS listeners remain alive through owner release.
+  t.after(async () => { try { await stopAndClose(); } finally { rmSync(directory, { recursive: true, force: true }); } });
+  const auth = await authFixture(t); const providerToken = randomUUID();
+  const orkaReceipt = { status: 'accepted', eventId: 'orka-table-event', state: 'Queued' };
+  const deliveryReceipt = { status: 'delivered', providerMessageId: 'provider-table-receipt' };
+  let saved: EventEnvelope | undefined; let relays = 0; let sends = 0; let tokenCalls = 0; let inboundAuthenticated = false;
+  const provider = await httpsFixture(t, (req, res) => {
+    const chunks: Buffer[] = []; req.on('data', chunk => chunks.push(chunk)); req.on('end', () => {
+      sends++; assert.ok(req.headers.authorization === `Bearer ${providerToken}`); assert.equal(req.method, 'POST');
+      assert.ok(req.url === '/v3/conversations/19%3Afixture-personal/activities');
+      assert.ok(JSON.stringify(JSON.parse(Buffer.concat(chunks).toString())) === JSON.stringify(finalMessage));
+      res.writeHead(201); res.end(JSON.stringify({ id: deliveryReceipt.providerMessageId }));
+    });
+  });
+  const upstream = await httpsFixture(t, (req, res) => {
+    const chunks: Buffer[] = []; req.on('data', chunk => chunks.push(chunk)); req.on('end', () => {
+      relays++; inboundAuthenticated = req.headers.authorization === `Bearer ${config.bearerToken}`;
+      assert.equal(req.method, 'POST'); assert.ok(req.url === '/api/v1/gateways/default/teams/events');
+      saved = JSON.parse(Buffer.concat(chunks).toString()); res.writeHead(202); res.end(JSON.stringify(orkaReceipt));
+    });
+  });
+  // Required SQLite paths remain valid but are never initialized or opened by this case.
+  const config: ServeConfig = { scope: { ...scope, orkaBaseUrl: upstream.baseUrl }, dbPath: join(directory, 'inbox.sqlite'),
+    receiver: { ...receiverConfig }, bearerToken: randomUUID(), caFile: join(directory, 'ca.pem'),
+    policy: { maxPending: 1000, maxRecords: 100000, replayWindowMs: 86400000 },
+    outbound: { dbPath: join(directory, 'delivery.sqlite'), bearerToken: randomUUID(), host: '127.0.0.1', port: 0 } };
+  writeFileSync(config.caFile!, upstream.ca, { mode: 0o600 });
+  const inboxService = await tableService(t, 'ingress', 2, config.scope);
+  const deliveryService = await tableService(t, 'delivery', 2, journalScope);
+  const inboxBinding = { ...ingressBinding, kind: 'ingress' as const, scope: config.scope };
+  const deliveryBinding = { ...tableBinding, kind: 'delivery' as const, scope: journalScope };
+  const options = { audit: auditBudget, maxIndexBytes: indexBudget, policy: config.policy };
+  function freshHandles() {
+    const inbox = createTableIngressStore(inboxBinding, inboxService.dependencies, options); handles.push(inbox);
+    const journal = createTableDeliveryJournalV2(deliveryBinding, deliveryService.dependencies); handles.push(journal);
+    return { inbox, journal };
+  }
+  const initializers = freshHandles();
+  await initializers.inbox.initialize(); await initializers.journal.initialize(); await stopAndClose();
+  const dependencies = { ...auth.dependencies, botToken: () => { tokenCalls++; return providerToken; },
+    providerPost: providerWrapper(t, provider.baseUrl, provider.ca, providerToken) };
+  function start() {
+    // Both real handles are reachable even if an opening hook fails before returning one.
+    const { inbox, journal } = freshHandles();
+    return startIngressRuntime(config, { ...dependencies,
+      openIngressStore: async () => { await inbox.open().catch(error => { errors.push(error); throw error; }); return inbox; },
+      openDeliveryJournal: async () => { await journal.open().catch(error => { errors.push(error); throw error; }); return journal; } });
+  }
+  function ingressCompleted() {
+    const row = saved && inboxService.rows.get(rowKey('event', saved.externalEventId)); if (!row) return false;
+    const event = payload(row);
+    return event.state === 'terminal' && event.body === null && event.replyTarget === saved!.replyTarget &&
+      event.receipt?.status === orkaReceipt.status && event.receipt.eventId === orkaReceipt.eventId && event.receipt.state === orkaReceipt.state;
+  }
+  function assertHistory() {
+    assert.ok(ingressCompleted());
+    const operation = deliveryService.rows.get(rowKey('delivery', finalDelivery.idempotencyId)); assert.ok(operation);
+    const receipt = payload(operation); assert.equal(receipt.state, 'delivered'); assert.ok(receipt.providerMessageId === deliveryReceipt.providerMessageId);
+    assert.equal([...inboxService.rows.values()].filter(row => row.T === 'event').length, 1);
+    assert.equal([...deliveryService.rows.values()].filter(row => row.T === 'delivery').length, 1);
+    assert.equal(relays, 1); assert.equal(sends, 1); assert.equal(tokenCalls, 1);
+    for (const service of [inboxService, deliveryService]) {
+      assert.ok(service.stats.requests > 0 && service.stats.writes > 0 && service.stats.reads > 0 && service.stats.pages > 0);
+      assert.ok(service.rows.size > 1); assert.equal(service.stats.violation, false);
+    }
+    for (const path of [config.dbPath, config.outbound!.dbPath, `${config.outbound!.dbPath}.owner.sqlite`]) assert.equal(existsSync(path), false);
+  }
+  runtime = await start();
+  assert.equal((await post(runtime.port, auth.token())).status, 200);
+  await until(ingressCompleted); assert.ok(inboundAuthenticated); assert.ok(saved?.replyTarget && saved.replyTarget !== 'conformance');
+  assert.ok(auth.strictRequests() > 0 && auth.requests() > auth.strictRequests());
+  const body = { ...finalDelivery, originatingEventId: orkaReceipt.eventId, replyTarget: saved.replyTarget };
+  const response = await deliver(runtime, config, body); assert.equal(response.status, 200);
+  assert.ok(JSON.stringify(await response.json()) === JSON.stringify(deliveryReceipt)); assertHistory();
+  async function duplicates() {
+    assert.equal((await post(runtime!.port, auth.token())).status, 200);
+    const response = await deliver(runtime!, config, body); assert.equal(response.status, 200);
+    assert.ok(JSON.stringify(await response.json()) === JSON.stringify(deliveryReceipt)); assertHistory();
+  }
+  await duplicates(); await stopAndClose(); assertHistory();
+  // Same services, maps, bindings and initialized data; only runtime/handle instances change.
+  runtime = await start(); await duplicates(); await stopAndClose(); assertHistory();
 });
 
 test('same App public token closure supports string, StringLike and factory; invalid acquisitions never send', async (t) => {

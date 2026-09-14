@@ -76,10 +76,13 @@ function checkEntity(e: Record<string, unknown>, expectedPartition: string, expe
     chunks.every((b, i) => b.length <= 65536 && b.toString('base64') === e[`B${i}`] && e[`B${i}@odata.type`] === 'Edm.Binary') &&
     e.Digest === hash(['orka-data-v1', expectedBinding.toString('base64'), e.T, e.Id, payload.toString('base64')]);
 }
-export async function tableService(t: TestContext, kind: 'delivery' | 'ingress' = 'delivery', metadataFormat: 1 | 2 = 1) {
+export async function tableService(t: TestContext, kind: 'delivery' | 'ingress' = 'delivery', metadataFormat: 1 | 2 = 1,
+  scopeOverride?: Partial<Extract<TableBinding, { kind: 'ingress' }>['scope']>) {
   const partition = kind === 'delivery' ? 'v1_delivery_c3RhYmxl' : 'v1_ingress_c3RhYmxl';
-  const expectedBinding = kind === 'delivery' ? boundBytes : Buffer.from(JSON.stringify(['orka-table-v1', 'example123', 'journal', 'ingress', 'stable',
-    ['App', 'Tenant', 'https://orka.example.invalid/', 'gateway', 'teams']]));
+  const scope = { appId: 'App', tenantId: 'Tenant', orkaBaseUrl: 'https://orka.example.invalid/', gatewayNamespace: 'gateway', gatewayName: 'teams', ...scopeOverride };
+  // Keep wire expectations fixture-owned, including the ordered full ingress scope.
+  const expectedBinding = Buffer.from(JSON.stringify(['orka-table-v1', 'example123', 'journal', kind, 'stable', kind === 'delivery' ?
+    [scope.appId, scope.tenantId] : [scope.appId, scope.tenantId, scope.orkaBaseUrl, scope.gatewayNamespace, scope.gatewayName]]));
   const rows = new Map<string, Record<string, unknown>>(); let version = 0;
   const stats = { requests: 0, writes: 0, reads: 0, pages: 0, tokens: 0, requestCloses: 0, socketCloses: 0, bytes: 0, violation: false, lastActions: 0, conditionFailure: '' };
   const controls: { hook?: (event: ServiceRequest) => Promise<void> | void; request?: TableDependencies['request'] } = {};
