@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { bindTable, integer, object } from '../storage/table/codec.js';
-import { createTableKernel } from '../storage/table/owner.js';
+import { createTableKernel, createTableKernelV2 } from '../storage/table/owner.js';
 import { DEFAULT_LIMITS, TableError } from '../storage/table/types.js';
-import type { DataAction, DataKey, Planner, TableBinding, TableDependencies, TableLimits } from '../storage/table/types.js';
+import type { BoundTable, DataAction, DataKey, Plan, PlannerView, PlannerViewV2, TableBinding, TableDependencies, TableLimits } from '../storage/table/types.js';
 import type { DeliveryRequest } from '../protocol/types.js';
 import { requestIdentity, validateClaim, validateOutcome, validateScope } from './identity.js';
 import type { RequestIdentity } from './identity.js';
-import { audit, corrupt, decodeAlias, decodeOperation, decodeResult, effectiveState, encode, marker, validateMarker } from './table-codec.js';
+import { audit, auditV2Startup, corrupt, decodeAlias, decodeOperation, decodeResult, effectiveState, encode, marker, validateMarker } from './table-codec.js';
 import type { Operation, Result } from './table-codec.js';
 import { DeliveryJournalError } from './types.js';
 import type { BeginDeliveryResult, DeliveryClaim, DeliveryJournalPort, DeliveryOutcome, JournalScope, SettlementResult } from './types.js';
@@ -20,9 +20,22 @@ type Lifecycle = 'new' | 'initializing' | 'opening' | 'ready' | 'failed' | 'clos
 const aliasKey = (id: string): DataKey => ({ type: 'alias', id });
 const operationKey = (id: string): DataKey => ({ type: 'delivery', id });
 function safeError(error: unknown): DeliveryJournalError {
-  if (error instanceof DeliveryJournalError) return new DeliveryJournalError(error.code);
-  if (error instanceof TableError && ['invalid-input', 'corrupt', 'missing', 'exists', 'busy', 'closed'].includes(error.code))
-    return new DeliveryJournalError(error.code as 'invalid-input' | 'corrupt' | 'missing' | 'exists' | 'busy' | 'closed');
+  try {
+    if (error instanceof DeliveryJournalError) {
+      const code = error.code;
+      switch (code) {
+        case 'invalid-input': case 'missing': case 'exists': case 'busy': case 'scope-mismatch':
+        case 'unsupported-schema': case 'corrupt': case 'unavailable': case 'closed':
+          return new DeliveryJournalError(code);
+      }
+    } else if (error instanceof TableError) {
+      const code = error.code;
+      switch (code) {
+        case 'invalid-input': case 'corrupt': case 'missing': case 'exists': case 'busy': case 'closed':
+          return new DeliveryJournalError(code);
+      }
+    }
+  } catch { /* Caller exceptions can throw during classification; discard them. */ }
   return new DeliveryJournalError('unavailable');
 }
 
@@ -30,12 +43,26 @@ function safeError(error: unknown): DeliveryJournalError {
  * Only initialize accepts generic empty genesis; normal open never adopts it. */
 export function createTableDeliveryJournal(binding: TableBinding, dependencies: TableDependencies, limits: TableDeliveryJournalLimits = {}) {
   try {
-    bindTable(binding); if (binding.kind !== 'delivery') throw new DeliveryJournalError('invalid-input');
-    return new TableDeliveryJournal(binding, dependencies, limits);
+    const bound = bindTable(binding); if (binding.kind !== 'delivery') throw new DeliveryJournalError('invalid-input');
+    return new TableDeliveryJournal(binding, dependencies, limits, 1, bound);
   } catch (error) { throw safeError(error); }
 }
+/** Explicit metadata V2; no migration, fallback or runtime backend selection. */
+export function createTableDeliveryJournalV2(binding: TableBinding, dependencies: TableDependencies, limits: TableDeliveryJournalLimits = {}) {
+  try {
+    // Validate the original closed shape before copying; do not hide invalid descriptors.
+    bindTable(binding); if (binding.kind !== 'delivery') throw new DeliveryJournalError('invalid-input');
+    const snapshot = { ...binding, scope: validateScope(binding.scope) };
+    const bound = bindTable(snapshot);
+    // Limits/dependency reflection must not split kernel, request and recovery identity.
+    return new TableDeliveryJournal(snapshot, dependencies, limits, 2, bound);
+  } catch (error) { throw safeError(error); }
+}
+type Storage = { format: 1; kernel: ReturnType<typeof createTableKernel> } | { format: 2; kernel: ReturnType<typeof createTableKernelV2> };
+type DomainPlanner = (view: PlannerView | PlannerViewV2) => Plan;
 class TableDeliveryJournal implements DeliveryJournalPort {
-  private readonly kernel: ReturnType<typeof createTableKernel>;
+  private readonly storage: Storage;
+  private get kernel() { return this.storage.kernel; }
   private readonly scope: JournalScope;
   private readonly maxPending: number;
   private readonly maxPendingBytes: number;
@@ -46,14 +73,16 @@ class TableDeliveryJournal implements DeliveryJournalPort {
   private readonly queue: Job[] = [];
   private active = false;
   private startup?: Promise<void>;
+  private startupProof: 'none' | 'pending' | 'validated' | 'invalidated' = 'none';
   private closing?: Promise<void>;
   private drained?: () => void;
-  constructor(binding: Extract<TableBinding, { kind: 'delivery' }>, dependencies: TableDependencies, limits: TableDeliveryJournalLimits) {
+  constructor(binding: Extract<TableBinding, { kind: 'delivery' }>, dependencies: TableDependencies, limits: TableDeliveryJournalLimits, format: 1 | 2, private readonly bound: BoundTable) {
     object(limits, ['maxPending', 'maxPendingBytes', 'kernel']);
     this.maxPending = integer(limits.maxPending ?? DEFAULT_LIMITS.maxPending, 1, 1024);
     this.maxPendingBytes = integer(limits.maxPendingBytes ?? DEFAULT_LIMITS.maxPendingBytes, 1, 256 * 1024 * 1024);
     this.scope = validateScope(binding.scope);
-    this.kernel = createTableKernel(binding, dependencies, limits.kernel);
+    this.storage = format === 1 ? { format, kernel: createTableKernel(binding, dependencies, limits.kernel) } :
+      { format, kernel: createTableKernelV2(binding, dependencies, limits.kernel) };
   }
   status() {
     return Object.freeze({ lifecycle: this.lifecycle, pending: this.pending, pendingBytes: this.pendingBytes, kernel: this.kernel.status() });
@@ -63,15 +92,25 @@ class TableDeliveryJournal implements DeliveryJournalPort {
   private start(initialize: boolean): Promise<void> {
     if (this.lifecycle !== 'new') return Promise.reject(new DeliveryJournalError(this.lifecycle === 'closed' || this.closing ? 'closed' : 'unavailable'));
     this.lifecycle = initialize ? 'initializing' : 'opening';
+    // Debt exists before acquisition can submit, even before Exit necessity is known.
+    if (this.storage.format === 2) this.startupProof = 'pending';
     this.startup = this.startOwned(initialize); return this.startup;
   }
   private async startOwned(initialize: boolean): Promise<void> {
     try {
       if (initialize) await this.kernel.initialize();
       await this.kernel.acquire();
-      const records = await this.kernel.scan();
-      this.epoch = this.domain(() => audit(records, initialize));
-      if (this.closing) throw new DeliveryJournalError('closed');
+      if (this.storage.format === 2) {
+        const records = await this.storage.kernel.scan();
+        this.epoch = this.domain(() => auditV2Startup(this.bound, records, initialize));
+      } else {
+        const records = await this.storage.kernel.scan();
+        this.epoch = this.domain(() => audit(records, initialize));
+      }
+      if (this.closing || this.startupProof === 'invalidated') throw new DeliveryJournalError('closed');
+      // No await between validation, lifecycle recheck and discharge. Same-handle
+      // epoch-one empty genesis is a complete proof too; normal open cannot adopt it.
+      if (this.startupProof === 'pending') this.startupProof = 'validated';
       if (initialize) {
         const result = await this.kernel.mutate({ input: Buffer.alloc(0), keys: [] }, () => ({
           state: marker(), result: encode({ schema: 1, operation: 'initialize' }), actions: [],
@@ -116,17 +155,24 @@ class TableDeliveryJournal implements DeliveryJournalPort {
       this.pending--; this.pendingBytes -= job.bytes; job.reject(new DeliveryJournalError(this.closing ? 'closed' : 'unavailable'));
     }
   }
+  private guardStartupRelease(): void {
+    if (this.startupProof !== 'pending') return;
+    this.startupProof = 'invalidated'; this.kernel.invalidate();
+  }
   private async retire(): Promise<void> {
     if (!this.closing) this.lifecycle = 'failed'; this.rejectQueued();
     // Never await journal.close here: it awaits this active journal operation.
     // Kernel close instead tracks actual work/reconciliation/native transport drain,
     // including work whose caller promise has already rejected on its timer.
+    this.guardStartupRelease();
     await this.kernel.close().catch(() => undefined);
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;
     this.lifecycle = 'closing';
     const drained = new Promise<void>(resolve => { if (this.active) this.drained = resolve; else resolve(); });
+    // Must precede the FIRST kernel.close: it schedules release before startup drains.
+    this.guardStartupRelease();
     const kernelClose = this.kernel.close();
     this.closing = Promise.allSettled([kernelClose, drained, this.startup]).then(results => {
       this.lifecycle = 'closed';
@@ -145,7 +191,7 @@ class TableDeliveryJournal implements DeliveryJournalPort {
       this.check(); return result;
     } catch (error) { await this.retire(); throw safeError(error); }
   }
-  private async mutate(keys: readonly DataKey[], snapshot: Snapshot, planner: Planner): Promise<Result> {
+  private async mutate(keys: readonly DataKey[], snapshot: Snapshot, planner: DomainPlanner): Promise<Result> {
     this.check(); let domainError: unknown;
     const result = await this.kernel.mutate({ input: encode(snapshot), keys }, view => {
       try { return planner(view); } catch (error) {

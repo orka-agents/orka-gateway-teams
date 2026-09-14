@@ -2,14 +2,15 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { test } from 'node:test';
-import { createTableDeliveryJournal } from '../src/delivery/table-journal.js';
+import { describe, test } from 'node:test';
 import { initializeDeliveryJournal, openDeliveryJournal } from '../src/delivery/journal.js';
 import type { BeginDeliveryResult, DeliveryClaim, DeliveryOutcome } from '../src/delivery/types.js';
 import type { DeliveryRequest } from '../src/protocol/types.js';
-import { code, initialized, opened, payload, replaceControl, replacePayload, request, rowKey, scope } from './support/table-delivery.js';
-import { ingressBinding, tableBinding, tableService, wireM, stamp } from './support/table-service.js';
+import { code, deliveryFormat, payload, replacePayload, request, rowKey, scope } from './support/table-delivery.js';
+import { ingressBinding, tableBinding, stamp } from './support/table-service.js';
 
+for (const format of [1, 2] as const) describe(`V${format} delivery journal`, () => {
+const { create: createTableDeliveryJournal, initialized, opened, replaceControl, tableService, wireM } = deliveryFormat(format);
 function claimed(result: BeginDeliveryResult): DeliveryClaim {
   assert.equal(result.kind, 'claimed'); if (result.kind !== 'claimed') throw new Error('Expected claim');
   assert.match(result.claim.attemptId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u); return result.claim;
@@ -113,6 +114,7 @@ for (const scenario of ['missing', 'bare-genesis', 'busy', 'wrong-binding'] as c
   const next = createTableDeliveryJournal(scenario === 'wrong-binding' ? { ...tableBinding, kind: 'delivery', scope: { ...scope, appId: 'Other' } } : tableBinding, s.dependencies);
   await assert.rejects(next.open(), code(scenario === 'bare-genesis' ? 'corrupt' : scenario === 'wrong-binding' ? 'corrupt' : scenario));
   if (scenario === 'bare-genesis') { assert.notEqual(s.rows.get('M')?.Owner, ''); await assert.rejects(next.close(), code('unavailable')); }
+  else if (format === 2) await assert.rejects(next.close(), code('unavailable'));
   else await next.close();
   await first.close();
 });
@@ -159,4 +161,5 @@ test('more than 100 old sends recover logically unknown without any data rewrite
   assert.equal(await next.settle(claims[102]!, { kind: 'unknown' }), 'unchanged');
   assert.equal(await next.settle(claims[102]!, { kind: 'delivered', providerMessageId: 'late' }), 'stale');
   assert.equal(dataWrites, 0); await next.close();
+});
 });

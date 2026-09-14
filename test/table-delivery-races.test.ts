@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import https from 'node:https';
-import { test } from 'node:test';
-import { createTableDeliveryJournal } from '../src/delivery/table-journal.js';
+import { describe, test } from 'node:test';
 import type { DeliveryOutcome } from '../src/delivery/types.js';
 import type { DeliveryRequest } from '../src/protocol/types.js';
-import { code, initialized, opened, payload, replacePayload, request, rowKey } from './support/table-delivery.js';
-import { deferred, eventually, syntheticToken, tableBinding, tableService } from './support/table-service.js';
+import { code, deliveryFormat, payload, replacePayload, request, rowKey } from './support/table-delivery.js';
+import { deferred, eventually, syntheticToken, tableBinding } from './support/table-service.js';
 
+for (const format of [1, 2] as const) describe(`V${format} delivery races and budgets`, () => {
+const { create: createTableDeliveryJournal, initialized, opened, tableService } = deliveryFormat(format);
 const receipt = { kind: 'delivered', providerMessageId: 'saved-receipt' } as const;
 const pause = () => new Promise(r => setTimeout(r, 30));
 async function claim(j: ReturnType<typeof createTableDeliveryJournal>, r = request) {
@@ -137,7 +138,8 @@ for (const fault of ['target', 'self-alias', 'second-target', 'drift'] as const)
   assert.throws(() => j.begin(request), code('unavailable')); await assert.rejects(j.close(), code('unavailable'));
 });
 
-for (const phase of ['acquire', 'scan'] as const) test(`close during late ${phase} cannot publish readiness and waits for actual startup`, async t => {
+// V2 requires rejection/retention here; its held-native/token counterparts live in the startup guard suite.
+if (format === 1) for (const phase of ['acquire', 'scan'] as const) test(`close during late ${phase} cannot publish readiness and waits for actual startup`, async t => {
   const s = await initialized(t); const gate = deferred(); let entered = false; let ended = false;
   s.controls.hook = async e => {
     if (!entered && (phase === 'acquire' ? e.actions[0]?.entity.Operation === 'acquire' : e.req.method === 'GET' && !e.path.includes('RowKey='))) {
@@ -178,7 +180,9 @@ test('failed partial initialization remains present and cannot resume, reset or 
   };
   const j = createTableDeliveryJournal(tableBinding, s.dependencies); await assert.rejects(j.initialize(), code('unavailable')); await j.close();
   delete s.controls.hook; assert.equal(s.rows.size, 1);
-  const init = createTableDeliveryJournal(tableBinding, s.dependencies); await assert.rejects(init.initialize(), code('exists')); await init.close();
+  const init = createTableDeliveryJournal(tableBinding, s.dependencies); await assert.rejects(init.initialize(), code('exists'));
+  if (format === 2) await assert.rejects(init.close(), code('unavailable')); else await init.close();
   const next = createTableDeliveryJournal(tableBinding, s.dependencies); await assert.rejects(next.open(), code('corrupt'));
   await assert.rejects(next.close(), code('unavailable')); assert.notEqual(s.rows.get('M')?.Owner, '');
+});
 });
