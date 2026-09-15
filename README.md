@@ -263,8 +263,10 @@ identical directional tokens and path collisions (including canonical aliases an
 ownership/SQLite sidecars) fail closed, not silently fall back to ingress-only.
 Bearers are nonempty RFC6750-shaped values bounded at 8192 characters; do not log
 or put them on command lines. Both stores open before either listener binds. A
-second-store/listener failure unwinds ownership without deleting records or
-starting the relay. Ingress `.port` and `/api/messages` remain unchanged.
+second-store/listener failure attempts to close both stores without deleting records
+or starting the relay. Table ownership may remain occupied after an incomplete
+startup audit; cleanup is not release evidence. Ingress `.port` and `/api/messages`
+remain unchanged.
 
 ### Authenticated V1 API
 
