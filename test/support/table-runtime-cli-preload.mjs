@@ -52,9 +52,12 @@ http.request = (...args) => {
   stats.identity++;
   return tracked(nativeHttp(url, options, callback));
 };
+// Native get closes over its original request; route both convenience methods too.
+http.get = (...args) => { const req = http.request(...args); req.end(); return req; };
+https.get = (...args) => { const req = https.request(...args); req.end(); return req; };
 // Node fetch does not use https.request. Map only the exact fixed JWKS resource;
 // production strict-auth parsing, endorsement, claims and RS256 checks still run.
-globalThis.fetch = (input, options = {}) => {
+globalThis.fetch = async (input, options = {}) => {
   if (String(input) !== keysUrl) return denied();
   return new Promise((resolve, reject) => {
     const req = mappedHttps([new URL(keysUrl), { method: 'GET', headers: options.headers,

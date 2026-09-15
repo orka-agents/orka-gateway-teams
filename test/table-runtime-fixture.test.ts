@@ -2,10 +2,39 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { cleanupTableCliRuns, hasTableCanary, runTableContainerStage } from './support/table-runtime-cli.js';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { syntheticToken } from './support/table-service.js';
+
+for (const mode of ['fetch', 'http-get', 'https-get']) test(`native preload preserves ${mode} refusal without an unmapped call`, async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'teams-preload-contract-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  copyFileSync(new URL('./support/table-runtime-cli-preload.mjs', import.meta.url), join(directory, 'preload.mjs'));
+  writeFileSync(join(directory, 'native-settings.json'), JSON.stringify({ identity: 'http://127.0.0.1:1/msi/token' }));
+  // An unmapped get is a local sentinel, not a real outbound network attempt.
+  writeFileSync(join(directory, 'check.mjs'), `
+import assert from 'node:assert/strict';
+import http, { get as httpGet } from 'node:http';
+import https, { get as httpsGet } from 'node:https';
+let bypass = 0;
+http.get = https.get = () => { bypass++; throw new Error('Unmapped get'); };
+await import('./preload.mjs');
+const expected = { message: 'Unexpected fixture destination' };
+if (process.argv[2] === 'fetch') {
+  const pending = fetch('https://127.0.0.1:1/denied');
+  assert.equal(pending instanceof Promise, true);
+  await assert.rejects(pending, expected);
+} else {
+  assert.throws(() => process.argv[2] === 'http-get' ? httpGet('http://127.0.0.1:1/denied') : httpsGet('https://127.0.0.1:1/denied'), expected);
+}
+assert.equal(bypass, 0);
+`);
+  const passed = await new Promise<boolean>(resolve => execFile(process.execPath, [join(directory, 'check.mjs'), mode],
+    { timeout: 10000, maxBuffer: 65536 }, error => resolve(error === null)));
+  assert.equal(passed, true, 'preload refusal contract');
+});
 
 const closed = { exitCode: 0, signalCode: null, kill: () => true };
 const run = (name: string, done: Promise<unknown> = Promise.resolve()) => ({ name, child: closed, done });
