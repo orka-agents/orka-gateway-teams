@@ -1,13 +1,15 @@
-# Azure Table storage — library only
+# Azure Table storage — kernel and journal contracts
 
 `src/storage/table/index.ts` exposes a bounded protocol/codec/ownership kernel
 and a separate GET-only V2 foreign-owner envelope inspector.
 `src/delivery/table-journal.ts` implements explicit V1 and V2 delivery journals on that kernel.
 `src/ingress/table-store.ts` implements the [V2 inbox](table-inbox.md), with a
-body-free two-pass domain audit and durable handoff arm. None is **a selectable
-runtime backend**. SQLite remains the only shipped runtime backend. There is no Table CLI,
-configuration selector, identity provider, Azure provisioning, recovery command,
-lease, takeover, migration, deletion, pruning or hosting integration here.
+body-free two-pass domain audit and durable handoff arm. The compiled CLI ships
+[explicit Table V2 runtime selection](table-runtime.md) and purpose-specific
+storage identity; SQLite remains the default. This page describes the underlying
+library APIs (including the library-only foreign-owner inspector), not provisioning
+or hosting instructions. There is no Azure provisioning, recovery command, lease,
+takeover, migration, deletion or pruning.
 
 ## Library contract
 
@@ -33,9 +35,11 @@ are also covered by each envelope's digest. A table must already exist.
 
 The trusted dependency `token(scope, {signal, deadline})` receives exactly
 `https://storage.azure.com/.default`; `deadline` uses `performance.now()`'s monotonic
-clock. It returns a bounded bearer token string. There is no bot-token reuse,
-default credentials, token cache/cycler, challenge refresh or fallback. Providing
-and authorizing a real per-purpose storage identity is later integration work.
+clock. It returns a bounded bearer token string. The kernel adds no bot-token reuse,
+default credentials, token cache/cycler, challenge refresh or fallback. The
+[selected runtime provider](table-runtime.md#separate-purpose-storage-and-bot-identity)
+implements the separate fixed-purpose storage cache/acquisition contract.
+Authorization and live Azure qualification still require operator work.
 The optional native HTTPS `request` dependency is a **library-test seam**, not an
 environment endpoint override or production TLS bypass.
 
@@ -712,7 +716,8 @@ release normally; V1 startup cleanup behavior is unchanged.
 **Availability consequence:** an interrupted V2 startup can retain an installed
 owner and block ordinary reopening even when the incomplete scan never established
 whether a recovery Exit existed. A failed close is not release evidence. There is
-no automatic takeover, reset, recovery executor or runtime configuration here.
+no automatic takeover, reset or recovery executor. The separate
+[runtime selector](table-runtime.md) does not relax these library failure rules.
 
 Delivery deliberately retains legacy `scan()` limits (10,000 pages / 64 MiB by
 default and the existing caller deadline), not the inbox's streaming/index audit.

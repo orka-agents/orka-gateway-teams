@@ -2,8 +2,9 @@
 
 This repository implements the personal-message request/reply runtime for
 [orka-agents/orka#549](https://github.com/orka-agents/orka/issues/549): an authenticated
-Teams receiver, durable SQLite inbox/private reply routes, serial HTTPS relay to
-Orka, and opt-in authenticated V1 endpoints with journal-backed Teams sends.
+Teams receiver, durable inbox/private reply routes (default SQLite or explicit
+Table V2), serial HTTPS relay to Orka, and opt-in authenticated V1 endpoints with
+journal-backed Teams sends.
 The existing ingress-only mode remains available. Pure converter/formatter APIs,
 separate storage APIs, synthetic examples and tests are also included.
 
@@ -30,10 +31,12 @@ npm run check
 Individual commands: `npm test`, `npm run typecheck`, `npm run build`.
 Build output is written to ignored `dist/`.
 
-The [Azure Table kernel and explicit V1/V2 delivery journals](docs/table-storage.md), and the
-[V2 Table inbox](docs/table-inbox.md), are library-only. Runtime integration and
-operator recovery execution remain unimplemented; SQLite is still the only
-runtime-selectable backend. The inbox requires explicit full-history audit/index
+The compiled CLI now supports [explicit Table V2 runtime selection](docs/table-runtime.md)
+with purpose-specific storage identity and optional ACA transport for storage and
+bot federation. SQLite remains the default. The
+[Table kernel / V1/V2 delivery library APIs](docs/table-storage.md) and
+[V2 inbox](docs/table-inbox.md) retain their formats and bounds; operator recovery
+execution remains unimplemented. The inbox requires explicit full-history audit/index
 budgets and accepts a fail-closed armed-crash availability tradeoff. V2 delivery
 keeps legacy complete-scan budgets and may retain ownership after interrupted
 startup rather than erase an unchecked recovery commitment. The separate
@@ -71,11 +74,18 @@ identity or federation fallback; local certificate validation is not tenant acce
 
 Explicit [managed-identity federation](docs/managed-identity-auth.md) supports a
 specifically assigned UAMI federated to the existing bot application, using the
-fixed Azure Linux VM/ACI IMDS contract. Setup is acquisition-free; full outbound
-use requires qualified hosting and an approved FIC. No App Service/ACA endpoint,
+fixed Azure Linux VM/ACI IMDS contract or explicit ACA supported-local-subset
+transport. ACA live qualification remains pending. Setup is acquisition-free;
+full outbound use requires qualified hosting and an approved FIC. No App Service,
 AKS token-file, local Azure CLI or default-identity fallback is provided.
 
 ### Required configuration
+
+The storage-path instructions below describe default SQLite. For Table use the
+[Table runtime guide](docs/table-runtime.md): set `GATEWAY_STORAGE_BACKEND=table-v2`,
+provide explicit Table identities/budgets and storage UAMI settings, and omit both
+SQLite DB variables. All existing HTTP, scope, routing and directional credentials
+still apply; Table selection is not automatic initialization or recovery.
 
 | Variable | Meaning |
 |---|---|
@@ -88,6 +98,7 @@ AKS token-file, local Azure CLI or default-identity fallback is provided.
 | `TEAMS_CREDENTIAL_MODE` | Optional `client-secret` (default), explicit `certificate`, or explicit `managed-identity-federation` |
 | `TEAMS_CERTIFICATE_FILE`, `TEAMS_PRIVATE_KEY_FILE` | Required only in certificate mode; private matching PEM pair, absent in other modes |
 | `TEAMS_MANAGED_IDENTITY_CLIENT_ID`, `TEAMS_MANAGED_IDENTITY_PRINCIPAL_ID` | Required only in managed-identity-federation mode; explicit UAMI client and principal GUIDs, absent in other modes |
+| `TEAMS_MANAGED_IDENTITY_HOST` | Federation only: omitted/`imds` preserves VM/ACI; explicit `azure-container-apps` uses the supported local platform endpoint |
 | `ORKA_BEARER_TOKEN` | Required adapter-to-Orka bearer for ingress POST only |
 | `TEAMS_RECIPIENT_IDS` | Required JSON array of exact allowed bot recipient IDs |
 | `TEAMS_SERVICE_URLS` | Required JSON array of exact allowed HTTPS service base URLs |
@@ -193,8 +204,8 @@ still have a committed admission: retry the same original provider activity.
 
 ### Inbox retention and operational limits
 
-- Separate schema/database from the delivery journal; one local-filesystem owner,
-  no HA/network-filesystem support. Keep an intact/current persistent volume.
+- For default SQLite: separate schema/database from the delivery journal; one
+  local-filesystem owner, no HA/network-filesystem support. Keep an intact/current persistent volume.
   Ingress uses its main SQLite connection's lifetime EXCLUSIVE lock, DELETE
   journal, EXTRA synchronization and private files. Do not read/open/close the
   live SQLite file through ordinary filesystem APIs in the owning process.
@@ -221,7 +232,10 @@ still have a committed admission: retry the same original provider activity.
 
 ## Enable the full request/reply runtime
 
-Provision both databases explicitly; do not delete/reset one to make startup pass.
+For default SQLite, provision both databases explicitly; do not delete/reset one
+to make startup pass.
+Table mode instead uses the [same commands with explicit logical IDs](docs/table-runtime.md#explicit-initialization-and-serving)
+against an already-existing physical table, without either SQLite path.
 With the nonsecret app/tenant/Orka/Gateway scope above and an absolute `DELIVERY_DB`
 path configured, run once:
 
@@ -249,8 +263,10 @@ identical directional tokens and path collisions (including canonical aliases an
 ownership/SQLite sidecars) fail closed, not silently fall back to ingress-only.
 Bearers are nonempty RFC6750-shaped values bounded at 8192 characters; do not log
 or put them on command lines. Both stores open before either listener binds. A
-second-store/listener failure unwinds ownership without deleting records or
-starting the relay. Ingress `.port` and `/api/messages` remain unchanged.
+second-store/listener failure attempts to close both stores without deleting records
+or starting the relay. Table ownership may remain occupied after an incomplete
+startup audit; cleanup is not release evidence. Ingress `.port` and `/api/messages`
+remain unchanged.
 
 ### Authenticated V1 API
 
@@ -317,28 +333,32 @@ Before provider dispatch, token failure/cancellation may retry. After dispatch,
 timeout, cancellation, network loss, non-2xx or invalid/missing receipt is terminal
 `unknown`, exposed as `nonRetryableError`. Startup converts abandoned sends to
 unknown. Unknown is never automatically resent, expired, reset or repaired; a lost
-Teams receipt cannot be reconstructed. Keep one process, one intact/current local
-PV, stable Orka target/Gateway UID/ledger, and retained routes/history as described
-above and in the journal limits below.
+Teams receipt cannot be reconstructed. Keep one writer, a stable Orka target/
+Gateway UID/ledger, and retained routes/history. Default SQLite requires one
+intact/current writable local PV; Table V2 instead requires stable existing Table
+partitions and [controlled clean handover](docs/table-runtime.md#operational-and-verification-boundary),
+not a writable SQLite path or crash takeover.
 
 Runtime orchestration awaits storage opening, admission, claims, route lookup,
-settlement and closing; SQLite remains the sole backend and its public store APIs
-remain synchronous. An inbox claim acknowledgement is not forwarding permission:
-the owned connection rechecks the exact attempt, replay deadline and quarantine
+settlement and closing. SQLite remains the default and its public store APIs
+remain synchronous; explicit Table V2 uses asynchronous stores without SQLite
+paths. An inbox claim acknowledgement is not forwarding permission: the owned
+store rechecks the exact attempt, replay deadline and quarantine
 immediately before the one-use Orka handoff. Cancellation during startup drains
 late opening/initialization without publishing readiness or starting the relay.
 
 SIGINT/SIGTERM or either storage poison stops both directions: mark unready, stop
 intake, abort API/provider/relay work, drain SDK callbacks, token acquisition and
-all settlement, then close **both** stores. Fatal storage signals follow the fixed
+all settlement, then close **both** stores and, in Table mode, the storage-token
+provider last. Fatal storage signals follow the fixed
 HTTP response flush/disconnect. Public SDK bot-token acquisition cannot be
 cancelled: at most one acquisition is outstanding, late completion cannot POST,
 and shutdown waits for it. A stuck acquisition can therefore hold graceful
 shutdown beyond the HTTP deadline. Never mistake client timeout for drained I/O.
 Production has no CLI/env cloud, token-factory, provider-proxy or TLS bypass seam.
 
-Native HTTP/HTTPS, actual SDK signatures/client transport, SQLite, concurrent
-replay, cancellation and restart are exercised locally. Live provider/Orka,
+Native HTTP/HTTPS, actual SDK signatures/client transport, SQLite/Table, concurrent
+replay, cancellation and controlled clean restart are exercised locally. Live provider/Orka,
 network-filesystem and power-cut validation are not claimed.
 
 ## Contributor tasks
@@ -480,6 +500,9 @@ receipt is not proof. The integrated outbound sender prohibits hidden SDK retrie
 and redirect replay; direct journal callers must preserve the same restrictions.
 
 ### Journal operational limits
+
+The filesystem/ownership rules below describe the synchronous **SQLite** journal
+above. Table V2 has separate [nonexpiring ownership and clean-handover rules](docs/table-runtime.md#operational-and-verification-boundary).
 
 - One configured process, one app+tenant, one intact/current database on a trusted
   normal filesystem-backed persistent volume. No HA or shared/network-filesystem

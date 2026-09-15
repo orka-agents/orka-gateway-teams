@@ -3,7 +3,15 @@ import { X509Certificate } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { ConfigurationError, parseConfig, tlsVerificationEnabled, validateOutboundConfig, validateReceiverConfig } from './config.js';
+import { ConfigurationError, tlsVerificationEnabled, validateOutboundConfig, validateReceiverConfig } from './config.js';
+import { parseRuntimeConfig, snapshotTableInitConfig, snapshotTableServeConfig } from './runtime-config.js';
+import type { RuntimeServeConfig, TableInitConfig } from './runtime-config.js';
+import { prepareStorageIdentity } from '../auth/storage-identity.js';
+import type { StorageIdentityDependencies, StorageTokenProvider } from '../auth/storage-identity.js';
+import type { TableDependencies } from '../storage/table/types.js';
+import { createTableIngressStore } from './table-store.js';
+import { createTableDeliveryJournalV2 } from '../delivery/table-journal.js';
+import { auditFields } from '../storage/table/audit.js';
 import type { ServeConfig } from './config.js';
 import { logIngress } from './logger.js';
 import { createOrkaClient } from './client.js';
@@ -19,27 +27,35 @@ import { startOutboundServer } from '../outbound/server.js';
 import type { OutboundServer } from '../outbound/server.js';
 
 export interface IngressRuntime { port: number; done: Promise<void>; stop(): Promise<void>; outboundPort?: number }
-/** Trusted library opening seams only; CLI configuration always selects SQLite. */
+/** Trusted native seams; legacy opening hooks remain SQLite-only. */
 export interface IngressRuntimeDependencies extends ReceiverDependencies {
   openIngressStore?: (path: string, scope: Readonly<IngressScope>, options: StoreOptions) => IngressPort | Promise<IngressPort>;
   openDeliveryJournal?: (path: string, scope: Readonly<JournalScope>) => DeliveryJournalPort | Promise<DeliveryJournalPort>;
+  tableRequest?: TableDependencies['request'];
+  storageIdentity?: StorageIdentityDependencies;
 }
-export async function startIngressRuntime(config: ServeConfig, dependencies: IngressRuntimeDependencies = {}, signal?: AbortSignal): Promise<IngressRuntime> {
+export async function startIngressRuntime(config: RuntimeServeConfig, dependencies: IngressRuntimeDependencies = {}, signal?: AbortSignal): Promise<IngressRuntime> {
   if (!tlsVerificationEnabled()) throw new ConfigurationError();
-  const receiverConfig = validateReceiverConfig(config.receiver);
-  const outbound = config.outbound === undefined ? undefined : validateOutboundConfig(config.outbound, config.dbPath, config.bearerToken, receiverConfig);
+  const table = 'storage' in config ? snapshotTableServeConfig(config) : undefined;
+  const sqlite = table === undefined ? config as ServeConfig : undefined;
+  const selected = table ?? sqlite!;
+  const receiverConfig = table?.receiver ?? validateReceiverConfig(selected.receiver);
+  const sqliteOutbound = sqlite?.outbound === undefined ? undefined : validateOutboundConfig(sqlite.outbound, sqlite.dbPath, sqlite.bearerToken, receiverConfig);
+  const outbound = table?.outbound ?? sqliteOutbound;
   try {
-    const databases = [config.dbPath, ...(outbound ? [outbound.dbPath, `${outbound.dbPath}.owner.sqlite`] : [])];
+    const databases = sqlite === undefined ? [] : [sqlite.dbPath, ...(sqliteOutbound ? [sqliteOutbound.dbPath, `${sqliteOutbound.dbPath}.owner.sqlite`] : [])];
     assertCredentialSeparation(receiverConfig, databases.flatMap((path) => [path, `${path}-journal`, `${path}-wal`, `${path}-shm`]));
   } catch { throw new ConfigurationError(); }
   if (signal?.aborted) throw new Error('Ingress startup failed');
   // Snapshot before any opening await; credentials and CA are prepared before
   // ownership, so neither can be reread through a live SQLite inode.
-  const dbPath = config.dbPath; const scope = { ...config.scope }; const policy = { ...config.policy };
+  const dbPath = sqlite?.dbPath; const scope = { ...selected.scope }; const policy = { ...selected.policy };
   const deps = { ...dependencies };
+  if (table && (deps.openIngressStore !== undefined || deps.openDeliveryJournal !== undefined)) throw new ConfigurationError();
   const prepared = prepareReceiver(receiverConfig, deps);
-  const client = createOrkaClient(scope, { bearerToken: config.bearerToken,
-    ...(config.caFile === undefined ? {} : { ca: readCaBundle(config.caFile) }) });
+  const client = createOrkaClient(scope, { bearerToken: selected.bearerToken,
+    ...(selected.caFile === undefined ? {} : { ca: readCaBundle(selected.caFile) }) });
+  const storageProvider = table === undefined ? undefined : prepareTableProvider(table.storage.identity, deps);
   const abort = new AbortController(); let fatal = false; let closing: Promise<void> | undefined;
   let ready = false; let stopRuntime: (() => Promise<void>) | undefined;
   const cancel = () => { ready = false; abort.abort(); void stopRuntime?.().catch(() => {}); };
@@ -47,17 +63,37 @@ export async function startIngressRuntime(config: ServeConfig, dependencies: Ing
   const assertStarting = () => { if (signal?.aborted || abort.signal.aborted) throw new Error('Ingress startup failed'); };
   let store: IngressPort | undefined; let journal: DeliveryJournalPort | undefined;
   let receiver: Receiver | undefined; let api: OutboundServer | undefined;
-  const closeStores = () => Promise.allSettled([
-    Promise.resolve().then(() => journal?.close()), Promise.resolve().then(() => store?.close()),
-  ]);
+  const closeStores = async () => {
+    const stores = await Promise.allSettled([
+      Promise.resolve().then(() => journal?.close()), Promise.resolve().then(() => store?.close()),
+    ]);
+    // Release/reconciliation may need a fresh token even after either store fails.
+    const provider = await Promise.allSettled([Promise.resolve().then(() => storageProvider?.close())]);
+    return [...stores, ...provider];
+  };
   try {
     assertStarting();
-    store = await (deps.openIngressStore ?? ((path, target, options) => createIngressPort(openIngressStore(path, target, options))))(dbPath, scope, { policy });
-    assertStarting();
+    if (table) {
+      const storage = table.storage;
+      const native: TableDependencies = { token: storageProvider!.token, ...(deps.tableRequest === undefined ? {} : { request: deps.tableRequest }) };
+      const inbox = createTableIngressStore({ kind: 'ingress', account: storage.account, table: storage.table,
+        storeId: storage.ingressStoreId, scope }, native, { audit: storage.audit, maxIndexBytes: storage.maxIndexBytes, policy });
+      store = inbox;
+      // Retain each actual handle immediately. BOTH constructions precede ANY open await.
+      const delivery = outbound === undefined ? undefined : createTableDeliveryJournalV2({ kind: 'delivery', account: storage.account,
+        table: storage.table, storeId: storage.deliveryStoreId!, scope: { appId: scope.appId, tenantId: scope.tenantId } }, native);
+      journal = delivery;
+      await inbox.open(); assertStarting();
+      if (delivery) await delivery.open();
+    } else {
+      store = await (deps.openIngressStore ?? ((path, target, options) => createIngressPort(openIngressStore(path, target, options))))(dbPath!, scope, { policy });
+      assertStarting();
+      if (sqliteOutbound) journal = await (deps.openDeliveryJournal ?? openDeliveryJournal)(sqliteOutbound.dbPath,
+        { appId: store.scope.appId, tenantId: store.scope.tenantId });
+    }
     const ownedStore = store;
     const journalScope = { appId: ownedStore.scope.appId, tenantId: ownedStore.scope.tenantId };
-    // Own both stores before binding either listener. Never reopen the inbox for routes.
-    if (outbound) journal = await (deps.openDeliveryJournal ?? openDeliveryJournal)(outbound.dbPath, journalScope);
+    // Both complete domain audits precede either listener. Never reopen the inbox for routes.
     assertStarting();
     receiver = await prepared.start({ scope: ownedStore.scope,
       admit: (event, route) => ready ? ownedStore.admit(event, route) : { kind: 'full' } },
@@ -109,6 +145,41 @@ export async function startIngressRuntime(config: ServeConfig, dependencies: Ing
   return { port: ownedReceiver.port, done, stop, ...(api === undefined ? {} : { outboundPort: api.port }) };
 }
 
+/** Explicit retained initializer, also used by the async CLI; never invoked by serve. */
+export async function initializeTableStore(config: TableInitConfig,
+  dependencies: Pick<IngressRuntimeDependencies, 'tableRequest' | 'storageIdentity'> = {}, signal?: AbortSignal): Promise<void> {
+  const selected = snapshotTableInitConfig(config);
+  if (signal?.aborted) throw new Error('Table initialization failed');
+  let deps: Pick<IngressRuntimeDependencies, 'tableRequest' | 'storageIdentity'>;
+  let provider: StorageTokenProvider;
+  try {
+    deps = auditFields(dependencies, ['tableRequest', 'storageIdentity']);
+    provider = prepareTableProvider(selected.storage.identity, deps);
+  } catch { throw new ConfigurationError(); }
+  let handle: { initialize(): Promise<void>; close(): Promise<void> } | undefined;
+  let failed = false;
+  try {
+    const { account, table, storeId } = selected.storage;
+    const native: TableDependencies = { token: provider.token, ...(deps.tableRequest === undefined ? {} : { request: deps.tableRequest }) };
+    handle = selected.kind === 'ingress' ? createTableIngressStore({ kind: 'ingress', account, table, storeId, scope: selected.scope },
+      native, { audit: selected.audit, maxIndexBytes: selected.maxIndexBytes }) :
+      createTableDeliveryJournalV2({ kind: 'delivery', account, table, storeId,
+        scope: { appId: selected.scope.appId, tenantId: selected.scope.tenantId } }, native);
+    await handle.initialize();
+  } catch { failed = true; }
+  const closed = await Promise.allSettled([Promise.resolve().then(() => handle?.close())]);
+  const drained = await Promise.allSettled([Promise.resolve().then(() => provider.close())]);
+  if (failed || signal?.aborted || [...closed, ...drained].some(result => result.status === 'rejected')) throw new Error('Table initialization failed');
+}
+
+function prepareTableProvider(identity: TableInitConfig['storage']['identity'], dependencies: Pick<IngressRuntimeDependencies, 'tableRequest' | 'storageIdentity'>): StorageTokenProvider {
+  try {
+    if (dependencies.tableRequest !== undefined && typeof dependencies.tableRequest !== 'function') throw new ConfigurationError();
+    const identityDeps = dependencies.storageIdentity === undefined ? {} : auditFields(dependencies.storageIdentity, ['request']);
+    return prepareStorageIdentity(identity).createProvider(identityDeps);
+  } catch { throw new ConfigurationError(); }
+}
+
 function readCaBundle(path: string): Buffer {
   try {
     const bytes = readFileSync(path);
@@ -129,12 +200,15 @@ async function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
   try {
     if (args.length !== 1 || (args[0] !== 'init' && args[0] !== 'init-delivery' && args[0] !== 'serve')) throw new ConfigurationError();
     if (args[0] === 'init' || args[0] === 'init-delivery') {
-      const config = parseConfig(env, args[0]);
-      if (args[0] === 'init') initializeIngressStore(config.dbPath, config.scope);
+      const config = parseRuntimeConfig(env, args[0]);
+      if ('storage' in config) {
+        process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
+        await initializeTableStore(config, {}, abort.signal);
+      } else if (args[0] === 'init') initializeIngressStore(config.dbPath, config.scope);
       else initializeDeliveryJournal(config.dbPath, { appId: config.scope.appId, tenantId: config.scope.tenantId });
       logIngress('initialized'); return 0;
     }
-    const config = parseConfig(env, 'serve');
+    const config = parseRuntimeConfig(env, 'serve');
     process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
     // No environment-controlled cloud, JWKS or authentication override enters here.
     runtime = await startIngressRuntime(config, {}, abort.signal);

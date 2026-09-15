@@ -7,9 +7,10 @@ import { createAppToken } from './app-token.js';
 import { requestManagedIdentity } from './imds.js';
 import type { ImdsRequest } from './imds.js';
 import { tlsVerificationEnabled } from '../ingress/config.js';
+import { prepareAcaIdentity } from './aca.js';
 
 type ManagedIdentityConfig = Extract<SharedBotCredentialConfig, { credentialMode: 'managed-identity-federation' }> & { appId: string; tenantId: string };
-export interface ManagedIdentityDependencies { imdsRequest?: ImdsRequest; entraNetwork?: INetworkModule }
+export interface ManagedIdentityDependencies { imdsRequest?: ImdsRequest; acaRequest?: ImdsRequest; entraNetwork?: INetworkModule }
 export interface PreparedManagedIdentity { assertUsable(): void; createToken(dependencies?: ManagedIdentityDependencies): TokenCredentials['token'] }
 
 /** Structural preparation only: no credential files, CCA, requests or descriptors. */
@@ -17,20 +18,25 @@ export function prepareManagedIdentity(input: ManagedIdentityConfig): PreparedMa
   try {
     const config = validateBotCredential(input); if (config.credentialMode !== 'managed-identity-federation') throw new Error();
     const appId = input.appId; const tenantId = input.tenantId; const endpoint = certificateTokenEndpoint(tenantId);
+    const aca = config.managedIdentityHost === 'azure-container-apps' ? prepareAcaIdentity() : undefined;
     const assertUsable = () => {
-      try { assertManagedIdentityEnvironment(); if (!tlsVerificationEnabled() || !Number.isFinite(Date.now())) throw new Error(); }
+      try {
+        assertManagedIdentityEnvironment(process.env, config.managedIdentityHost); aca?.assertUsable();
+        if (!tlsVerificationEnabled() || !Number.isFinite(Date.now())) throw new Error();
+      }
       catch { throw new Error('Invalid managed identity credentials'); }
     };
     assertUsable(); let created = false;
     return { assertUsable, createToken(dependencies = {}) {
       if (created) throw new Error('Invalid managed identity credentials'); created = true;
-      const { imdsRequest, entraNetwork } = dependencies;
+      const { imdsRequest, acaRequest, entraNetwork } = dependencies;
       return createAppToken(appId, tenantId, { clientAssertion: async (options) => {
         assertUsable();
         if (options.clientId !== appId || options.tokenEndpoint !== endpoint || options.fmiPath !== undefined) throw tokenFailure();
-        // MSAL resolves this BEFORE its final-token cache lookup. Fresh IMDS on
+        // MSAL resolves this BEFORE its final-token cache lookup. A fresh assertion
         // every acquisition is intentional; no second cache or placeholder assertion.
-        const response = await requestManagedIdentity(config.managedIdentityClientId, imdsRequest);
+        const response = aca ? await aca.requestBotAssertion(config.managedIdentityClientId, acaRequest) :
+          await requestManagedIdentity(config.managedIdentityClientId, imdsRequest);
         assertUsable();
         return selectedAssertion(response, tenantId.toLowerCase(), config.managedIdentityPrincipalId);
       } }, assertUsable, entraNetwork ?? createCertificateNetwork(tenantId), tokenFailure);

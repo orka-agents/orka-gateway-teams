@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import type { TestContext } from 'node:test';
+import type { FixtureHooks } from './ingress-https.js';
 import jwt from 'jsonwebtoken';
 import { PUBLIC } from '@microsoft/teams.api';
 import { personalMessage } from '../fixtures/incoming.js';
@@ -14,7 +14,7 @@ export const receiverConfig = { appId, tenantId, clientSecret: randomUUID(), rec
 export const scope = { appId, tenantId, orkaBaseUrl: 'https://orka.example.invalid/', gatewayNamespace: 'default', gatewayName: 'teams' };
 export function activity(): Record<string, any> { return JSON.parse(JSON.stringify(personalMessage)); }
 
-export async function authFixture(t: TestContext) {
+export async function authFixture(t: FixtureHooks) {
   const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const kid = randomUUID();
   const key = { ...publicKey.export({ format: 'jwk' }), kid, use: 'sig', alg: 'RS256', endorsements: ['msteams'] };

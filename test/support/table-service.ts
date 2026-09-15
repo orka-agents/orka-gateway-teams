@@ -1,7 +1,7 @@
 import https from 'node:https';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createHash } from 'node:crypto';
-import type { TestContext } from 'node:test';
+import type { FixtureHooks } from './ingress-https.js';
 import { httpsFixture } from './ingress-https.js';
 import type { TableBinding, TableDependencies } from '../../src/storage/table/types.js';
 
@@ -76,7 +76,7 @@ function checkEntity(e: Record<string, unknown>, expectedPartition: string, expe
     chunks.every((b, i) => b.length <= 65536 && b.toString('base64') === e[`B${i}`] && e[`B${i}@odata.type`] === 'Edm.Binary') &&
     e.Digest === hash(['orka-data-v1', expectedBinding.toString('base64'), e.T, e.Id, payload.toString('base64')]);
 }
-export async function tableService(t: TestContext, kind: 'delivery' | 'ingress' = 'delivery', metadataFormat: 1 | 2 = 1,
+export async function tableService(t: FixtureHooks, kind: 'delivery' | 'ingress' = 'delivery', metadataFormat: 1 | 2 = 1,
   scopeOverride?: Partial<Extract<TableBinding, { kind: 'ingress' }>['scope']>) {
   const partition = kind === 'delivery' ? 'v1_delivery_c3RhYmxl' : 'v1_ingress_c3RhYmxl';
   const scope = { appId: 'App', tenantId: 'Tenant', orkaBaseUrl: 'https://orka.example.invalid/', gatewayNamespace: 'gateway', gatewayName: 'teams', ...scopeOverride };

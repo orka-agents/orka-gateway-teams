@@ -67,8 +67,11 @@ legacy secret mode; use that guide's mount/env substitutions for certificate mod
 For explicit [managed-identity federation](managed-identity-auth.md), omit secret
 and certificate settings and supply `TEAMS_CREDENTIAL_MODE=managed-identity-federation`,
 `TEAMS_MANAGED_IDENTITY_CLIENT_ID` and `TEAMS_MANAGED_IDENTITY_PRINCIPAL_ID`.
-Preparation is structural only, with no credential files. Setup uses the same
-deny-only callback and does not contact IMDS or construct a CCA. It cannot prove
+Optional `TEAMS_MANAGED_IDENTITY_HOST=azure-container-apps` uses the
+[explicit local platform contract](table-runtime.md#aca-supported-local-endpoint-subset);
+omitted/`imds` preserves VM/ACI behavior. Preparation is structural only, with no
+credential files. Setup uses the same deny-only callback and does not contact
+IMDS/ACA or construct a CCA. It cannot prove
 host UAMI assignment, FIC acceptance or outbound acquisition. The six-field
 artifact and dual incoming JWT verification remain unchanged.
 
