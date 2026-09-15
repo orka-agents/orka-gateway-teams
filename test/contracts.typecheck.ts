@@ -10,7 +10,9 @@ import type { AdmissionResult, IngressClaim, IngressPort, IngressStore, OrkaClie
 import { initializeDeliveryJournal, openDeliveryJournal } from '../src/delivery/journal.js';
 import type { BeginDeliveryResult, DeliveryJournal, DeliveryJournalPort, SettlementResult } from '../src/delivery/types.js';
 import { parseConfig } from '../src/ingress/config.js';
-import type { ServeConfig } from '../src/ingress/config.js';
+import type { InitConfig, ServeConfig } from '../src/ingress/config.js';
+import { parseRuntimeConfig } from '../src/ingress/runtime-config.js';
+import type { RuntimeServeConfig, TableInitConfig, TableServeConfig } from '../src/ingress/runtime-config.js';
 import { relayOne } from '../src/ingress/relay.js';
 import { personalMessage, conversionContext, expectedEvent } from './fixtures/incoming.js';
 import { errorDelivery, finalMessage } from './fixtures/outgoing.js';
@@ -74,6 +76,31 @@ function storageContracts(store: IngressStore, journal: DeliveryJournal, config:
     legacyRelay, asyncRelay, invalidPort, invalidGrant, tableConfig];
 }
 void storageContracts;
+
+function runtimeConfigContracts(env: NodeJS.ProcessEnv, table: TableServeConfig, initializer: TableInitConfig) {
+  const legacyInit: InitConfig = parseConfig(env, 'init');
+  const legacyDelivery: InitConfig = parseConfig(env, 'init-delivery');
+  const legacyServe: ServeConfig = parseConfig(env, 'serve');
+  const init: InitConfig | TableInitConfig = parseRuntimeConfig(env, 'init');
+  const delivery: InitConfig | TableInitConfig = parseRuntimeConfig(env, 'init-delivery');
+  const runtime: RuntimeServeConfig = parseRuntimeConfig(env, 'serve');
+  const selected: RuntimeServeConfig = table;
+  // @ts-expect-error Table configs never require or expose a SQLite path.
+  table.dbPath;
+  // @ts-expect-error Table outbound has HTTP configuration only.
+  table.outbound?.dbPath;
+  // @ts-expect-error Table init config never exposes a SQLite path.
+  initializer.dbPath;
+  if (initializer.kind === 'ingress') { const bytes: number = initializer.maxIndexBytes; void bytes; }
+  else {
+    // @ts-expect-error Delivery initialization has no inbox audit budget.
+    initializer.audit;
+  }
+  // @ts-expect-error The legacy parser still returns SQLite only.
+  const legacyTable: TableServeConfig = parseConfig(env, 'serve');
+  void [legacyInit, legacyDelivery, legacyServe, init, delivery, runtime, selected, legacyTable];
+}
+void runtimeConfigContracts;
 
 void [convertArguments, converter, converted, notification, accepted, ignored, invalid, formatArguments, outgoing, formatter,
   missingEvent, progress, invalidCard, duplicateReply, missingAttachment, extraAttachment];

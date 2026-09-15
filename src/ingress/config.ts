@@ -5,6 +5,7 @@ import { parseBotCredential, validateBotCredential } from '../auth/credentials.j
 import type { SharedBotCredentialConfig } from '../auth/credentials.js';
 import { identity, validatePolicy } from './codec.js';
 import type { IngressPolicy, IngressScope } from './types.js';
+import type { OutboundServerConfig } from '../outbound/server.js';
 
 export type ReceiverConfig = SharedBotCredentialConfig & { appId: string; tenantId: string; recipientIds: readonly string[];
   serviceUrls: readonly string[]; host: string; port: number }
@@ -19,8 +20,35 @@ export function parseConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'init-deliver
 export function parseConfig(env: NodeJS.ProcessEnv, mode: 'serve'): ServeConfig;
 export function parseConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'init-delivery' | 'serve'): InitConfig | ServeConfig {
   try {
-    const scope = Object.freeze({ appId: guid(env.TEAMS_APP_ID), tenantId: guid(env.TEAMS_TENANT_ID),
-      orkaBaseUrl: baseUrl(env.ORKA_BASE_URL), gatewayNamespace: component(env.ORKA_GATEWAY_NAMESPACE), gatewayName: component(env.ORKA_GATEWAY_NAME) });
+    if (parseStorageBackend(env) !== 'sqlite') throw new ConfigurationError();
+    return parseSqliteConfig(env, mode);
+  } catch { throw new ConfigurationError(); }
+}
+
+export const TABLE_ENV_KEYS = Object.freeze(['TABLE_ACCOUNT', 'TABLE_NAME', 'TABLE_INGRESS_STORE_ID', 'TABLE_DELIVERY_STORE_ID',
+  'TABLE_MANAGED_IDENTITY_CLIENT_ID', 'TABLE_MANAGED_IDENTITY_HOST', 'TABLE_AUDIT_MAX_PAGES', 'TABLE_AUDIT_MAX_BYTES',
+  'TABLE_AUDIT_MAX_DURATION_MS', 'TABLE_AUDIT_MAX_TRACKING_BYTES', 'TABLE_MAX_INDEX_BYTES']);
+
+/** Shared selector boundary; capture before validation so a later read cannot change backend. */
+export function parseStorageBackend(env: NodeJS.ProcessEnv): 'sqlite' | 'table-v2' {
+  const backend = env.GATEWAY_STORAGE_BACKEND;
+  if (backend === 'table-v2') {
+    if (env.INGRESS_DB !== undefined || env.DELIVERY_DB !== undefined) fail();
+    return backend;
+  }
+  if ((backend !== undefined && backend !== 'sqlite') || TABLE_ENV_KEYS.some(key => env[key] !== undefined)) fail();
+  return 'sqlite';
+}
+
+export function parseScopeConfig(env: NodeJS.ProcessEnv): Readonly<IngressScope> {
+  return Object.freeze({ appId: guid(env.TEAMS_APP_ID), tenantId: guid(env.TEAMS_TENANT_ID),
+    orkaBaseUrl: baseUrl(env.ORKA_BASE_URL), gatewayNamespace: component(env.ORKA_GATEWAY_NAMESPACE), gatewayName: component(env.ORKA_GATEWAY_NAME) });
+}
+
+/** Internal parser composition after the backend has been selected exactly once. */
+export function parseSqliteConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'init-delivery' | 'serve'): InitConfig | ServeConfig {
+  try {
+    const scope = parseScopeConfig(env);
     if (mode === 'init-delivery') {
       const dbPath = absolutePath(env.DELIVERY_DB);
       if (env.INGRESS_DB !== undefined) validateStoragePaths(env.INGRESS_DB, dbPath);
@@ -31,23 +59,33 @@ export function parseConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'init-deliver
       if (env.DELIVERY_DB !== undefined) validateStoragePaths(init.dbPath, env.DELIVERY_DB);
       return init;
     }
-    const receiver = validateReceiverConfig({ appId: scope.appId, tenantId: scope.tenantId,
-      ...parseBotCredential(env), recipientIds: list(env.TEAMS_RECIPIENT_IDS).map(identity),
-      serviceUrls: list(env.TEAMS_SERVICE_URLS).map((value) => baseUrl(value, true)),
-      host: env.INGRESS_HOST ?? '127.0.0.1', port: number(env.INGRESS_PORT, 3978, 1, 65535) });
-    const bearerToken = secret(env.ORKA_BEARER_TOKEN);
-    if (!/^[A-Za-z0-9\-._~+/]+=*$/u.test(bearerToken)) fail();
-    const policy = validatePolicy({ maxPending: number(env.INGRESS_MAX_PENDING, 1000),
-      maxRecords: number(env.INGRESS_MAX_RECORDS, 100000), replayWindowMs: number(env.INGRESS_REPLAY_WINDOW_MS, 86400000) });
-    if (env.OUTBOUND_ENABLED !== undefined && !['true', 'false'].includes(env.OUTBOUND_ENABLED)) fail();
-    let outbound: OutboundConfig | undefined;
-    if (env.OUTBOUND_ENABLED === 'true') {
-      outbound = validateOutboundConfig({ dbPath: absolutePath(env.DELIVERY_DB), bearerToken: secret(env.ORKA_OUTBOUND_BEARER_TOKEN),
-        host: env.OUTBOUND_HOST ?? '127.0.0.1', port: number(env.OUTBOUND_PORT, 3979, 1, 65535) }, init.dbPath, bearerToken, receiver);
-    } else if (['DELIVERY_DB', 'ORKA_OUTBOUND_BEARER_TOKEN', 'OUTBOUND_HOST', 'OUTBOUND_PORT'].some((key) => env[key] !== undefined)) fail();
-    return { ...init, receiver, bearerToken, policy, ...(outbound === undefined ? {} : { outbound }),
-      ...(env.ORKA_CA_FILE === undefined ? {} : { caFile: absolutePath(env.ORKA_CA_FILE) }) };
+    const { outbound: http, ...settings } = parseServeSettings(env, scope);
+    const outbound = http === undefined ? undefined : validateOutboundConfig({ ...http, dbPath: absolutePath(env.DELIVERY_DB) },
+      init.dbPath, settings.bearerToken, settings.receiver);
+    if (http === undefined && env.DELIVERY_DB !== undefined) fail();
+    return { ...init, ...settings, ...(outbound === undefined ? {} : { outbound }) };
   } catch { throw new ConfigurationError(); }
+}
+
+/** Storage-independent receiver, directional HTTP and relay policy parsing. */
+export function parseServeSettings(env: NodeJS.ProcessEnv, scope: Readonly<IngressScope>): Omit<ServeConfig, 'dbPath' | 'outbound'> & { outbound?: OutboundServerConfig } {
+  const receiver = validateReceiverConfig({ appId: scope.appId, tenantId: scope.tenantId,
+    ...parseBotCredential(env), recipientIds: list(env.TEAMS_RECIPIENT_IDS).map(identity),
+    serviceUrls: list(env.TEAMS_SERVICE_URLS).map((value) => baseUrl(value, true)),
+    host: env.INGRESS_HOST ?? '127.0.0.1', port: number(env.INGRESS_PORT, 3978, 1, 65535) });
+  const bearerToken = secret(env.ORKA_BEARER_TOKEN);
+  if (!/^[A-Za-z0-9\-._~+/]+=*$/u.test(bearerToken)) fail();
+  const policy = validatePolicy({ maxPending: number(env.INGRESS_MAX_PENDING, 1000),
+    maxRecords: number(env.INGRESS_MAX_RECORDS, 100000), replayWindowMs: number(env.INGRESS_REPLAY_WINDOW_MS, 86400000) });
+  const enabled = env.OUTBOUND_ENABLED;
+  if (enabled !== undefined && !['true', 'false'].includes(enabled)) fail();
+  let outbound: OutboundServerConfig | undefined;
+  if (enabled === 'true') {
+    outbound = validateOutboundServerConfig({ bearerToken: secret(env.ORKA_OUTBOUND_BEARER_TOKEN),
+      host: env.OUTBOUND_HOST ?? '127.0.0.1', port: number(env.OUTBOUND_PORT, 3979, 1, 65535) }, bearerToken, receiver);
+  } else if (['ORKA_OUTBOUND_BEARER_TOKEN', 'OUTBOUND_HOST', 'OUTBOUND_PORT'].some((key) => env[key] !== undefined)) fail();
+  return { scope, receiver, bearerToken, policy, ...(outbound === undefined ? {} : { outbound }),
+    ...(env.ORKA_CA_FILE === undefined ? {} : { caFile: absolutePath(env.ORKA_CA_FILE) }) };
 }
 
 /** Also validate direct library callers before creating SDK credentials or binding. */
@@ -66,12 +104,19 @@ export function validateReceiverConfig(input: ReceiverConfig): ReceiverConfig {
 
 export function validateOutboundConfig(input: OutboundConfig, ingressPath: string, ingressToken: string, receiver: ReceiverConfig): OutboundConfig {
   try {
+    const http = validateOutboundServerConfig(input, ingressToken, receiver);
+    const dbPath = absolutePath(input.dbPath); validateStoragePaths(ingressPath, dbPath);
+    return Object.freeze({ dbPath, ...http });
+  } catch { throw new ConfigurationError(); }
+}
+
+export function validateOutboundServerConfig(input: OutboundServerConfig, ingressToken: string, receiver: ReceiverConfig): OutboundServerConfig {
+  try {
     const bearerToken = secret(input.bearerToken);
     if (!/^[A-Za-z0-9._~+/-]+=*$/u.test(bearerToken) || bearerToken === ingressToken || !isIP(input.host) ||
         !Number.isInteger(input.port) || input.port < 0 || input.port > 65535 ||
         (input.port !== 0 && input.port === receiver.port && input.host === receiver.host)) fail();
-    const dbPath = absolutePath(input.dbPath); validateStoragePaths(ingressPath, dbPath);
-    return Object.freeze({ dbPath, bearerToken, host: input.host, port: input.port });
+    return Object.freeze({ bearerToken, host: input.host, port: input.port });
   } catch { throw new ConfigurationError(); }
 }
 
