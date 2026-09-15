@@ -129,6 +129,7 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
   const tables = await runtimeTableService(t, scope); const identity = await runtimeIdentity(t, 30);
   const auth = await authFixture(t); const otherAuth = await authFixture(t); const incomingToken = auth.token();
   const finalToken = syntheticAccessToken(); const receipt = 'compiled-table-provider-receipt'; const orkaReceipt = 'compiled-table-orka-event';
+  const legacySecret = 'synthetic-unused-cli-legacy-header';
   let sdkWrongKey = true; let saved: EventEnvelope | undefined;
   const effects = { orka: 0, provider: 0, entra: 0, strictKeys: 0, sdkKeys: 0, contract: true };
   const services = await httpsFixture(t, async (req, res) => {
@@ -137,7 +138,8 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
       const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
       const text = Buffer.concat(chunks).toString(); const host = req.headers.host;
       effects.contract &&= !JSON.stringify(req.headers).includes(acaHeader) && !text.includes(acaHeader) &&
-        !JSON.stringify(req.headers).includes(syntheticToken) && !text.includes(syntheticToken);
+        !JSON.stringify(req.headers).includes(syntheticToken) && !text.includes(syntheticToken) &&
+        !JSON.stringify(req.headers).includes(legacySecret) && !text.includes(legacySecret);
       if (host === 'login.botframework.com' && req.url === '/v1/.well-known/keys') {
         const strict = req.headers['x-fixture-verifier'] === 'strictKeys';
         if (strict) effects.strictKeys++; else effects.sdkKeys++;
@@ -174,7 +176,8 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
     TABLE_AUDIT_MAX_DURATION_MS: '30000', TABLE_AUDIT_MAX_TRACKING_BYTES: '1048576', TABLE_MAX_INDEX_BYTES: '16777216',
     TEAMS_APP_ID: scope.appId, TEAMS_TENANT_ID: scope.tenantId, ORKA_BASE_URL: scope.orkaBaseUrl,
     ORKA_GATEWAY_NAMESPACE: scope.gatewayNamespace, ORKA_GATEWAY_NAME: scope.gatewayName,
-    IDENTITY_ENDPOINT: new URL('msi/token', identity.baseUrl).href, IDENTITY_HEADER: acaHeader };
+    IDENTITY_ENDPOINT: new URL('msi/token', identity.baseUrl).href, IDENTITY_HEADER: acaHeader,
+    MSI_ENDPOINT: 'https://unused.invalid/legacy', MSI_SECRET: legacySecret };
   const serving = { ...common, TEAMS_CREDENTIAL_MODE: 'managed-identity-federation', TEAMS_MANAGED_IDENTITY_HOST: 'azure-container-apps',
     TEAMS_MANAGED_IDENTITY_CLIENT_ID: miConfig.managedIdentityClientId, TEAMS_MANAGED_IDENTITY_PRINCIPAL_ID: miConfig.managedIdentityPrincipalId,
     TEAMS_RECIPIENT_IDS: JSON.stringify([recipientId]), TEAMS_SERVICE_URLS: JSON.stringify([serviceUrl]),
@@ -227,7 +230,7 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
     assert.equal(result.code, code, 'CLI exit code'); assert.equal(result.signal, null, 'natural CLI exit');
     assert.equal(result.stdout.length, 0); assert.equal(result.stderr.includes(`teams-ingress: ${event}\n`), true, 'fixed CLI lifecycle');
     const privateValues = [acaHeader, syntheticToken, finalToken, receipt, orkaReceipt, incomingToken, finalDelivery.text,
-      serving.ORKA_BEARER_TOKEN, serving.ORKA_OUTBOUND_BEARER_TOKEN, common.IDENTITY_ENDPOINT];
+      serving.ORKA_BEARER_TOKEN, serving.ORKA_OUTBOUND_BEARER_TOKEN, common.IDENTITY_ENDPOINT, common.MSI_ENDPOINT, legacySecret];
     assert.equal(privateValues.some(value => result.stderr.includes(value)), false, 'private values absent from CLI output');
     const lines = result.stderr.split('\n').filter(line => line.startsWith(marker)); assert.equal(lines.length, 1);
     const counts = JSON.parse(lines[0]!.slice(marker.length)) as Record<string, number>;
@@ -311,7 +314,8 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
   assert.equal(payloads(tables.inbox.rows, 'event').length, 1); assert.equal(payloads(tables.delivery.rows, 'delivery').length, 1);
   assert.equal(effects.contract && identity.calls.contract, true);
   assert.equal(hasTableCanary([...tables.inbox.rows.values(), ...tables.delivery.rows.values()],
-    [acaHeader, syntheticToken, finalToken, incomingToken, serving.ORKA_BEARER_TOKEN, serving.ORKA_OUTBOUND_BEARER_TOKEN]),
+    [acaHeader, syntheticToken, finalToken, incomingToken, serving.ORKA_BEARER_TOKEN, serving.ORKA_OUTBOUND_BEARER_TOKEN,
+      common.MSI_ENDPOINT, legacySecret]),
   false, 'credentials absent from persisted rows');
   t.diagnostic(`natural-exit native counters first=${JSON.stringify(firstCounts)} replay=${JSON.stringify(replayCounts)}`);
   t.diagnostic(image ? 'actual image CLI, UID/GID1000/read-only, native Table/ACA/FIC/MSAL/JWKS/provider and SIGTERM replay passed' :

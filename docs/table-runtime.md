@@ -140,9 +140,11 @@ or link-local (`fe80::/10`), or `localhost` mapped directly to IPv4 loopback wit
 DNS. The platform path is preserved. Public/private-network DNS names, other
 address ranges and other endpoint forms are refused. No proxy, redirect or retry;
 responses are bounded to 64 KiB body / 16 KiB headers with actual request **and
-socket** drain. Competing `MSI_ENDPOINT`, `MSI_SECRET` and
-`AZURE_FEDERATED_TOKEN_FILE` modes are refused; bot SDK ambient-credential guards
-remain in force. See the
+socket** drain. Explicit ACA tolerates unused platform `MSI_ENDPOINT` and
+`MSI_SECRET` aliases without reading, clearing or using them; they cannot replace
+a missing or invalid canonical endpoint/header. IMDS still rejects those aliases.
+`AZURE_FEDERATED_TOKEN_FILE` and bot SDK ambient-credential guards remain in force.
+See the
 [Microsoft REST contract](https://learn.microsoft.com/en-us/azure/container-apps/managed-identity?tabs=http#rest-endpoint-reference).
 
 This intentionally supports a local subset, **not every ACA endpoint form**.
