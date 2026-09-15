@@ -30,15 +30,19 @@ export async function runtimeTableService(t: FixtureHooks, scope: Readonly<Ingre
   const native = https.request;
   const router = await httpsFixture(t, async (req, res) => {
     try {
+      const target = req.url;
+      if (!target?.startsWith('/') || target.startsWith('//') || /[\\\s#]/u.test(target)) throw new Error('Invalid fixture target');
       const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
-      const body = Buffer.concat(chunks); const path = decodeURIComponent(req.url ?? '');
+      const body = Buffer.concat(chunks); const path = decodeURIComponent(target);
       const partitions = new Set([...path.matchAll(/PartitionKey(?:=| eq )'([^']+)'/gu)].map(match => match[1]!));
       for (const match of body.toString().matchAll(/"PartitionKey"\s*:\s*"([^"]+)"/gu)) partitions.add(match[1]!);
       const partition = [...partitions][0];
       const service = partition === 'v1_ingress_c3RhYmxl' ? inbox : partition === 'v1_delivery_c3RhYmxl' ? delivery : undefined;
       if (partitions.size !== 1 || !service) throw new Error('Invalid fixture partition');
       stats.forwarded++;
-      const forward = native(new URL(req.url!, service.fixture.baseUrl), { method: req.method, headers: req.headers,
+      // The selected owned fixture alone supplies authority; request data is only a path.
+      const forward = native({ hostname: '127.0.0.1', port: new URL(service.fixture.baseUrl).port,
+        path: target, method: req.method, headers: req.headers,
         agent: false, rejectUnauthorized: true, ca: service.fixture.ca, servername: 'localhost' }, response => {
         res.writeHead(response.statusCode!, response.headers); response.pipe(res);
         response.on('error', () => res.destroy());
