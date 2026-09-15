@@ -242,6 +242,13 @@ test('prepared MI freezes caller identities before acquisition and has no filesy
   assert.equal(typeof await token(PUBLIC.botScope), 'string'); assert.equal(imds.calls(), 1);
 });
 
+test('explicit IMDS preserves the old bot wire path and ignores the unused ACA seam', async (t) => {
+  const imds = await imdsFixture(t); let acaCalls = 0;
+  const token = prepareManagedIdentity({ ...miConfig, managedIdentityHost: 'imds' }).createToken({ imdsRequest: imds.imdsRequest,
+    acaRequest: () => { acaCalls++; throw new Error('Unexpected ACA'); }, entraNetwork: entraNetwork() });
+  assert.equal(typeof await token(PUBLIC.botScope), 'string'); assert.equal(imds.calls(), 1); assert.equal(imds.closed(), 1); assert.equal(acaCalls, 0);
+});
+
 test('native synchronous request error is private and is not retried', async () => {
   let calls = 0;
   const token = prepareManagedIdentity(miConfig).createToken({ imdsRequest: () => { calls++; throw new Error('synthetic-private-transport'); }, entraNetwork: entraNetwork() });

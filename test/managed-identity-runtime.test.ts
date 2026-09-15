@@ -24,6 +24,7 @@ import type { RequestOptions } from 'node:https';
 import type { IncomingMessage } from 'node:http';
 import { expectedEvent } from './fixtures/incoming.js';
 import { finalDelivery } from './fixtures/outgoing.js';
+import { acaEnvironment, acaHeader } from './support/aca-identity.js';
 
 const journalScope = { appId: scope.appId, tenantId: scope.tenantId };
 function aciHeader(t: TestContext): string {
@@ -49,8 +50,8 @@ function storage(t: TestContext) {
   } };
 }
 
-test('MI preparation and ingress-only SDK select a deny callback without files, network or CCA', async (t) => {
-  const header = aciHeader(t);
+for (const host of ['imds', 'azure-container-apps'] as const) test(`${host} preparation and ingress-only SDK select a deny callback without files, network or CCA`, async (t) => {
+  const header = host === 'imds' ? aciHeader(t) : (acaEnvironment(t), acaHeader);
   let selected = false; const initialize = App.prototype.initialize;
   const open = t.mock.method(fs, 'openSync', () => { throw new Error('No credential files'); });
   const req = t.mock.method(http, 'request', () => { throw new Error('No metadata'); });
@@ -61,7 +62,7 @@ test('MI preparation and ingress-only SDK select a deny callback without files, 
     if (credentials && 'token' in credentials) await assert.rejects(async () => credentials.token(PUBLIC.botScope));
     await initialize.call(this);
   });
-  const input = { ...miConfig }; const prepared = prepareReceiver(input);
+  const input = { ...miConfig, managedIdentityHost: host }; const prepared = prepareReceiver(input);
   input.appId = randomUUID(); assert.equal(JSON.stringify(prepared), '{}');
   const receiver = await prepared.start({ scope, admit: () => ({ kind: 'full' }) });
   try {
@@ -71,8 +72,8 @@ test('MI preparation and ingress-only SDK select a deny callback without files, 
   } finally { await receiver.stop(); }
 });
 
-test('MI setup uses deny-only public credentials and real dual JWT authentication with six-field capture', async (t) => {
-  const header = aciHeader(t);
+for (const host of ['imds', 'azure-container-apps'] as const) test(`${host} setup uses deny-only public credentials and real dual JWT authentication with six-field capture`, async (t) => {
+  const header = host === 'imds' ? aciHeader(t) : (acaEnvironment(t), acaHeader);
   const files = setupFiles(t); const auth = await authFixture(t); let selected = false;
   const acquire = t.mock.method(ConfidentialClientApplication.prototype, 'acquireTokenByClientCredential', async () => { throw new Error('No CCA'); });
   const request = http.request; let metadataCalls = 0;
@@ -90,7 +91,7 @@ test('MI setup uses deny-only public credentials and real dual JWT authenticatio
     await initialize.call(this);
   });
   const { clientSecret: _unused, ...settings } = files.config;
-  const capture = await startSetupCapture({ ...settings, ...miConfig }, auth.dependencies); t.after(() => capture.stop());
+  const capture = await startSetupCapture({ ...settings, ...miConfig, managedIdentityHost: host }, auth.dependencies); t.after(() => capture.stop());
   const body = activity(); body.text = files.challenge;
   assert.equal((await post(capture.port, auth.token(), body)).status, 200); await capture.done;
   const candidate = JSON.parse(fs.readFileSync(files.config.captureFile, 'utf8'));
