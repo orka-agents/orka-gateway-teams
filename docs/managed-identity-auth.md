@@ -61,11 +61,13 @@ modes, partial/empty pairs and mixed credential fields fail closed. Other modes
 reject all three `TEAMS_MANAGED_IDENTITY_*` variables, including empty values.
 
 This mode rejects the SDK's ambient `CLIENT_SECRET` and
-`MANAGED_IDENTITY_CLIENT_ID`, plus `MSI_ENDPOINT`, `MSI_SECRET` and
-`AZURE_FEDERATED_TOKEN_FILE`, even when empty. Omitted/explicit IMDS additionally
-rejects `IDENTITY_ENDPOINT`; the application never clears settings or infers
-another method. Linux ACI's unused `IDENTITY_HEADER` is tolerated in IMDS mode,
-left untouched and never read/forwarded. Only explicit ACA enables the platform
+`MANAGED_IDENTITY_CLIENT_ID`, plus `AZURE_FEDERATED_TOKEN_FILE`, even when empty.
+Omitted/explicit IMDS also rejects `IDENTITY_ENDPOINT`, `MSI_ENDPOINT` and
+`MSI_SECRET`. Explicit ACA tolerates the platform's unused legacy `MSI_ENDPOINT`
+and `MSI_SECRET` aliases, including empty values, without reading, clearing or
+using them as a fallback. The application never infers another method. Linux
+ACI's unused `IDENTITY_HEADER` is tolerated in IMDS mode, left untouched and
+never read/forwarded. Only explicit ACA enables the canonical platform
 endpoint/header contract: pin the validated endpoint before ownership, read the
 rotating bounded header per refresh, and send it only to the local token service.
 Neither private value enters public runtime config or Entra/Table/Teams requests.

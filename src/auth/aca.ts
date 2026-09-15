@@ -4,7 +4,9 @@ import { requestIdentityJSON } from './identity-http.js';
 
 /** Environment selection only. Endpoint/header values never enter structural bot configuration. */
 export function assertAcaEnvironment(env: NodeJS.ProcessEnv = process.env): void {
-  if (['MSI_ENDPOINT', 'MSI_SECRET', 'AZURE_FEDERATED_TOKEN_FILE'].some(key => env[key] !== undefined)) throw failure();
+  // ACA also supplies legacy MSI aliases. Leave them untouched and unread; only
+  // the canonical IDENTITY_ENDPOINT / IDENTITY_HEADER source is selected below.
+  if (env.AZURE_FEDERATED_TOKEN_FILE !== undefined) throw failure();
 }
 
 /** Private prepared source: no I/O, public endpoint override, or retained rotating header. */

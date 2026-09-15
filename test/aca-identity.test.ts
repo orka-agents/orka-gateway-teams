@@ -4,6 +4,7 @@ import https from 'node:https';
 import type { IncomingMessage, RequestOptions } from 'node:http';
 import { JsonWebToken, PUBLIC } from '@microsoft/teams.api';
 import { prepareManagedIdentity } from '../src/auth/managed-identity.js';
+import { assertAcaEnvironment } from '../src/auth/aca.js';
 import { assertion, entraEndpoint, entraNetwork, miConfig } from './support/managed-identity.js';
 import { syntheticAccessToken } from './support/certificate.js';
 import { httpsFixture } from './support/ingress-https.js';
@@ -11,14 +12,30 @@ import { acaEnvironment, acaEndpoint, acaHeader, identityEnvironment, identityFi
 
 const config = { ...miConfig, managedIdentityHost: 'azure-container-apps' as const };
 const failure = { message: 'Managed identity token unavailable' };
+const legacyEndpoint = 'https://unused.invalid/legacy';
+const legacySecret = 'synthetic-unused-legacy-header';
+
+for (const name of ['MSI_ENDPOINT', 'MSI_SECRET']) {
+  test('ACA never reads or clears the unused legacy alias: ' + name, () => {
+    let accessed = false;
+    const env: NodeJS.ProcessEnv = {};
+    Object.defineProperty(env, name, { enumerable: true,
+      get() { accessed = true; throw new Error('Unexpected legacy alias read'); },
+      set() { accessed = true; throw new Error('Unexpected legacy alias write'); } });
+    assert.doesNotThrow(() => assertAcaEnvironment(env));
+    assert.equal(accessed, false); assert.equal(Object.hasOwn(env, name), true);
+  });
+}
 
 test('ACA local assertion rotates its private header and uses real fixed HTTPS Entra/MSAL exchange and final-token cache', async (t) => {
-  acaEnvironment(t); let issued = ''; let expectedHeader = acaHeader; let localContract = true; let bytes = 0; let posts = 0; let oauthContract = true;
+  acaEnvironment(t); identityEnvironment(t, { MSI_ENDPOINT: legacyEndpoint, MSI_SECRET: legacySecret });
+  let issued = ''; let expectedHeader = acaHeader; let localContract = true; let bytes = 0; let posts = 0; let oauthContract = true;
   const local = await identityFixture(t, (req, res) => {
     const url = new URL(req.url!, acaEndpoint);
     localContract &&= req.method === 'GET' && req.headers['x-identity-header'] === expectedHeader && req.headers.metadata === undefined &&
       url.pathname === '/msi/token' && url.searchParams.size === 3 && url.searchParams.get('api-version') === '2019-08-01' &&
-      url.searchParams.get('resource') === 'api://AzureADTokenExchange' && url.searchParams.get('client_id') === miConfig.managedIdentityClientId;
+      url.searchParams.get('resource') === 'api://AzureADTokenExchange' && url.searchParams.get('client_id') === miConfig.managedIdentityClientId &&
+      !JSON.stringify(req.headers).includes(legacySecret);
     req.on('data', (part: Buffer) => { bytes += part.length; });
     req.on('end', () => { issued = assertion(); res.end(JSON.stringify({ access_token: issued })); });
   });
@@ -29,7 +46,8 @@ test('ACA local assertion rotates its private header and uses real fixed HTTPS E
       const body = new URLSearchParams(Buffer.concat(parts).toString());
       oauthContract &&= body.get('scope') === 'https://api.botframework.com/.default' && body.get('client_id') === miConfig.appId &&
         body.get('client_assertion') === issued && body.get('grant_type') === 'client_credentials' && !body.has('client_secret') &&
-        !JSON.stringify(req.headers).includes(acaHeader) && !Buffer.concat(parts).toString().includes(acaHeader) && req.headers['x-identity-header'] === undefined;
+        !JSON.stringify(req.headers).includes(acaHeader) && !Buffer.concat(parts).toString().includes(acaHeader) && req.headers['x-identity-header'] === undefined &&
+        !JSON.stringify(req.headers).includes(legacySecret) && !Buffer.concat(parts).toString().includes(legacySecret);
       res.end(JSON.stringify({ access_token: finalToken, token_type: 'Bearer', expires_in: 3600 }));
     });
   });
@@ -43,11 +61,14 @@ test('ACA local assertion rotates its private header and uses real fixed HTTPS E
   const token = prepared.createToken({ acaRequest: local.request }); assert.equal(local.stats.calls, 0);
   const wrapped = new JsonWebToken(await token(PUBLIC.botScope)).toString();
   assert.equal(wrapped === finalToken, true); assert.equal(wrapped.includes(acaHeader), false);
+  assert.equal(process.env.MSI_ENDPOINT === legacyEndpoint && process.env.MSI_SECRET === legacySecret, true);
   expectedHeader = 'synthetic-rotated-aca-header'; process.env.IDENTITY_HEADER = expectedHeader;
+  identityEnvironment(t, { MSI_ENDPOINT: '', MSI_SECRET: '' });
   assert.equal(await token([PUBLIC.botScope], miConfig.tenantId) === finalToken, true);
   await new Promise<void>(resolve => setImmediate(resolve));
   assert.equal(localContract, true); assert.equal(oauthContract, true); assert.equal(bytes, 0); assert.equal(local.stats.calls, 2);
   assert.equal(posts, 1); assert.equal(requestCloses, 1); assert.equal(socketCloses, 1); local.drained();
+  assert.equal(process.env.MSI_ENDPOINT === '' && process.env.MSI_SECRET === '', true);
   await assert.rejects(async () => token('https://storage.azure.com/.default'), failure);
   await assert.rejects(async () => token(PUBLIC.graphScope), failure);
   assert.equal(local.stats.calls, 2);
@@ -67,13 +88,14 @@ for (const [name, endpoint] of Object.entries({ missing: undefined, empty: '', h
   privateIPv6: 'http://[fc00::1]/path', publicIPv6: 'http://[2001:db8::1]/path', outsideLinkLocal: 'http://[fec0::1]/path',
   mapped: 'http://[::ffff:127.0.0.1]/path', whitespace: ' http://127.0.0.1/path', backslash: 'http://127.0.0.1/a\\b' })) {
   test('ACA rejects unsupported endpoint before any acquisition: ' + name, (t) => {
-    acaEnvironment(t); identityEnvironment(t, { IDENTITY_ENDPOINT: endpoint });
+    acaEnvironment(t); identityEnvironment(t, { IDENTITY_ENDPOINT: endpoint, MSI_ENDPOINT: acaEndpoint, MSI_SECRET: acaHeader });
     assert.throws(() => prepareManagedIdentity(config), { message: 'Invalid managed identity credentials' });
   });
 }
-for (const name of ['MSI_ENDPOINT', 'MSI_SECRET', 'AZURE_FEDERATED_TOKEN_FILE', 'CLIENT_SECRET', 'MANAGED_IDENTITY_CLIENT_ID']) {
+for (const name of ['AZURE_FEDERATED_TOKEN_FILE', 'CLIENT_SECRET', 'MANAGED_IDENTITY_CLIENT_ID']) {
   test('ACA refuses competing identity selection: ' + name, (t) => {
-    acaEnvironment(t); identityEnvironment(t, { [name]: '' }); assert.throws(() => prepareManagedIdentity(config));
+    acaEnvironment(t); identityEnvironment(t, { MSI_ENDPOINT: legacyEndpoint, MSI_SECRET: legacySecret, [name]: '' });
+    assert.throws(() => prepareManagedIdentity(config));
   });
 }
 
@@ -86,7 +108,8 @@ test('ACA pins endpoint before acquisition and never falls back to IMDS', async 
 
 for (const header of [undefined, '', ' ', 'bad\r\nvalue', 'x'.repeat(8193), 'nonascii-\u00e9']) {
   test('ACA rejects invalid current header without exposing it', async (t) => {
-    acaEnvironment(t); const prepared = prepareManagedIdentity(config); identityEnvironment(t, { IDENTITY_HEADER: header });
+    acaEnvironment(t); identityEnvironment(t, { MSI_ENDPOINT: acaEndpoint, MSI_SECRET: acaHeader });
+    const prepared = prepareManagedIdentity(config); identityEnvironment(t, { IDENTITY_HEADER: header });
     const local = await identityFixture(t, (_req, res) => res.end('{}'));
     const token = prepared.createToken({ acaRequest: local.request });
     await assert.rejects(async () => token(PUBLIC.botScope), failure); assert.equal(local.stats.calls, 0);

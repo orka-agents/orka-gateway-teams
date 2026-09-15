@@ -10,13 +10,17 @@ const clientId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const scope = 'https://storage.azure.com/.default';
 const unavailable = (error: unknown) => error instanceof Error && error.message === 'Storage token unavailable' && error.cause === undefined;
 const opaque = 'synthetic-opaque-storage-token+/==';
+const legacyEndpoint = 'https://unused.invalid/legacy';
+const legacySecret = 'synthetic-unused-legacy-header';
 function context() { return { signal: new AbortController().signal, deadline: performance.now() + 10000 }; }
 function envelope(change: Record<string, unknown> = {}) {
   return { access_token: opaque, token_type: 'Bearer', resource: 'https://storage.azure.com/', expires_on: Math.floor(Date.now() / 1000) + 3600, client_id: clientId, ...change };
 }
 
 for (const host of ['imds', 'azure-container-apps'] as const) test('fixed storage UAMI acquisition treats tokens as opaque: ' + host, async (t) => {
-  if (host === 'azure-container-apps') acaEnvironment(t);
+  if (host === 'azure-container-apps') {
+    acaEnvironment(t); identityEnvironment(t, { MSI_ENDPOINT: legacyEndpoint, MSI_SECRET: legacySecret });
+  }
   let valid = true; let bodyBytes = 0;
   const local = await identityFixture(t, (req, res) => {
     const url = new URL(req.url!, 'http://127.0.0.1');
@@ -24,7 +28,8 @@ for (const host of ['imds', 'azure-container-apps'] as const) test('fixed storag
       url.searchParams.get('api-version') === (host === 'imds' ? '2018-02-01' : '2019-08-01') &&
       url.pathname === (host === 'imds' ? '/metadata/identity/oauth2/token' : '/msi/token') &&
       (host === 'imds' ? req.headers.metadata === 'true' && req.headers['x-identity-header'] === undefined :
-        req.headers.metadata === undefined && req.headers['x-identity-header'] === acaHeader);
+        req.headers.metadata === undefined && req.headers['x-identity-header'] === acaHeader) &&
+      !JSON.stringify(req.headers).includes(legacySecret);
     req.on('data', (part: Buffer) => { bodyBytes += part.length; }); req.on('end', () => res.end(JSON.stringify(envelope())));
   });
   const input = { host, clientId: clientId.toUpperCase() }; const prepared = prepareStorageIdentity(input);
@@ -38,6 +43,7 @@ for (const host of ['imds', 'azure-container-apps'] as const) test('fixed storag
     local.drained(); assert.throws(() => prepared.createProvider());
   } finally { await provider.close(); }
   await assert.rejects(provider.token(scope, context())); await provider.close();
+  if (host === 'azure-container-apps') assert.equal(process.env.MSI_ENDPOINT === legacyEndpoint && process.env.MSI_SECRET === legacySecret, true);
 });
 
 for (const [name, change] of [
@@ -130,7 +136,7 @@ test('cache checks monotonic residence even if the wall clock stands still', asy
   } finally { await provider.close(); }
 });
 
-for (const setting of ['IDENTITY_ENDPOINT', 'IDENTITY_HEADER', 'MSI_ENDPOINT', 'MSI_SECRET', 'AZURE_FEDERATED_TOKEN_FILE', 'NODE_TLS_REJECT_UNAUTHORIZED']) {
+for (const setting of ['IDENTITY_ENDPOINT', 'IDENTITY_HEADER', 'AZURE_FEDERATED_TOKEN_FILE', 'NODE_TLS_REJECT_UNAUTHORIZED']) {
   test('storage cache does not waive current source checks: ' + setting, async (t) => {
     acaEnvironment(t); const local = await identityFixture(t, (_req, res) => res.end(JSON.stringify(envelope())));
     const provider = prepareStorageIdentity({ host: 'azure-container-apps', clientId }).createProvider({ request: local.request });
@@ -191,23 +197,46 @@ test('storage close waits a timed-out real native request and socket, without ca
 });
 
 test('storage header rotation is read on refresh, not pinned or carried in the cache', async (t) => {
-  acaEnvironment(t); const now = 1900000000000; t.mock.timers.enable({ apis: ['Date'], now });
+  acaEnvironment(t); identityEnvironment(t, { MSI_ENDPOINT: legacyEndpoint, MSI_SECRET: legacySecret });
+  const now = 1900000000000; t.mock.timers.enable({ apis: ['Date'], now });
   let currentHeader = acaHeader; let matched = true;
   const local = await identityFixture(t, (req, res) => {
-    matched &&= req.headers['x-identity-header'] === currentHeader; res.end(JSON.stringify(envelope()));
+    matched &&= req.headers['x-identity-header'] === currentHeader && !JSON.stringify(req.headers).includes(legacySecret);
+    res.end(JSON.stringify(envelope()));
   });
   const provider = prepareStorageIdentity({ host: 'azure-container-apps', clientId }).createProvider({ request: local.request });
   try {
     await provider.token(scope, context()); currentHeader = 'synthetic-rotated-storage-header'; process.env.IDENTITY_HEADER = currentHeader;
+    identityEnvironment(t, { MSI_ENDPOINT: '', MSI_SECRET: '' });
     await provider.token(scope, context()); assert.equal(local.stats.calls, 1);
     t.mock.timers.setTime(now + 300000); await provider.token(scope, context());
     assert.equal(local.stats.calls, 2); assert.equal(matched, true); local.drained();
+    assert.equal(process.env.MSI_ENDPOINT === '' && process.env.MSI_SECRET === '', true);
   } finally { await provider.close(); }
 });
 
 for (const name of ['IDENTITY_ENDPOINT', 'MSI_ENDPOINT', 'MSI_SECRET', 'AZURE_FEDERATED_TOKEN_FILE']) {
   test('storage IMDS refuses alternate environment source: ' + name, (t) => {
     identityEnvironment(t, { [name]: '' }); assert.throws(() => prepareStorageIdentity({ host: 'imds', clientId }));
+  });
+}
+
+for (const name of ['MSI_ENDPOINT', 'MSI_SECRET']) {
+  test('storage IMDS cache still refuses legacy identity selection: ' + name, async (t) => {
+    const local = await identityFixture(t, (_req, res) => res.end(JSON.stringify(envelope())));
+    const provider = prepareStorageIdentity({ host: 'imds', clientId }).createProvider({ request: local.request });
+    try {
+      await provider.token(scope, context()); identityEnvironment(t, { [name]: '' });
+      await assert.rejects(provider.token(scope, context()), unavailable);
+      assert.equal(local.stats.calls, 1); local.drained();
+    } finally { await provider.close(); }
+  });
+}
+
+for (const name of ['IDENTITY_ENDPOINT', 'IDENTITY_HEADER']) {
+  test('storage ACA aliases cannot replace missing canonical source: ' + name, (t) => {
+    acaEnvironment(t); identityEnvironment(t, { MSI_ENDPOINT: process.env.IDENTITY_ENDPOINT, MSI_SECRET: acaHeader, [name]: undefined });
+    assert.throws(() => prepareStorageIdentity({ host: 'azure-container-apps', clientId }));
   });
 }
 

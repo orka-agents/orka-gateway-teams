@@ -29,8 +29,8 @@ export function prepareStorageIdentity(input: Readonly<StorageIdentityConfig>): 
         if (host === 'azure-container-apps') aca!.assertUsable();
         else {
           assertAcaEnvironment();
-          // Like bot IMDS, tolerate but never read the unused ACI header.
-          if (process.env.IDENTITY_ENDPOINT !== undefined) throw failure();
+          // IMDS still rejects alternate sources; only its unused ACI header is tolerated.
+          if (['IDENTITY_ENDPOINT', 'MSI_ENDPOINT', 'MSI_SECRET'].some(key => process.env[key] !== undefined)) throw failure();
         }
       } catch { throw new Error('Invalid storage identity credentials'); }
     };
