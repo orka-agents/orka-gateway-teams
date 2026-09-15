@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import https from 'node:https';
 import type { IncomingMessage } from 'node:http';
-import type { TestContext } from 'node:test';
+import type { FixtureHooks } from './ingress-https.js';
 import type { IngressScope } from '../../src/ingress/types.js';
 import type { TableServeConfig } from '../../src/ingress/runtime-config.js';
 import type { TableDependencies } from '../../src/storage/table/types.js';
@@ -22,7 +22,7 @@ export function tableRuntimeConfig(scope: Readonly<IngressScope>): TableServeCon
 
 /** Native proxy only: each URL or multipart body chooses its OWN kind partition.
  * Both independent Table oracles still enforce the same physical account/table. */
-export async function runtimeTableService(t: TestContext, scope: Readonly<IngressScope>) {
+export async function runtimeTableService(t: FixtureHooks, scope: Readonly<IngressScope>) {
   const inbox = await tableService(t, 'ingress', 2, scope);
   const delivery = await tableService(t, 'delivery', 2, scope);
   const stats = { requests: 0, requestCloses: 0, sockets: 0, socketCloses: 0,
@@ -56,7 +56,7 @@ export async function runtimeTableService(t: TestContext, scope: Readonly<Ingres
     req.once('socket', socket => { stats.sockets++; socket.once('close', () => stats.socketCloses++); });
     return req;
   }) as NonNullable<TableDependencies['request']>;
-  return { inbox, delivery, request, stats, drained() {
+  return { inbox, delivery, request, stats, fixture: router, drained() {
     assert.equal(stats.contract, true); assert.equal(inbox.stats.violation || delivery.stats.violation, false);
     assert.equal(stats.requests, stats.requestCloses); assert.equal(stats.sockets, stats.socketCloses);
     assert.equal(stats.forwarded, stats.forwardCloses); assert.equal(stats.forwardSockets, stats.forwardSocketCloses);
@@ -64,7 +64,7 @@ export async function runtimeTableService(t: TestContext, scope: Readonly<Ingres
 }
 
 /** Fixed-purpose ACA fixture for the REAL storage provider and bot federation. */
-export async function runtimeIdentity(t: TestContext, expirySeconds = 3600) {
+export async function runtimeIdentity(t: FixtureHooks, expirySeconds = 3600) {
   acaEnvironment(t);
   const calls = { storage: 0, bot: 0, contract: true };
   const fixture = await identityFixture(t, (req, res) => {

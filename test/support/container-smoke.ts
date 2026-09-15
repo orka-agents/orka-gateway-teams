@@ -254,6 +254,11 @@ async function smoke(): Promise<void> {
     ok(await run(['run', '--rm', '--network', 'none', ...security, ...helper(), '--entrypoint', 'node', image, '/fixture/container-smoke.mjs', 'fixture-inspect']));
     console.log('PASS Node 24.2.0, UID/GID 1000, direct argv, production-only app payload, read-only root and writable tmpfs');
 
+    stage = 'compiled Table CLI with native ACA/storage/FIC/MSAL/JWKS/provider fixtures';
+    const { runTableContainerStage } = await import('./table-runtime-cli.js');
+    await runTableContainerStage(image);
+    console.log('PASS actual image Table init/refused reinit, dual JWT verification, native ACA/storage/FIC/MSAL/provider, SIGTERM drain and one-effect replay; test-only read-only preload mount');
+
     stage = 'standalone compiled capture with private host mount, no runtime volume and safe expiry';
     const setupDirectory = join(directory, 'capture'); mkdirSync(setupDirectory, { mode: 0o700 });
     const challenge = 'orka-setup:' + randomBytes(16).toString('hex'); secrets.push(challenge);

@@ -1,16 +1,17 @@
-# Table inbox — library only
+# Table inbox — V2 contract
 
 `createTableIngressStore` in `src/ingress/table-store.ts` implements the asynchronous
-`IngressPort` on the explicitly V2 [Table kernel](table-storage.md). It is **not a
-runtime-selectable backend**. SQLite remains the default and only runtime backend;
-its synchronous APIs, schemas, configuration and relay behavior are unchanged.
+`IngressPort` on the explicitly V2 [Table kernel](table-storage.md). The compiled
+CLI supports [explicit Table V2 runtime selection](table-runtime.md), including a
+purpose-specific storage identity provider. SQLite remains the default; its
+synchronous APIs, schemas and relay behavior are unchanged.
 
-There is no Table CLI, automatic initialization/adoption, V1 migration, lease,
-pruning, operator recovery command, HA promise or Azure hosting integration. The
-Table delivery journal has explicit V1 and V2 factories; V2 validates retained
-recovery commitments at startup only. A recoverable two-store runtime is separate
-work. These libraries do not provision storage or provide a production storage-token
-identity.
+There is no automatic initialization/adoption, V1 migration, lease, pruning,
+operator recovery command, HA promise or Azure hosting integration. The Table
+delivery journal has explicit V1 and V2 factories; the selected runtime uses V2,
+which validates retained recovery commitments at startup only. Crash recovery
+remains separate work. The runtime does not provision Azure resources or establish
+live identity/service qualification.
 
 ## Construction and lifecycle
 

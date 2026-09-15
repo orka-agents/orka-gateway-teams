@@ -4,9 +4,10 @@ import { createServer } from 'node:https';
 import type { RequestListener } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { TestContext } from 'node:test';
+/** Minimal cleanup contract used by these fixtures, also in the in-process image gate. */
+export interface FixtureHooks { after(cleanup: () => void | Promise<void>): void }
 
-export async function httpsFixture(t: TestContext, listener: RequestListener) {
+export async function httpsFixture(t: FixtureHooks, listener: RequestListener) {
   // Private directory and ephemeral key: never committed or printed. OpenSSL
   // writes the key privately; stderr (including progress) is not forwarded.
   const directory = mkdtempSync(join(tmpdir(), 'teams-ingress-tls-'));

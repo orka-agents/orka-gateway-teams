@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { TestContext } from 'node:test';
+import type { FixtureHooks } from './ingress-https.js';
 import type { ImdsRequest } from '../../src/auth/imds.js';
 
-const environments = new WeakMap<TestContext, Map<string, string | undefined>>();
-export function identityEnvironment(t: TestContext, values: Record<string, string | undefined>) {
+const environments = new WeakMap<FixtureHooks, Map<string, string | undefined>>();
+export function identityEnvironment(t: FixtureHooks, values: Record<string, string | undefined>) {
   let originals = environments.get(t);
   if (!originals) {
     originals = new Map(); environments.set(t, originals);
@@ -21,12 +21,12 @@ export function identityEnvironment(t: TestContext, values: Record<string, strin
 }
 export const acaEndpoint = 'http://localhost:4231/msi/token';
 export const acaHeader = 'synthetic-private-aca-header';
-export function acaEnvironment(t: TestContext) {
+export function acaEnvironment(t: FixtureHooks) {
   identityEnvironment(t, { IDENTITY_ENDPOINT: acaEndpoint, IDENTITY_HEADER: acaHeader });
 }
 
 /** Only destination mapping is replaced: actual native request AND socket closes are counted. */
-export async function identityFixture(t: TestContext, listener: (req: IncomingMessage, res: ServerResponse) => void) {
+export async function identityFixture(t: FixtureHooks, listener: (req: IncomingMessage, res: ServerResponse) => void) {
   const server = http.createServer(listener);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); });
@@ -42,7 +42,7 @@ export async function identityFixture(t: TestContext, listener: (req: IncomingMe
     req.once('socket', socket => { stats.sockets++; socket.once('close', () => { stats.socketCloses++; }); });
     return req;
   };
-  return { request, stats, drained() {
+  return { request, stats, server, baseUrl: `http://127.0.0.1:${address.port}/`, drained() {
     assert.equal(stats.contract, true); assert.equal(stats.requestCloses, stats.calls);
     assert.equal(stats.socketCloses, stats.sockets); assert.equal(stats.sockets, stats.calls);
   } };

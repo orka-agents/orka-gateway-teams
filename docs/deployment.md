@@ -34,12 +34,22 @@ removal of `TEAMS_CLIENT_SECRET`, and an app-only read-only credential mount;
 no such overlay is provided or verified here. Do not add `fsGroup` or widen modes
 as a workaround. See [certificate deployment limits](certificate-auth.md#kubernetes-qualification).
 
-The separate [managed-identity federation mode](managed-identity-auth.md) is limited
-to qualified Azure Linux VM/ACI IMDS hosts with an explicitly assigned UAMI and
-approved FIC on the existing bot app. It does not add AKS token-file or ACA/App
-Service endpoint support, nor change these Kubernetes secret assets. Persistent
-hosting/storage and public HTTPS for that mode require a separate deployment
-design; ACI/Azure Files is not automatically qualified for this SQLite lifecycle.
+The separate [managed-identity federation mode](managed-identity-auth.md) supports
+the qualified Azure Linux VM/ACI IMDS contract and an explicit ACA local-endpoint
+subset, with an assigned UAMI and approved FIC on the existing bot app. The
+[Table V2 CLI/runtime](table-runtime.md) adds separate-purpose storage identity,
+explicit logical initialization and controlled clean handover; it does not provide
+an ACA deployment or change these **SQLite/client-secret Kubernetes assets**.
+Actual ACA endpoint/identity, Table data role and physical table, service atomicity,
+persistent hosting and public Teams/Orka HTTPS still require separately authorized
+qualification. No App Service or AKS token-file support is added. ACI/Azure Files
+is not automatically qualified for the SQLite lifecycle.
+
+For Table operations, use the [Table runtime guide](table-runtime.md), not the PVC/
+SQLite preparation steps below. Keep one writer and confirm clean process stop
+and release before a successor starts. ACA replica/revision settings are not a
+rolling-replacement fence. Occupied owners, crash/unclean release and failed audit
+remain blockers; there is no force/reset, scale-out or crash-recovery workflow.
 
 Registration permissions, acceptance of the selected application credential mode,
 and actual app installation remain operator prerequisites. A visible custom-upload
@@ -55,7 +65,7 @@ operator action, using the Microsoft sources linked below.
 | --- | --- |
 | Bot OAuth client / Microsoft App ID | `TEAMS_APP_ID`, valid GUID; also manifest `bots[0].botId`. **Not** necessarily the Teams package ID. |
 | Tenant GUID | `TEAMS_TENANT_ID` and binding `match.accountId`; exact trusted tenant, no `common` or multi-tenant inference. |
-| Bot credential | Default Kubernetes assets: `teams-bot` Secret key `client-secret` → `TEAMS_CLIENT_SECRET`, a client-secret **value**, not its ID. Explicit certificate authentication supports host/Docker; managed-identity federation supports the qualified Linux VM/ACI IMDS contract. Neither mode supplies a Kubernetes overlay. |
+| Bot credential | Default Kubernetes assets: `teams-bot` Secret key `client-secret` → `TEAMS_CLIENT_SECRET`, a client-secret **value**, not its ID. Explicit certificate authentication supports host/Docker; managed-identity federation supports VM/ACI IMDS and the explicit ACA local subset (live ACA qualification pending). Neither mode supplies a Kubernetes overlay. |
 | Verified bot recipient IDs | `TEAMS_RECIPIENT_IDS`, JSON array of exact allowed incoming `recipient.id` values, 1–100 entries. |
 | Verified service base URLs | `TEAMS_SERVICE_URLS`, JSON array of exact canonical public-cloud HTTPS URLs, 1–100 entries. Match path case/trailing slash; no query/fragment/userinfo/nonstandard service port. |
 | Verified sender IDs | Binding `senderPolicy.allowedSenderIds`: exact activity `from.id`, not display name, email, AAD ID or a guessed prefix. |

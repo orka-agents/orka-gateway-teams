@@ -35,12 +35,14 @@ constraints, and is not run by the runtime test command. `npm run check` runs
 typecheck, runtime tests, and `npm run build`. Build output is in ignored `dist/`; optional preview files belong
 in ignored `bin/`. Do not commit binaries, credentials, or generated output.
 
-## Table kernel tests (library only)
+## Table runtime and kernel tests
 
 See [Table storage boundaries](docs/table-storage.md). The kernel lives entirely in
 `src/storage/table/`; the [V2 inbox](docs/table-inbox.md) lives under
-`src/ingress/table-*.ts`. Both it and the explicit V1/V2 Table delivery journals remain
-library-only; operator recovery execution and runtime selection are separate work.
+`src/ingress/table-*.ts`. The compiled CLI selects the V2 inbox/delivery runtime
+through `src/ingress/runtime-config.ts`; SQLite remains the default. See the
+[Table runtime guide](docs/table-runtime.md). Operator recovery execution remains
+separate work; low-level kernels and foreign inspection remain library APIs.
 Focused check: `node --import tsx --test test/table-*.test.ts`.
 Tests exercise real public SDK/native HTTPS against an independently implemented
 local service; they use no Azure resources or real credentials. Preserve raw
@@ -61,6 +63,17 @@ close. Closing may publish only private cleanup progress, never a grant or Ready
 Keep SQLite differential traces separate from the documented armed-crash adaptation;
 small native fixtures and capacity arithmetic are not 100000-record/RSS qualification.
 
+`test/table-runtime-cli.test.ts` compiles real `src` into a private temporary
+output before executing init/init-delivery/serve subprocesses; never assume repo
+`dist/` exists, because `check` builds after testing. Its native preload redirects
+only fixed production destinations to synthetic verified fixtures, including
+strict-fetch and SDK-native JWKS separately. Preserve both actual JWT verifiers,
+ACA/storage/FIC/MSAL and the native Teams POST; no bot-token, opening-port or
+production endpoint overrides. Reuse the per-request partition router in
+`test/support/table-runtime.ts`, not runtime-phase routing. Assert natural-exit
+request/socket counters before forced fixture cleanup and retain the same Table
+maps across fresh processes without initialization/reset.
+
 ## Optional packaging gates
 
 See [the deployment runbook](docs/deployment.md#scoped-verification) for exact
@@ -79,7 +92,10 @@ export KINDCTL=/absolute/path/to/orka/.agents/skills/kindctl/bin/kindctl
 ```
 
 The two smoke commands fail if prerequisites are absent; neither is part of default
-`npm test`. Docker acceptance builds/runs the actual image and pinned proxy.
+`npm test`. Docker acceptance builds/runs the actual image and pinned proxy,
+including the Table/ACA compiled-process journey via a test-only read-only preload
+mount. Its local Linux host-network fixture is test transport, not a deployment
+network design; fixture code never enters the allowlisted image payload.
 Deployment acceptance uses real Kustomize, server dry-run against installed Gateway
 CRDs and synthetic Pods/PVC/TLS/restarts. It creates only a new owned namespace and
 never installs Orka, touches global kubeconfig, or deletes the operator's cluster.
@@ -178,12 +194,15 @@ See [managed-identity authentication](docs/managed-identity-auth.md). The shared
 credential union includes explicit `managed-identity-federation` with required
 UAMI client/principal GUIDs. `prepareManagedIdentity` is structural/no-I/O and
 returns only `assertUsable()` and one-use `createToken(dependencies?)`. Preparation,
-setup and ingress-only must never construct a CCA or acquire metadata/app tokens.
+setup and ingress-only must never construct a CCA or acquire bot metadata/app
+tokens. Table ingress-only still uses the separate storage provider.
 
 `app-token.ts` contains only the shared lazy CCA/cache logic extracted from the
 certificate provider. Preserve all certificate APIs/errors. `imds.ts` owns the
-fixed native link-local HTTP GET; Entra retains the existing confined verified
-HTTPS network. `ReceiverDependencies.managedIdentity` exposes only `imdsRequest`
+fixed native link-local HTTP GET; `aca.ts` adds explicit supported-local-subset
+transport, and `storage-identity.ts` supplies a separate fixed-purpose provider.
+Entra retains the existing confined verified HTTPS network.
+`ReceiverDependencies.managedIdentity` exposes `imdsRequest`, `acaRequest`
 (native HTTP request) and `entraNetwork` (public MSAL `INetworkModule`) as trusted
 library test seams, not endpoint/CLI overrides. No SDK managed-identity option,
 private MSAL hooks, serialized-cache inspection or legacy `botToken` overrides.
@@ -201,9 +220,11 @@ before both stores close. No extra cache/retry queue or new dependency.
 node --import tsx --test test/managed-identity-config.test.ts test/managed-identity-token.test.ts test/managed-identity-runtime.test.ts
 ```
 
-The actual Docker gate also checks MI setup/config refusal and normal readiness/
-receipt replay without acquisition. It does not live-qualify the Node provider on
-Azure or provide persistent hosting/HTTPS. Default Kubernetes assets stay secret mode.
+The actual Docker gate retains MI setup/config refusal and normal SQLite readiness/
+receipt replay without acquisition, and adds actual Table CLI/native ACA acquisition,
+FIC/MSAL/provider sends and clean restart with synthetic fixtures. It does not
+live-qualify ACA/Azure or provide persistent hosting/HTTPS. Default Kubernetes
+assets stay SQLite/client-secret mode.
 
 ## Ingress implementation and test boundaries
 
@@ -672,15 +693,18 @@ Keep these ownership boundaries intact:
   binding either listener, passes the owned inbox's `getRoute`, binds receiver then
   API, marks ready, then starts the unchanged serial relay. Never reopen the live
   exclusive inbox for routes. Failed second-store/bind startup drains and releases
-  resources without initialization, deletion, reset or forwarding. Trusted library-only
-  `IngressRuntimeDependencies` opening seams can defer owned ports, never select a
-  backend from environment. Startup cancellation waits actual opening/initialization
+  resources without initialization, deletion, reset or forwarding (an uncertain or
+  failed Table audit may retain ownership and block reopening). Trusted
+  `IngressRuntimeDependencies` opening seams remain SQLite-only; Table selection
+  uses `parseRuntimeConfig` and retains both real handles before any opening await.
+  Startup cancellation waits actual opening/initialization
   and suppresses late readiness/listening/relay; asynchronous close attempts both
   stores even if one rejects, only after both directions and reconciliation drain.
 - Either storage poison marks unready and stops both directions. API fatal signals
   follow response finish/disconnect, not the failed write itself. Abort intake,
   provider and relay work, drain SDK authentication, bot-token work and settlement,
-  THEN close both stores. Token acquisition is uncancellable through the public
+  THEN close both stores, and only afterward the Table storage-token provider.
+  Bot token acquisition is uncancellable through the public
   SDK API; one shared acquisition may outlive callers and hold shutdown pending,
   but its late continuation cannot POST.
 - `snapshotDelivery` / `decodeDelivery` enforce external shape and Unicode/bounds
@@ -702,7 +726,9 @@ Keep these ownership boundaries intact:
   or lost-receipt recovery. Retain routes/history beyond automatic attempts for
   manual retries. Orka's delivery call budget is 15s, default attempts ten, default
   expiry 24h and terminal retention 30d; neither store prunes its durable history.
-  Keep one process/current local PV and stable backend/Gateway UID/dedup ledger.
+  Keep one process and a stable backend/Gateway UID/dedup ledger. SQLite requires
+  an intact, current local PV; Table requires stable partitions and controlled
+  clean handover, not a local PV.
 
 Focused integration checks:
 
