@@ -7,7 +7,6 @@ import { syncBuiltinESMExports } from 'node:module';
 // Capture BEFORE patching; both default and named native imports must be mapped.
 const nativeHttp = http.request;
 const nativeHttps = https.request;
-const nativeFetch = globalThis.fetch;
 const settings = JSON.parse(readFileSync(new URL('./native-settings.json', import.meta.url), 'utf8'));
 const stats = { requests: 0, requestCloses: 0, sockets: 0, socketCloses: 0, unexpected: 0,
   table: 0, identity: 0, entra: 0, orka: 0, provider: 0, strictKeys: 0, sdkKeys: 0 };
@@ -56,7 +55,7 @@ http.request = (...args) => {
 // Node fetch does not use https.request. Map only the exact fixed JWKS resource;
 // production strict-auth parsing, endorsement, claims and RS256 checks still run.
 globalThis.fetch = (input, options = {}) => {
-  if (String(input) !== keysUrl) { void nativeFetch; return denied(); }
+  if (String(input) !== keysUrl) return denied();
   return new Promise((resolve, reject) => {
     const req = mappedHttps([new URL(keysUrl), { method: 'GET', headers: options.headers,
       signal: options.signal, agent: false }, res => {

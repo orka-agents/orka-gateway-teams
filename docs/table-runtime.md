@@ -64,6 +64,11 @@ the selected backend; mixed SQLite/Table serving is not supported.
 | `node dist/ingress/main.js init-delivery` | Delivery ID | Initialize only the empty delivery partition, then drain/close. |
 | `node dist/ingress/main.js serve` | Inbox ID/budgets, existing receiver/routing/bot credentials and Orka ingress bearer; enabled outbound additionally requires delivery ID and distinct outbound bearer/listener settings | Open/audit existing stores only; both audits complete before either listener. |
 
+Inbox initialization requires and validates all five audit/index values, but its
+existing genesis audit uses the kernel's **30,000 ms** duration, not
+`TABLE_AUDIT_MAX_DURATION_MS`. Normal `serve` opening applies the configured audit
+duration. The genesis-audit duration is not a whole-command initialization deadline.
+
 Equivalent commands are `npm run init:ingress`, `npm run init:delivery` and
 `npm start`. Initialize each required partition **once**, explicitly. Both init
 commands can share an environment containing the other's Table fields; they do
@@ -95,7 +100,10 @@ Storage uses `TABLE_MANAGED_IDENTITY_*` directly for the sole scope
 `https://storage.azure.com/`. It does not use bot FIC/Entra exchange, reuse bot
 tokens, or accept arbitrary resources. One private drainable provider serves both
 stores: one cached token, one refresh, at most 32 actual callers, a 60-second early
-margin and at most five minutes of application cache residence bounded by expiry.
+margin and a maximum five-minute reuse window bounded by expiry. Replacement is
+lazy on eligible acquisition; there is no eviction timer, so an idle provider may
+retain an old token reference beyond that window. Close drops the cache after
+actual work drains.
 Native refresh has a five-second deadline. Cancellation does not fabricate drain
 or cancel an eligible peer; close waits actual native request/socket completion.
 No JavaScript zeroization guarantee is made.
