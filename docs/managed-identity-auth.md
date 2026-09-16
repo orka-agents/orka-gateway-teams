@@ -11,7 +11,10 @@ operators; there is no automatic credential fallback or policy bypass.
 
 Full token acquisition supports the fixed **Azure Linux VM / Azure Container
 Instances (ACI) IMDS contract** and explicit **Azure Container Apps (ACA) local
-endpoint subset**. ACA is offline-qualified only; live evaluation remains pending.
+endpoint subset**. The [recorded ACA evaluation](live-validation.md) exercised
+actual storage/bot authentication and a personal-chat round trip. That is not a
+claim about every tenant policy or supported endpoint form; see the
+[operator deployment profile](aca-deployment.md).
 The exact UAMI must already be assigned to the approved host, in the same tenant
 as the existing bot application. An
 authorized operator must have configured the application's FIC with:

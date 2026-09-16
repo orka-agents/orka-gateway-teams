@@ -1,5 +1,9 @@
 # Deploy the personal Teams gateway
 
+For the evaluated ACA/Table profile, use the separate [ACA runbook](aca-deployment.md)
+and [live evidence/closeout report](live-validation.md). This page describes the
+existing SQLite/Kubernetes packaging; the ACA additions do not alter it.
+
 This is **deployment packaging, not a first-time live bootstrap or live demo**.
 The supplied single-replica runtime uses the existing image CLI and persistent
 stores. It installs neither Orka nor an ingress controller, cert-manager, a bot
@@ -14,8 +18,9 @@ existing approved deployment, or the separate bounded
 [authenticated setup-capture workflow](setup-capture.md) before normal initialization.
 It requires approved bot credentials/installation and an operator-managed HTTPS
 frontend, a freshly generated private challenge, and explicit review of exactly six
-private candidate fields. Capture runs only on a host or explicitly overridden
-container with host-mounted output, never the normal runtime/PVC. It performs no
+private candidate fields. Capture runs on a host or explicitly overridden
+container with private output (host-mounted here; separately retained/retrieved in
+the ACA profile), never the normal runtime/PVC. It performs no
 Task, reply, automatic allowlist update or tenant action; live capture is not claimed
 by synthetic tests.
 

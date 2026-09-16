@@ -6,7 +6,9 @@ unchanged synchronous library APIs. This guide covers runtime selection; see
 [Table storage](table-storage.md) and [inbox semantics](table-inbox.md) for the
 persisted formats, bounds and failure rules.
 
-This is not live Azure qualification, provisioning, migration, recovery or HA.
+Runtime selection is not provisioning, migration, recovery or HA. The separate
+[ACA operator guide](aca-deployment.md) and [live report](live-validation.md)
+record the evaluated identity/init/serve/personal-chat path without expanding those guarantees.
 The physical Azure primary account/table and authorized UAMI access must already
 exist. Application initialization creates logical partitions, **not tables or
 accounts**. No Shared Key, SAS, connection string, endpoint override, ambient
@@ -148,9 +150,11 @@ See the
 [Microsoft REST contract](https://learn.microsoft.com/en-us/azure/container-apps/managed-identity?tabs=http#rest-endpoint-reference).
 
 This intentionally supports a local subset, **not every ACA endpoint form**.
-Actual ACA endpoint shape, assigned identities, FIC acceptance, Table data role,
-service atomicity/consistency and live Teams/Orka connectivity still require a
-separately authorized Azure evaluation. An unsupported form blocks qualification;
+The [recorded live evaluation](live-validation.md) exercised its actual endpoint,
+assigned identities, FIC, Table access and Teams/Orka path. Other endpoint forms,
+tenant policies and hosting configurations still need their own authorization and
+validation; service atomicity, recovery and scale are not established by that smoke.
+An unsupported form blocks qualification;
 it is not permission to relax policy or fall back. No App Service/AKS token-file
 or default-credential support is implied.
 
@@ -162,7 +166,8 @@ crashes, failed audits and unclean release remain blocked and visible. Replica
 count or ACA single-revision mode is not fencing; rolling revisions can overlap.
 No scale-out, rolling-handover fence, crash recovery, force/reset or migration is
 provided. The checked-in Kubernetes package remains SQLite/client-secret; this
-feature does not deploy or provision ACA or alter Kubernetes assets.
+feature does not deploy or provision ACA or alter Kubernetes assets. The separate
+[ACA profile renderer](aca-deployment.md) prepares operator-owned templates only.
 
 The default offline test compiles the real source entrypoint into private output
 before executing CLI init/serve commands. Native verified TLS/ACA fixtures exercise

@@ -5,8 +5,11 @@ trusted exact personal-chat routing identities. It saves a **candidate**, not an
 authorization decision. It never creates an Orka Task, opens runtime databases,
 acquires a bot/user token, sends a Teams reply, or updates an allowlist. Normal
 receiver authentication and mandatory recipient/service allowlists are unchanged.
-No Kubernetes capture workflow is provided; output stays in a private host folder.
-Synthetic tests do not establish live Teams/Orka compatibility or tenant authority.
+No Kubernetes capture workflow is provided. Host output stays in a private folder;
+the separate [ACA profile](aca-deployment.md) uses a supervisor to retain ephemeral
+private output for protected retrieval before replica removal. Install/open the
+Teams app before starting the timed challenge. A [live capture and round trip](live-validation.md)
+were separately observed; synthetic tests alone do not establish compatibility or authority.
 
 ## Prerequisites and boundaries
 

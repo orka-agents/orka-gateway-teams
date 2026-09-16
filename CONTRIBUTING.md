@@ -118,6 +118,26 @@ URLs, live identities, PNGs and ZIPs belong in operator-managed ignored artifact
 not source. Synthetic readiness/replay is not live credentials, full conformance,
 controller readiness or proof that the default kind CNI enforces NetworkPolicy.
 
+## ACA operator assets and Teams app packaging
+
+The [ACA runbook](docs/aca-deployment.md) preserves the evaluated fixed profile;
+[live evidence](docs/live-validation.md) is separate from synthetic test claims.
+`deploy/aca/render.mjs` prepares private, exclusive-output ARM templates only:
+no networking, credential acquisition, initialization, capture adoption, policy
+creation, or lifecycle transitions. Keep app installation before timed capture,
+manual identity confirmation before authorization, and actual prior-owner
+closure before replacement. The setup supervisor retains ephemeral private
+artifacts, not durable storage; its health endpoint is not capture success.
+
+`test/aca-deployment.test.ts` covers the renderer and supervisor with synthetic
+inputs in the default Node suite. `npm run test:app-package` is a separate optional
+gate requiring Python 3; it does not add Python to the default runtime/test path.
+`scripts/package-teams-app.py` packages exactly a reviewed manifest and two icons,
+checks PNG headers rather than decoding/reviewing artwork, and refuses overwrite.
+Full manifest validation uses the Developer Portal or the documented optional,
+pinned JavaScript validators; no runtime dependencies are added. Keep PNG/ZIP,
+legal metadata and live configuration out of source.
+
 ## Setup capture boundaries
 
 The separate [setup command and host/container guide](docs/setup-capture.md) uses
@@ -158,7 +178,8 @@ Tests use real private files, OS fault boundaries, actual SDK auth, concurrency 
 late verification, and standalone CLI processes. Never assert private values in
 actual/expected diffs or print child errors. The explicit container gate checks the
 new compiled entrypoint with a host-only capture mount, expiry and auth refusal;
-there is no production auth override and no live positive-capture claim.
+there is no production auth override. Positive live capture is recorded separately
+in the live validation report, not inferred from those tests.
 
 ## Certificate authentication boundaries
 
