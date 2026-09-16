@@ -85,7 +85,7 @@ for (const invalid of ['group', 'placeholder', 'credentials', 'extra-field', 'wr
       if (invalid === 'wrong-size') writeFileSync(join(f.directory, 'color.png'), png(32));
       if (invalid === 'missing-alpha') writeFileSync(join(f.directory, 'outline.png'), png(32, false));
       if (invalid === 'bad-header') writeFileSync(join(f.directory, 'color.png'), Buffer.alloc(40));
-      const result = f.run(); assert.notEqual(result.status, 0);
+      const result = f.run(); assert.equal(result.status, 1);
       assert.equal(JSON.parse(result.stderr).packaged, false);
       assert.throws(() => readFileSync(f.output));
     } finally { f.close(); }
@@ -106,7 +106,7 @@ test('Teams package never overwrites an existing output artifact', () => {
   const f = fixture();
   try {
     const original = Buffer.from('existing artifact'); writeFileSync(f.output, original);
-    assert.notEqual(f.run().status, 0);
+    assert.equal(f.run().status, 1);
     assert.equal(readFileSync(f.output).equals(original), true);
   } finally { f.close(); }
 });
