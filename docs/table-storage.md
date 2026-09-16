@@ -87,8 +87,14 @@ ready**, and does not establish an application's readiness.
 `unready`, `closed`. Errors contain no raw SDK/native cause, request, response,
 body, token or service error text. Saturation/queued cancellation is transient
 `not-submitted`, not corruption. Missing tables are not empty partitions: only a
-validated service `EntityNotFound` 404 is point absence; `TableNotFound`, unknown
-or contradictory error classifications fail closed.
+validated service `EntityNotFound` 404 directly proves point absence. A strictly
+validated `ResourceNotFound` 404 permits one exact-PartitionKey/RowKey collection
+query through the public SDK, not an absence result. Only a bounded, raw-validated
+HTTP 200 page with zero rows and **no continuation header** proves absence on that
+path; one matching row returns its raw row ETag and decoded envelope. Wrong or
+multiple rows, any continuation (including empty or row-only), malformed replies,
+`TableNotFound`, unknown or contradictory error classifications fail closed. This
+compatibility path is fixture-tested, not live Azure exact-key qualification.
 
 ## Persisted envelopes and service metadata
 
@@ -227,7 +233,7 @@ a fixture, nor an orchestration stop acknowledgement proves physical termination
 | Native response / headers | <=512 KiB / 16 KiB; no decompression |
 | Caller deadline | 30 s default, configurable 1..300,000 ms (also per call) |
 | Reconciliation cleanup phase | Separate 30 s default, configurable 1..300,000 ms; outlives caller cancellation |
-| Reconciliation | At most 4 raw reads by default (configurable 2..16) and one barrier write |
+| Reconciliation | At most 4 logical raw point reads by default (configurable 2..16) and one barrier write |
 | Legacy `scan()` | 10,000 one-entity pages / 64 MiB raw bytes by default; configurable finite limits |
 | Continuation | <=2048 ASCII characters per service component, <=8192 opaque SDK token characters |
 
@@ -245,6 +251,13 @@ actual token/native work and cleanup/readback, even when its caller has expired.
 Internal reconciliation consumes the same slot, not a second external admission.
 Active SDK serialization, response parsing, plan and audit copies are **separately
 bounded**; pending-input bytes are not a total heap measurement.
+
+Each logical point read performs one native GET, or at most two when a validated
+`ResourceNotFound` requires the exact-key collection query. The query uses only
+`$filter` (both keys) and `$top=1`, consumes one iterator yield and returns it;
+there is no continuation or third request. Both GETs share the original tracked
+operation, signal and deadline, with actual token/request/socket/iterator drain.
+This does not add write retries or enlarge reconciliation/traversal budgets.
 
 Each scan starts a new public SDK iterator, consumes one page, then returns that
 iterator. The original partition filter remains fixed. Empty continuation pages
@@ -287,10 +300,13 @@ subtraction-before-addition checks and never reset between passes. This new meth
 does not inherit the legacy `scan()` aggregate ceilings or `callTimeoutMs`.
 `OwnedAuditOptions` accepts only an optional native `signal` and
 `requestTimeoutMs` (default 30,000; 1..300,000 ms). Each request uses the earlier
-of its own deadline and the admission deadline. M point bodies are excluded from
-`maxPageBytes`: a successful audit performs exactly **2 × passes** point reads,
-each <=512 KiB, in addition to the collection body allowance. Headers/TLS/socket
-overhead are not body counters. The audit-only native page gate checks before
+of its own deadline and the admission deadline. Logical M point-read bodies are
+excluded from `maxPageBytes`: a successful audit performs exactly **2 × passes**
+logical point reads, each using one or at most two native GETs, with each response
+<=512 KiB, in addition to the traversal collection body allowance. Exact-key
+compatibility queries remain part of those logical point reads, not traversal
+pages charged to `maxPages`/`maxPageBytes`; these budgets are unchanged.
+Headers/TLS/socket overhead are not body counters. The audit-only native page gate checks before
 retaining a chunk beyond `min(512 KiB, remainingPageBytes)`, aborts and drains,
 and preserves `incomplete` through SDK/iterator cleanup. It never decodes a
 budget-truncated body. A final received chunk/socket buffering can exceed the
@@ -484,9 +500,11 @@ admission-relative monotonic operation eligibility, including callbacks;
 `maxTrackingBytes` charges the same initial 80,926 bytes and overlapping growth
 reservations, not caller closure/index memory or RSS. Native page retention is
 capped before accepting excess bytes at `min(512 KiB, remainingPageBytes)`; a
-truncated body is never decoded as trusted input. Separate M point bodies are
-bounded to 512 KiB and excluded from the page-byte budget. Success performs exactly
-**2 × passes** M point reads; failure does not issue extra reads for symmetry.
+truncated body is never decoded as trusted input. Separate logical M point reads
+are excluded from the page-byte budget, including an exact-key compatibility
+query when required; each native response is bounded to 512 KiB. Success performs
+exactly **2 × passes** logical M point reads (one or at most two GETs each); failure
+does not issue extra logical reads for symmetry.
 `requestTimeoutMs` remains 30,000 by default, bounded to 1..300,000; each request
 uses the earlier request/operation deadline, without a reset between passes.
 

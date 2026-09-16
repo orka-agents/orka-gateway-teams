@@ -127,6 +127,9 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
   });
   mkdirSync(fixtureDir); mkdirSync(work);
   const tables = await runtimeTableService(t, scope); const identity = await runtimeIdentity(t, 30);
+  // Exercise generic point-404 compatibility in BOTH the fresh CLI and image journey.
+  // Other fixture users retain EntityNotFound; routing remains per-request.
+  tables.inbox.controls.missingCode = 'ResourceNotFound'; tables.delivery.controls.missingCode = 'ResourceNotFound';
   const auth = await authFixture(t); const otherAuth = await authFixture(t); const incomingToken = auth.token();
   const finalToken = syntheticAccessToken(); const receipt = 'compiled-table-provider-receipt'; const orkaReceipt = 'compiled-table-orka-event';
   const legacySecret = 'synthetic-unused-cli-legacy-header';

@@ -134,6 +134,22 @@ test('active recording instrumentation and verbose logs contain no private raw, 
   assert.ok(checkedActions >= 10);
   for (const [format, service] of [[1, s], [2, v2]] as const) {
     const client = new OwnedTableClient(bindTable(tableBinding), service.dependencies, format);
+    for (const fault of ['valid', 'cursor', 'raw', 'transport']) {
+      let queries = 0;
+      service.controls.hook = e => {
+        if (e.path.includes(",RowKey='")) {
+          e.res.writeHead(404, { 'content-type': 'application/json', 'x-ms-error-code': 'ResourceNotFound' });
+          e.res.end(JSON.stringify({ 'odata.error': { code: 'ResourceNotFound', message: { lang: 'en-US', value: marker } } })); return;
+        }
+        queries++;
+        e.res.writeHead(fault === 'transport' ? 503 : 200, { 'content-type': 'application/json', etag: `W/"${marker}"`,
+          ...(fault === 'cursor' ? { 'x-ms-continuation-nextpartitionkey': marker, 'x-ms-continuation-nextrowkey': marker } : {}) });
+        e.res.end(JSON.stringify(fault === 'raw' ? { unknown: marker } : { value: [{ ...service.rows.get('M'), 'odata.etag': `W/"${marker}"` }] }));
+      };
+      if (fault === 'valid') assert.equal((await client.read('M', context()))?.etag === `W/"${marker}"`, true);
+      else await assert.rejects(client.read('M', context()), e => { inspect(e); return auditCode(fault === 'transport' ? 'unavailable' : 'corrupt')(e); });
+      assert.equal(queries, 1);
+    }
     service.controls.hook = e => { e.res.writeHead(200, { 'content-type': 'application/json' }); e.res.end(JSON.stringify({ unknown: marker })); };
     await client.read('M', context()).catch(inspect);
     service.controls.request = (() => { throw hidden; }) as typeof https.request;

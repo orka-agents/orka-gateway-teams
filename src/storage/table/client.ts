@@ -17,7 +17,8 @@ export interface PageCursor { token: string; partition?: string; row?: string }
 export interface RawPage<F extends MetadataFormat = 1> { records: StoredFor<F>[]; size: number; cursor?: PageCursor }
 /** Internal owned-audit gate, never a legacy response-limit override. */
 export interface AuditPageAllowance { maxBytes: number; exhaust: () => void }
-type RequestKind = { kind: 'read'; row: string } | { kind: 'page'; cursor?: PageCursor; allowance?: AuditPageAllowance } | { kind: 'write'; initialize: boolean };
+type RequestKind = { kind: 'read'; row: string } | { kind: 'point-query'; row: string } |
+  { kind: 'page'; cursor?: PageCursor; allowance?: AuditPageAllowance } | { kind: 'write'; initialize: boolean };
 interface NativeResponse { status: number; body: Buffer; headers: IncomingMessage['headers'] }
 function available(context: WorkContext): boolean { return !context.signal.aborted && performance.now() < context.deadline; }
 function unavailable(): TableError { return new TableError('unavailable'); }
@@ -42,13 +43,45 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
   read(row: string, context: WorkContext): Promise<StoredFor<F> | undefined> {
     return this.track(async () => {
       if (row !== 'M' && !/^(event|route|delivery|alias|control)_[A-Za-z0-9_-]{1,342}$/u.test(row)) fail();
-      let record: StoredFor<F> | undefined;
+      let record: StoredFor<F> | undefined; let query = false;
       const sdk = this.sdk({ kind: 'read', row }, context, response => {
-        if (response.status === 404 && errorCode(response) === 'EntityNotFound') return;
+        if (response.status === 404) {
+          const code = errorCode(response);
+          if (code === 'EntityNotFound') return;
+          if (code === 'ResourceNotFound') { query = true; return; }
+        }
         if (response.status !== 200) throw unavailable();
         record = readRecord(this.format, this.binding, response.body, row, header(response.headers.etag));
       });
-      await sdk.getEntity(this.binding.partition, row); return record;
+      await sdk.getEntity(this.binding.partition, row);
+      if (!query) return record;
+      // Generic 404 is only permission to disambiguate, never evidence of absence.
+      // Both GETs retain this one tracked read and its original deadline/signal.
+      if (!available(context)) throw unavailable();
+      let received = false; let corrupt = false;
+      const exact = this.sdk({ kind: 'point-query', row }, context, response => {
+        if (response.status !== 200) throw unavailable();
+        const records = readPage(this.format, this.binding, response.body);
+        if (records.length > 1 || (records[0] && records[0].row !== row) ||
+            response.headers['x-ms-continuation-nextpartitionkey'] !== undefined ||
+            response.headers['x-ms-continuation-nextrowkey'] !== undefined) throw new TableError('corrupt');
+        record = records[0]; received = true;
+      });
+      const iterator = exact.listEntities({ queryOptions: { filter: `PartitionKey eq '${this.binding.partition}' and RowKey eq '${row}'` } })
+        .byPage({ maxPageSize: 1 });
+      try {
+        try {
+          const result = await iterator.next();
+          if (!received || result.done) throw new TableError('incomplete');
+          if (result.value.continuationToken !== undefined) throw new TableError('corrupt');
+          return record;
+        } catch (error) {
+          corrupt = error instanceof TableError && error.code === 'corrupt'; throw error;
+        } finally { await iterator.return?.(); }
+      } catch (error) {
+        // Iterator cleanup must not erase an already observed authority contradiction.
+        if (corrupt) throw new TableError('corrupt'); throw error;
+      }
     });
   }
   page(context: WorkContext, cursor?: PageCursor, allowance?: AuditPageAllowance): Promise<RawPage<F>> {
@@ -157,7 +190,7 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
           if (kind.kind === 'page') for (const name of ['x-ms-continuation-nextpartitionkey', 'x-ms-continuation-nextrowkey']) {
             const value = continuation(response.headers[name]); if (value !== undefined) headers.set(name, value);
           }
-          return { request, status: 200, headers, bodyAsText: kind.kind === 'page' ? '{"value":[]}' : '{}' };
+          return { request, status: 200, headers, bodyAsText: kind.kind === 'read' ? '{}' : '{"value":[]}' };
         } catch (error) { throw error instanceof TableError ? error : unavailable(); }
       } },
     });
@@ -178,6 +211,12 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
       if (request.method !== 'GET' || body) throw unavailable();
       if (kind.kind === 'read') {
         if (path !== `/${this.binding.table}(PartitionKey='${this.binding.partition}',RowKey='${kind.row}')` || url.search) throw unavailable();
+      } else if (kind.kind === 'point-query') {
+        const filter = `PartitionKey eq '${this.binding.partition}' and RowKey eq '${kind.row}'`;
+        const expected = new Map([['$filter', filter], ['$top', '1']]);
+        if (path !== `/${this.binding.table}()` || url.searchParams.get('$filter') !== filter || url.searchParams.get('$top') !== '1' ||
+            [...url.searchParams].length !== expected.size ||
+            [...url.searchParams].some(([k, v]) => expected.get(k) !== v)) throw unavailable();
       } else {
         if (path !== `/${this.binding.table}()` || url.searchParams.get('$filter') !== `PartitionKey eq '${this.binding.partition}'` || url.searchParams.get('$top') !== '1') throw unavailable();
         const expected = new Map([['$filter', `PartitionKey eq '${this.binding.partition}'`], ['$top', '1']]);
@@ -249,7 +288,7 @@ function errorCode(response: NativeResponse): string {
     const envelope = object(rawJSON(response.body), ['odata.error']); const error = object(envelope['odata.error'], ['code', 'message']);
     const message = object(error.message, ['lang', 'value']);
     if (typeof message.lang !== 'string' || message.lang.length > 32 || typeof message.value !== 'string' || message.value.length > 8192 ||
-        typeof error.code !== 'string' || !['EntityNotFound', 'TableNotFound', 'EntityAlreadyExists', 'UpdateConditionNotSatisfied'].includes(error.code) ||
+        typeof error.code !== 'string' || !['EntityNotFound', 'ResourceNotFound', 'TableNotFound', 'EntityAlreadyExists', 'UpdateConditionNotSatisfied'].includes(error.code) ||
         (response.headers['x-ms-error-code'] !== undefined && response.headers['x-ms-error-code'] !== error.code)) throw unavailable();
     return error.code;
   } catch { throw unavailable(); }
