@@ -1,5 +1,9 @@
 # Deploy the personal Teams gateway
 
+For the evaluated ACA/Table profile, use the separate [ACA runbook](aca-deployment.md)
+and [live evidence/closeout report](live-validation.md). This page describes the
+existing SQLite/Kubernetes packaging; the ACA additions do not alter it.
+
 This is **deployment packaging, not a first-time live bootstrap or live demo**.
 The supplied single-replica runtime uses the existing image CLI and persistent
 stores. It installs neither Orka nor an ingress controller, cert-manager, a bot
@@ -14,8 +18,9 @@ existing approved deployment, or the separate bounded
 [authenticated setup-capture workflow](setup-capture.md) before normal initialization.
 It requires approved bot credentials/installation and an operator-managed HTTPS
 frontend, a freshly generated private challenge, and explicit review of exactly six
-private candidate fields. Capture runs only on a host or explicitly overridden
-container with host-mounted output, never the normal runtime/PVC. It performs no
+private candidate fields. Capture runs on a host or explicitly overridden
+container with private output (host-mounted here; separately retained/retrieved in
+the ACA profile), never the normal runtime/PVC. It performs no
 Task, reply, automatic allowlist update or tenant action; live capture is not claimed
 by synthetic tests.
 
@@ -65,7 +70,7 @@ operator action, using the Microsoft sources linked below.
 | --- | --- |
 | Bot OAuth client / Microsoft App ID | `TEAMS_APP_ID`, valid GUID; also manifest `bots[0].botId`. **Not** necessarily the Teams package ID. |
 | Tenant GUID | `TEAMS_TENANT_ID` and binding `match.accountId`; exact trusted tenant, no `common` or multi-tenant inference. |
-| Bot credential | Default Kubernetes assets: `teams-bot` Secret key `client-secret` → `TEAMS_CLIENT_SECRET`, a client-secret **value**, not its ID. Explicit certificate authentication supports host/Docker; managed-identity federation supports VM/ACI IMDS and the explicit ACA local subset (live ACA qualification pending). Neither mode supplies a Kubernetes overlay. |
+| Bot credential | Default Kubernetes assets: `teams-bot` Secret key `client-secret` → `TEAMS_CLIENT_SECRET`, a client-secret **value**, not its ID. Explicit certificate authentication supports host/Docker; managed-identity federation supports VM/ACI IMDS and the explicit ACA local subset ([one profile evaluated live](live-validation.md); other hosting/policy variants still require validation). Neither mode supplies a Kubernetes overlay. |
 | Verified bot recipient IDs | `TEAMS_RECIPIENT_IDS`, JSON array of exact allowed incoming `recipient.id` values, 1–100 entries. |
 | Verified service base URLs | `TEAMS_SERVICE_URLS`, JSON array of exact canonical public-cloud HTTPS URLs, 1–100 entries. Match path case/trailing slash; no query/fragment/userinfo/nonstandard service port. |
 | Verified sender IDs | Binding `senderPolicy.allowedSenderIds`: exact activity `from.id`, not display name, email, AAD ID or a guessed prefix. |

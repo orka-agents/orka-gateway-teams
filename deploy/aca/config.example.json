@@ -1,0 +1,38 @@
+{
+  "location": "REQUIRED_AZURE_REGION",
+  "environmentId": "/subscriptions/REQUIRED_SUBSCRIPTION_ID/resourceGroups/REQUIRED_RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/REQUIRED_ENVIRONMENT",
+  "gatewayAppName": "orka-teams-gateway",
+  "proxyAppName": "orka-teams-public",
+  "registryServer": "REQUIRED_REGISTRY.azurecr.io",
+  "identityResourceId": "/subscriptions/REQUIRED_SUBSCRIPTION_ID/resourceGroups/REQUIRED_RESOURCE_GROUP/providers/Microsoft.ManagedIdentity/userAssignedIdentities/REQUIRED_BOT_AND_PULL_IDENTITY",
+  "operatorAksEgressCidr": "REQUIRED_OPERATOR_AKS_EGRESS_IPV4_CIDR",
+  "image": "REQUIRED_REGISTRY.azurecr.io/REQUIRED_GATEWAY_IMAGE@sha256:REQUIRED_DIGEST",
+  "bot": {
+    "appId": "REQUIRED_BOT_APP_ID",
+    "tenantId": "REQUIRED_TENANT_ID",
+    "clientId": "REQUIRED_BOT_UAMI_CLIENT_ID",
+    "principalId": "REQUIRED_BOT_UAMI_PRINCIPAL_ID"
+  },
+  "table": {
+    "account": "REQUIRED_EXISTING_STORAGE_ACCOUNT",
+    "name": "REQUIRED_EXISTING_TABLE",
+    "ingressStoreId": "REQUIRED_STABLE_INGRESS_STORE_ID",
+    "deliveryStoreId": "REQUIRED_STABLE_DELIVERY_STORE_ID",
+    "identityResourceId": "/subscriptions/REQUIRED_SUBSCRIPTION_ID/resourceGroups/REQUIRED_RESOURCE_GROUP/providers/Microsoft.ManagedIdentity/userAssignedIdentities/REQUIRED_STORAGE_IDENTITY",
+    "clientId": "REQUIRED_STORAGE_UAMI_CLIENT_ID",
+    "audit": {
+      "maxPages": "REQUIRED_POSITIVE_INTEGER",
+      "maxBytes": "REQUIRED_POSITIVE_INTEGER",
+      "maxDurationMs": "REQUIRED_POSITIVE_INTEGER",
+      "maxTrackingBytes": "REQUIRED_POSITIVE_INTEGER",
+      "maxIndexBytes": "REQUIRED_POSITIVE_INTEGER"
+    }
+  },
+  "orka": {
+    "baseUrl": "REQUIRED_HTTPS_ORKA_BASE_URL_INCLUDING_INSTALLATION_PATH",
+    "gatewayNamespace": "REQUIRED_GATEWAY_NAMESPACE",
+    "gatewayName": "REQUIRED_GATEWAY_NAME"
+  },
+  "approvedRecipientId": "REQUIRED_SOLE_RECIPIENT_AFTER_MANUAL_CAPTURE_CONFIRMATION",
+  "approvedServiceUrl": "REQUIRED_SERVICE_URL_AFTER_MANUAL_CAPTURE_CONFIRMATION"
+}

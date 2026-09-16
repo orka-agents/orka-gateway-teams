@@ -1,0 +1,10 @@
+# Build with deploy/aca as context and an operator-supplied digest-pinned gateway.
+ARG GATEWAY_IMAGE
+FROM ${GATEWAY_IMAGE}
+USER 0:0
+# COPY from a private operator checkout must not make /app untraversable to UID1000.
+RUN chmod 0755 /app
+COPY --chown=0:0 --chmod=0644 aca-setup-supervisor.mjs /app/aca-setup-supervisor.mjs
+USER 1000:1000
+ENTRYPOINT ["node", "/app/aca-setup-supervisor.mjs"]
+CMD []

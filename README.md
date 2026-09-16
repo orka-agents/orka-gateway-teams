@@ -11,9 +11,11 @@ separate storage APIs, synthetic examples and tests are also included.
 Local readiness means initialized listeners/stores, not validated live provider
 credentials. [Kubernetes packaging and a gated setup guide](docs/deployment.md) are
 available: a single-replica persistent app, pinned TLS proxy, separate provisioning
-Jobs, Orka examples and a personal-only Teams manifest template. Live registration,
-live Teams/Orka execution and a deployment demo remain separate work; synthetic
-container/Kubernetes fixtures do not prove them. A separate
+Jobs, Orka examples and a personal-only Teams manifest template. The separate
+[ACA/Table deployment profile](docs/aca-deployment.md) has a
+[recorded live request/reply and same-Session follow-up](docs/live-validation.md).
+Registration and installation remain operator prerequisites; synthetic tests do
+not prove live compatibility. A separate
 [authenticated one-shot setup capture](docs/setup-capture.md) can collect six
 private candidate identities from a fresh-code-correlated personal message for
 operator review. It does not authorize senders, run Tasks, reply, or change normal
@@ -47,7 +49,13 @@ or owner termination. Tests use local HTTPS fixtures, not live Azure.
 
 ## Deployment packaging
 
-Start with the [deployment runbook and prerequisite STOP gate](docs/deployment.md).
+For ACA/Table, use the [operator runbook](docs/aca-deployment.md), offline
+`deploy/aca/render.mjs` profiles and optional `npm run test:app-package` gate
+(Python 3 required). No provisioning, capture authorization or store initialization
+is automated. The [live report](docs/live-validation.md) records the outstanding
+stock conformance fixture limitation; full conformance is not claimed.
+
+For SQLite/Kubernetes, start with the [deployment runbook and prerequisite STOP gate](docs/deployment.md).
 `deploy/kustomization.yaml` renders runtime resources only; storage preparation,
 initialization and Orka objects have separate lifecycles. Keep the PVC, permanent
 owner, Gateway UID and Orka dedup ledger across normal pauses/restarts. No Orka or
@@ -75,7 +83,9 @@ identity or federation fallback; local certificate validation is not tenant acce
 Explicit [managed-identity federation](docs/managed-identity-auth.md) supports a
 specifically assigned UAMI federated to the existing bot application, using the
 fixed Azure Linux VM/ACI IMDS contract or explicit ACA supported-local-subset
-transport. ACA live qualification remains pending. Setup is acquisition-free;
+transport. The [recorded ACA evaluation](docs/live-validation.md) exercised the
+actual identity path and personal-chat round trip, not every hosting/policy variant.
+Setup is acquisition-free;
 full outbound use requires qualified hosting and an approved FIC. No App Service,
 AKS token-file, local Azure CLI or default-identity fallback is provided.
 
