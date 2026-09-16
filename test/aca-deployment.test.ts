@@ -5,6 +5,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { setImmediate as tick, setTimeout as sleep } from 'node:timers/promises';
 import { parseRuntimeConfig } from '../src/ingress/runtime-config.js';
@@ -35,7 +36,7 @@ function run(stage: string, profile: object, check: (directory: string, result: 
   try {
     const config = join(directory, 'config.json');
     writeFileSync(config, JSON.stringify(profile), { mode: 0o600 });
-    const result = spawnSync(process.execPath, [renderer.pathname, '--stage', stage, '--config', config, '--out', directory],
+    const result = spawnSync(process.execPath, [fileURLToPath(renderer), '--stage', stage, '--config', config, '--out', directory],
       { encoding: 'utf8', env: { PATH: '' } });
     check(directory, result);
   } finally { rmSync(directory, { recursive: true, force: true }); }
@@ -164,7 +165,7 @@ test('ACA renderer refuses invalid operator boundaries before output, with fixed
       assert.deepEqual(readdirSync(directory), ['config.json']);
     });
   }
-  const missingOut = spawnSync(process.execPath, [renderer.pathname, '--stage', 'setup', '--config', 'unused'], { encoding: 'utf8' });
+  const missingOut = spawnSync(process.execPath, [fileURLToPath(renderer), '--stage', 'setup', '--config', 'unused'], { encoding: 'utf8' });
   assert.equal(missingOut.status, 1); assert.equal(missingOut.stderr === 'aca-render: invalid-input\n', true);
 });
 
