@@ -39,6 +39,30 @@ function fixture() {
   }, close() { rmSync(directory, { recursive: true, force: true }); } };
 }
 
+for (const invalid of ['unknown-option', 'missing-value', 'missing-required'] as const) {
+  test(`Teams package sanitizes ${invalid} diagnostics without creating output`, () => {
+    const f = fixture();
+    try {
+      const args = [script, '--manifest', join(f.directory, 'manifest.json'), '--color', join(f.directory, 'color.png'),
+        '--outline', join(f.directory, 'outline.png'), '--output', f.output];
+      if (invalid === 'unknown-option') args.push('--unrecognized', 'SYNTHETIC_OPERATOR_ARGUMENT');
+      if (invalid === 'missing-value') args.pop();
+      if (invalid === 'missing-required') args.splice(3, 4);
+      const result = spawnSync('python3', args, { encoding: 'utf8', timeout: 15000 });
+      assert.equal(result.status, 2); assert.equal(result.stdout, '');
+      assert.equal(result.stderr === '{"packaged": false, "reason": "invalid input or output unavailable"}\n', true,
+        'argument errors must use only the fixed diagnostic');
+      assert.throws(() => readFileSync(f.output));
+    } finally { f.close(); }
+  });
+}
+test('Teams package help remains a successful explicit action', () => {
+  const result = spawnSync('python3', [script, '--help'], { encoding: 'utf8', timeout: 15000 });
+  assert.equal(result.status, 0); assert.equal(result.stderr, '');
+  assert.equal(result.stdout.includes('--manifest'), true);
+  assert.equal(result.stdout.includes('--output'), true);
+});
+
 test('Teams package contains only the three named public files', () => {
   const f = fixture();
   try {
