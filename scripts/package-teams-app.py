@@ -66,12 +66,20 @@ def main():
     files = {'manifest.json': manifest_bytes(args.manifest), 'color.png': png_bytes(args.color, 192),
              'outline.png': png_bytes(args.outline, 32, outline=True)}
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(args.output, 'x', compression=zipfile.ZIP_DEFLATED) as archive:
-        for name, data in files.items():
-            archive.writestr(name, data)
-    with zipfile.ZipFile(args.output) as archive:
-        if archive.namelist() != list(files) or archive.testzip() is not None:
-            raise ValueError('archive verification failed')
+    created_output = False
+    try:
+        with args.output.open('xb') as output:
+            created_output = True
+            with zipfile.ZipFile(output, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+                for name, data in files.items():
+                    archive.writestr(name, data)
+        with zipfile.ZipFile(args.output) as archive:
+            if archive.namelist() != list(files) or archive.testzip() is not None:
+                raise ValueError('archive verification failed')
+    except Exception:
+        if created_output:
+            args.output.unlink(missing_ok=True)
+        raise
     print(json.dumps({'packaged': True, 'bytes': args.output.stat().st_size,
                       'sha256': hashlib.sha256(args.output.read_bytes()).hexdigest(), 'files': list(files)}))
 

@@ -9,6 +9,7 @@ import { test } from 'node:test';
 
 const script = fileURLToPath(new URL('../../scripts/package-teams-app.py', import.meta.url));
 const template = readFileSync(new URL('../../examples/teams-app/manifest.template.json', import.meta.url), 'utf8');
+const fault = fileURLToPath(new URL('teams-app-package-fault.py', import.meta.url));
 function png(size: number, alpha = true): Buffer {
   function chunk(name: string, value: Buffer): Buffer {
     const bytes = Buffer.concat([Buffer.from(name), value]);
@@ -31,9 +32,9 @@ function fixture() {
   writeFileSync(join(directory, 'color.png'), png(192, false));
   writeFileSync(join(directory, 'outline.png'), png(32));
   const output = join(directory, 'personal.zip');
-  return { directory, manifest, output, run() {
+  return { directory, manifest, output, run(failureMode?: 'write' | 'verify') {
     writeFileSync(join(directory, 'manifest.json'), JSON.stringify(manifest));
-    return spawnSync('python3', [script, '--manifest', join(directory, 'manifest.json'), '--color', join(directory, 'color.png'),
+    return spawnSync('python3', [...(failureMode ? [fault, script, failureMode] : [script]), '--manifest', join(directory, 'manifest.json'), '--color', join(directory, 'color.png'),
       '--outline', join(directory, 'outline.png'), '--output', output], { encoding: 'utf8', timeout: 15000 });
   }, close() { rmSync(directory, { recursive: true, force: true }); } };
 }
@@ -63,6 +64,16 @@ for (const invalid of ['group', 'placeholder', 'credentials', 'extra-field', 'wr
       const result = f.run(); assert.notEqual(result.status, 0);
       assert.equal(JSON.parse(result.stderr).packaged, false);
       assert.throws(() => readFileSync(f.output));
+    } finally { f.close(); }
+  });
+}
+for (const mode of ['write', 'verify'] as const) {
+  test(`Teams package removes only its own incomplete output after ${mode} failure`, () => {
+    const f = fixture();
+    try {
+      const result = f.run(mode); assert.equal(result.status, 0);
+      const outcome = JSON.parse(result.stdout);
+      assert.equal(outcome.raised, true); assert.equal(outcome.outputExists, false);
     } finally { f.close(); }
   });
 }
