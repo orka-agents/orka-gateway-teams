@@ -85,7 +85,7 @@ export async function tableService(t: FixtureHooks, kind: 'delivery' | 'ingress'
     [scope.appId, scope.tenantId] : [scope.appId, scope.tenantId, scope.orkaBaseUrl, scope.gatewayNamespace, scope.gatewayName]]));
   const rows = new Map<string, Record<string, unknown>>(); let version = 0;
   const stats = { requests: 0, writes: 0, reads: 0, pages: 0, tokens: 0, requestCloses: 0, socketCloses: 0, bytes: 0, violation: false, lastActions: 0, conditionFailure: '' };
-  const controls: { hook?: (event: ServiceRequest) => Promise<void> | void; request?: TableDependencies['request'] } = {};
+  const controls: { hook?: (event: ServiceRequest) => Promise<void> | void; request?: TableDependencies['request']; missingCode?: 'ResourceNotFound' } = {};
   function error(res: ServerResponse, status: number, code: string) {
     res.writeHead(status, { 'content-type': 'application/json', 'x-ms-error-code': code }); res.end(JSON.stringify({ 'odata.error': { code, message: { lang: 'en-US', value: 'synthetic service error' } } }));
   }
@@ -131,13 +131,16 @@ export async function tableService(t: FixtureHooks, kind: 'delivery' | 'ingress'
         const row = /RowKey='([^']+)'/u.exec(path)?.[1];
         res.setHeader('content-type', 'application/json;odata=fullmetadata');
         if (row) {
-          stats.reads++; const entity = rows.get(row); if (!entity) { error(res, 404, 'EntityNotFound'); return; }
+          stats.reads++; const entity = rows.get(row); if (!entity) { error(res, 404, controls.missingCode ?? 'EntityNotFound'); return; }
           res.setHeader('etag', String(entity['odata.etag'])); res.end(JSON.stringify(entity));
         } else {
           stats.pages++;
           const url = new URL(req.url!, 'https://example123.table.core.windows.net');
-          if (url.searchParams.get('$filter') !== `PartitionKey eq '${partition}'` || url.searchParams.get('$top') !== '1') stats.violation = true;
-          const sorted = [...rows.keys()].sort(); const next = url.searchParams.get('NextRowKey');
+          const filter = url.searchParams.get('$filter');
+          const exactRow = /^PartitionKey eq '[^']+' and RowKey eq '([^']+)'$/u.exec(filter ?? '')?.[1];
+          if (filter !== `PartitionKey eq '${partition}'${exactRow ? ` and RowKey eq '${exactRow}'` : ''}` || url.searchParams.get('$top') !== '1' ||
+              (exactRow && ([...url.searchParams].length !== 2 || [...url.searchParams.keys()].some(key => !['$filter', '$top'].includes(key))))) stats.violation = true;
+          const sorted = [...rows.keys()].filter(key => !exactRow || key === exactRow).sort(); const next = url.searchParams.get('NextRowKey');
           const index = next ? sorted.indexOf(next) : 0; const key = sorted[index]; const after = sorted[index + 1];
           if (after) { res.setHeader('x-ms-continuation-NextPartitionKey', partition); res.setHeader('x-ms-continuation-NextRowKey', after); }
           res.end(JSON.stringify({ 'odata.metadata': 'https://example123.table.core.windows.net/$metadata#Journal', value: key ? [rows.get(key)] : [] }));
