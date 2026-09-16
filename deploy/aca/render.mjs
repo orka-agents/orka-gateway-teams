@@ -134,7 +134,7 @@ export function render(stage, input) {
   const audit = object(table.audit, ['maxPages', 'maxBytes', 'maxDurationMs', 'maxTrackingBytes', 'maxIndexBytes']);
   const orka = object(config.orka, ['baseUrl', 'gatewayNamespace', 'gatewayName']);
   const storageIdentity = identityId(table.identityResourceId);
-  if (storageIdentity !== identity) {
+  if (storageIdentity.toLowerCase() !== identity.toLowerCase()) {
     app.identity.userAssignedIdentities[storageIdentity] = {};
     configuration.identitySettings.push({ identity: storageIdentity, lifecycle: 'Main' });
   }

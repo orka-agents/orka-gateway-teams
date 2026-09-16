@@ -135,6 +135,25 @@ test('ACA runtime emits secure directional parameter refs and literal singleton 
   });
 });
 
+for (const kind of ['shared', 'case-variant', 'distinct'] as const) {
+  test(`ACA identity settings preserve one entry per Azure resource: ${kind}`, () => {
+    const storageId = kind === 'case-variant'
+      ? identity.replace('/resourceGroups/synthetic/', '/resourceGroups/SYNTHETIC/')
+        .replace('/userAssignedIdentities/synthetic', '/userAssignedIdentities/SYNTHETIC')
+      : kind === 'distinct' ? identity + '-storage' : identity;
+    const profile = { ...profiles.runtime, table: { ...profiles.runtime.table, identityResourceId: storageId } };
+    run('runtime', profile, (directory, result) => {
+      assert.equal(result.status, 0);
+      const app = rendered(directory, 'runtime').resources[0];
+      const expected = kind === 'distinct' ? [identity, storageId] : [identity];
+      assert.deepEqual(Object.keys(app.identity.userAssignedIdentities), expected);
+      assert.deepEqual(app.properties.configuration.identitySettings,
+        expected.map((value) => ({ identity: value, lifecycle: 'Main' })));
+      assert.equal(app.properties.configuration.registries[0].identity, identity);
+    });
+  });
+}
+
 for (const target of ['orka', 'service'] as const) {
   const prefix = 'https://url.invalid/';
   for (const scenario of ['unicode-expansion', 'appended-slash', 'exact-limit'] as const) {

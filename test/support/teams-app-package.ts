@@ -32,7 +32,7 @@ function fixture() {
   writeFileSync(join(directory, 'color.png'), png(192, false));
   writeFileSync(join(directory, 'outline.png'), png(32));
   const output = join(directory, 'personal.zip');
-  return { directory, manifest, output, run(failureMode?: 'write' | 'verify') {
+  return { directory, manifest, output, run(failureMode?: 'write' | 'verify' | 'interrupt-write' | 'interrupt-verify') {
     writeFileSync(join(directory, 'manifest.json'), JSON.stringify(manifest));
     return spawnSync('python3', [...(failureMode ? [fault, script, failureMode] : [script]), '--manifest', join(directory, 'manifest.json'), '--color', join(directory, 'color.png'),
       '--outline', join(directory, 'outline.png'), '--output', output], { encoding: 'utf8', timeout: 15000 });
@@ -67,13 +67,14 @@ for (const invalid of ['group', 'placeholder', 'credentials', 'extra-field', 'wr
     } finally { f.close(); }
   });
 }
-for (const mode of ['write', 'verify'] as const) {
+for (const mode of ['write', 'verify', 'interrupt-write', 'interrupt-verify'] as const) {
   test(`Teams package removes only its own incomplete output after ${mode} failure`, () => {
     const f = fixture();
     try {
       const result = f.run(mode); assert.equal(result.status, 0);
       const outcome = JSON.parse(result.stdout);
       assert.equal(outcome.raised, true); assert.equal(outcome.outputExists, false);
+      assert.equal(outcome.interrupted, mode.startsWith('interrupt-'));
     } finally { f.close(); }
   });
 }

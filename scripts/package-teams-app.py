@@ -76,7 +76,8 @@ def main():
         with zipfile.ZipFile(args.output) as archive:
             if archive.namelist() != list(files) or archive.testzip() is not None:
                 raise ValueError('archive verification failed')
-    except Exception:
+    except BaseException:
+        # Clean up this invocation's output on Ctrl-C too, then preserve the interruption.
         if created_output:
             args.output.unlink(missing_ok=True)
         raise
