@@ -39,6 +39,30 @@ function fixture() {
   }, close() { rmSync(directory, { recursive: true, force: true }); } };
 }
 
+for (const invalid of ['unknown-option', 'missing-value', 'missing-required'] as const) {
+  test(`Teams package sanitizes ${invalid} diagnostics without creating output`, () => {
+    const f = fixture();
+    try {
+      const args = [script, '--manifest', join(f.directory, 'manifest.json'), '--color', join(f.directory, 'color.png'),
+        '--outline', join(f.directory, 'outline.png'), '--output', f.output];
+      if (invalid === 'unknown-option') args.push('--unrecognized', 'SYNTHETIC_OPERATOR_ARGUMENT');
+      if (invalid === 'missing-value') args.pop();
+      if (invalid === 'missing-required') args.splice(3, 4);
+      const result = spawnSync('python3', args, { encoding: 'utf8', timeout: 15000 });
+      assert.equal(result.status, 2); assert.equal(result.stdout, '');
+      assert.equal(result.stderr === '{"packaged": false, "reason": "invalid input or output unavailable"}\n', true,
+        'argument errors must use only the fixed diagnostic');
+      assert.throws(() => readFileSync(f.output));
+    } finally { f.close(); }
+  });
+}
+test('Teams package help remains a successful explicit action', () => {
+  const result = spawnSync('python3', [script, '--help'], { encoding: 'utf8', timeout: 15000 });
+  assert.equal(result.status, 0); assert.equal(result.stderr, '');
+  assert.equal(result.stdout.includes('--manifest'), true);
+  assert.equal(result.stdout.includes('--output'), true);
+});
+
 test('Teams package contains only the three named public files', () => {
   const f = fixture();
   try {
@@ -61,7 +85,7 @@ for (const invalid of ['group', 'placeholder', 'credentials', 'extra-field', 'wr
       if (invalid === 'wrong-size') writeFileSync(join(f.directory, 'color.png'), png(32));
       if (invalid === 'missing-alpha') writeFileSync(join(f.directory, 'outline.png'), png(32, false));
       if (invalid === 'bad-header') writeFileSync(join(f.directory, 'color.png'), Buffer.alloc(40));
-      const result = f.run(); assert.notEqual(result.status, 0);
+      const result = f.run(); assert.equal(result.status, 1);
       assert.equal(JSON.parse(result.stderr).packaged, false);
       assert.throws(() => readFileSync(f.output));
     } finally { f.close(); }
@@ -82,7 +106,7 @@ test('Teams package never overwrites an existing output artifact', () => {
   const f = fixture();
   try {
     const original = Buffer.from('existing artifact'); writeFileSync(f.output, original);
-    assert.notEqual(f.run().status, 0);
+    assert.equal(f.run().status, 1);
     assert.equal(readFileSync(f.output).equals(original), true);
   } finally { f.close(); }
 });

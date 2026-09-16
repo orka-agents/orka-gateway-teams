@@ -56,8 +56,14 @@ def png_bytes(path, size, outline=False):
     return data
 
 
+class QuietArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        # Defer failures to the fixed diagnostic; ordinary --help still exits successfully.
+        raise argparse.ArgumentError(None, 'invalid command-line arguments')
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = QuietArgumentParser(description=__doc__)
     parser.add_argument('--manifest', required=True, type=Path)
     parser.add_argument('--color', required=True, type=Path)
     parser.add_argument('--outline', required=True, type=Path)
@@ -88,7 +94,7 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except Exception:
+    except Exception as error:
         # Do not echo operator paths, manifest values, or arbitrary parser errors.
         print(json.dumps({'packaged': False, 'reason': 'invalid input or output unavailable'}), file=sys.stderr)
-        sys.exit(1)
+        sys.exit(2 if isinstance(error, argparse.ArgumentError) else 1)
