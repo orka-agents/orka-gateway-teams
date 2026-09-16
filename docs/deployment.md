@@ -70,7 +70,7 @@ operator action, using the Microsoft sources linked below.
 | --- | --- |
 | Bot OAuth client / Microsoft App ID | `TEAMS_APP_ID`, valid GUID; also manifest `bots[0].botId`. **Not** necessarily the Teams package ID. |
 | Tenant GUID | `TEAMS_TENANT_ID` and binding `match.accountId`; exact trusted tenant, no `common` or multi-tenant inference. |
-| Bot credential | Default Kubernetes assets: `teams-bot` Secret key `client-secret` → `TEAMS_CLIENT_SECRET`, a client-secret **value**, not its ID. Explicit certificate authentication supports host/Docker; managed-identity federation supports VM/ACI IMDS and the explicit ACA local subset (live ACA qualification pending). Neither mode supplies a Kubernetes overlay. |
+| Bot credential | Default Kubernetes assets: `teams-bot` Secret key `client-secret` → `TEAMS_CLIENT_SECRET`, a client-secret **value**, not its ID. Explicit certificate authentication supports host/Docker; managed-identity federation supports VM/ACI IMDS and the explicit ACA local subset ([one profile evaluated live](live-validation.md); other hosting/policy variants still require validation). Neither mode supplies a Kubernetes overlay. |
 | Verified bot recipient IDs | `TEAMS_RECIPIENT_IDS`, JSON array of exact allowed incoming `recipient.id` values, 1–100 entries. |
 | Verified service base URLs | `TEAMS_SERVICE_URLS`, JSON array of exact canonical public-cloud HTTPS URLs, 1–100 entries. Match path case/trailing slash; no query/fragment/userinfo/nonstandard service port. |
 | Verified sender IDs | Binding `senderPolicy.allowedSenderIds`: exact activity `from.id`, not display name, email, AAD ID or a guessed prefix. |

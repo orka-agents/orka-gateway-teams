@@ -135,6 +135,38 @@ test('ACA runtime emits secure directional parameter refs and literal singleton 
   });
 });
 
+for (const target of ['orka', 'service'] as const) {
+  const prefix = 'https://url.invalid/';
+  for (const scenario of ['unicode-expansion', 'appended-slash', 'exact-limit'] as const) {
+    test(`ACA ${target} URL enforces the normalized runtime limit: ${scenario}`, () => {
+      const url = scenario === 'unicode-expansion' ? prefix + '\u4e00'.repeat(600)
+        : scenario === 'appended-slash' ? prefix + 'a'.repeat(2048 - prefix.length)
+          : prefix + 'a'.repeat(2047 - prefix.length) + '/';
+      assert.equal(url.length <= 2048, true);
+      const profile = target === 'orka'
+        ? { ...profiles.runtime, orka: { ...profiles.runtime.orka, baseUrl: url } }
+        : { ...profiles.runtime, approvedServiceUrl: url };
+      run('runtime', profile, (directory, result) => {
+        if (scenario !== 'exact-limit') {
+          assert.equal(result.status, 1); assert.equal(result.stdout?.length, 0);
+          assert.equal(result.stderr === 'aca-render: invalid-input\n', true);
+          assert.deepEqual(readdirSync(directory), ['config.json']);
+          return;
+        }
+        assert.equal(result.status, 0);
+        const environment: NodeJS.ProcessEnv = {};
+        for (const entry of rendered(directory, 'runtime').resources[0].properties.template.containers[0].env) {
+          environment[entry.name] = entry.secretRef ? entry.secretRef
+            : entry.value.startsWith('[[') ? entry.value.slice(1) : entry.value;
+        }
+        const parsed = parseRuntimeConfig(environment, 'serve');
+        const parsedUrl = target === 'orka' ? parsed.scope.orkaBaseUrl : parsed.receiver.serviceUrls[0];
+        assert.equal(parsedUrl?.length, 2048);
+      });
+    });
+  }
+}
+
 test('documented delivery initialization keeps common Orka scope without ingress audit settings', () => {
   const environment = { GATEWAY_STORAGE_BACKEND: 'table-v2', TABLE_ACCOUNT: 'synthetic', TABLE_NAME: 'Gateway',
     TABLE_DELIVERY_STORE_ID: 'synthetic-delivery', TABLE_MANAGED_IDENTITY_HOST: 'azure-container-apps',

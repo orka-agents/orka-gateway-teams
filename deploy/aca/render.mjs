@@ -47,6 +47,7 @@ function httpsUrl(value, service = false) {
   if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || value.split('/')[2].includes('@') ||
       (service && url.port)) fail();
   if (!url.pathname.endsWith('/')) url.pathname += '/';
+  if (url.href.length > 2048) fail();
   return url.href;
 }
 function cidr(value) {
