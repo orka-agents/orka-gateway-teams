@@ -25,9 +25,10 @@ Vekil → Teams reply**.
 
 This report intentionally omits live tenant/app/person/conversation IDs, private
 endpoints, challenges, prompts/replies, credentials and raw logs. Private operator
-records retain correlation evidence. An attempted admin delivery-record read
-returned `401`; its port-forward was closed and no authorization bypass was used.
-Thus delivery is **human-confirmed**, not an independent admin-API receipt audit.
+records retain correlation evidence. An initial admin delivery-record read returned
+`401`; its port-forward was closed and no authorization bypass was used. The later
+explicitly approved read-only export is recorded below. These are bounded live
+observations, not a comprehensive delivery-record or remote-provider audit.
 
 See [the reproducible ACA profile](aca-deployment.md) for installation, capture,
 initialization, credential metadata, transitions and operator cleanup boundaries.
@@ -48,7 +49,7 @@ name the APIs, paths and commands.
 | Durable inbound replay and completed/concurrent delivery replay | Existing journal, Table and compiled CLI/container tests, including restart fixtures; not a claim of live crash recovery |
 | Temporary/permanent/uncertain send outcomes | Existing delivery state-machine, native sender and drain/ownership tests; uncertain sends suppress unsafe retry rather than claiming remote exactly-once |
 | Setup/installation and live smoke documentation | Existing guides plus the ACA runbook and this sanitized report |
-| Full stock gateway conformance CLI | **Executed, but not passing: fixture routing incompatibility below** |
+| Gateway conformance with an authorized retained fixture | **Passed**, including the identical duplicate receipt check and human confirmation of exactly one visible reply; the earlier default-route rejection remains historical evidence below |
 
 Baseline `npm run check` on the evaluated gateway source passed **3712 tests**, type
 checking and build. The previously completed container gate used synthetic native
@@ -56,10 +57,55 @@ services; those results are not substitutes for live delivery, recovery or HA.
 New deployment/packaging tests validate the operator tooling, not Azure service
 atomicity or production availability.
 
-## Outstanding stock conformance result
+## Authorized fixture conformance — 2026-09-16
 
-The evaluated Orka `cmd/orka-gateway-conformance` was built from the source above
-and run once in AKS against the real main gateway HTTPS origin. Its bearer came
+After explicit approval, a namespace-scoped read-only ServiceAccount, Role and
+RoleBinding exported a retained `Delivered` delivery and its `Completed` event
+through Orka's authorized API. The route matched the approved personal sender,
+tenant and conversation, plus the current Namespace and Gateway UIDs. The
+short-lived token stayed in memory; permission checks denied Secret reads and Pod
+creation. The temporary reader was removed before the conformance run. Namespace
+isolation remained enabled; no controller credential or backing-store bypass was
+used. Private fixture values were not published.
+
+The checker was built from reviewed Orka commit
+[`3898a90`](https://github.com/orka-agents/orka/commit/3898a90cef4e5175a23aea6c22967e46f661f016)
+and run once from AKS with `--delivery-fixture`. It used the existing outbound
+credential by Secret reference and the real gateway HTTPS origin, preserving TLS
+and the source-IP restriction. It did **not** use `--reference-fixtures`, a fake
+route, or a gateway restart/reinitialization.
+
+```text
+exit code: 0
+Passed: true
+Message: adapter conforms to orka.gateway.v1
+```
+
+The standalone checker Pod terminated successfully with zero restarts and no
+controller retries. The positive request and its identical duplicate passed the
+completed-provider-receipt equality check. The human confirmed **exactly one
+visible copy** of the labelled reply. After actual process termination, the
+Pod-owned fixture Secret, Pod and NetworkPolicy were deleted with UID preconditions
+and absence verified. The gateway remained Ready. This cleanup concerns the
+checker's temporary resources, not shutdown of the live deployment.
+
+See the [recorded result](https://github.com/orka-agents/orka/issues/549#issuecomment-5703729804)
+and [one-copy confirmation](https://github.com/orka-agents/orka/issues/549#issuecomment-5704075738).
+
+Orka [PR #611](https://github.com/orka-agents/orka/pull/611) subsequently merged as
+[`f97724a`](https://github.com/orka-agents/orka/commit/f97724a772b6c09be39749ddf01795bd0a9ce571).
+The maintainer added fixture-validation, redaction and connection-handling
+hardening after the live run. Focused race tests for the merged CLI, conformance
+and protocol packages passed; the same retained fixture passed the merged loader
+and pre-network validation using a transport that made no network calls. No new
+live reply was sent, and the earlier live result is not relabelled as a run of the
+later merged build.
+
+## Historical unconfigured conformance result
+
+The earlier `cmd/orka-gateway-conformance` was built from Orka `97df4ea`, the
+controller source recorded at the start of this report, and run once in AKS
+against the real main gateway HTTPS origin. Its bearer came
 from the outbound Secret via environment reference. TLS and the approved source-IP
 restriction remained enabled, retries were zero, and **`--reference-fixtures`
 was not used**. No gateway restart, store reinitialization or routing relaxation
@@ -85,11 +131,10 @@ journal delivery or send a Teams message. Do not generalize that safety claim to
 a modified payload with real routing information: positive delivery checks can
 write records and send messages, and require explicit effect approval.
 
-**Do not mark full conformance as passed or close #549 on this result.** Closing
-that criterion requires an agreed way for the checker to use an authorized,
-retained fixture route (or another explicitly agreed conformance contract), then
-a successful run. This deployment/documentation change does not alter the core
-checker, add a fake-route fallback, or relax adapter authentication.
+**This earlier result was not a conformance pass.** The later authorized-fixture
+run above satisfies the checker criterion without pretending that the default
+mock tenant/route works. The adapter still has no fake-route fallback, and its
+authentication and saved-route requirements remain unchanged.
 
 ## Not established by this evaluation
 

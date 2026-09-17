@@ -429,9 +429,11 @@ Record outcomes, not raw activities, tokens, text or private identity dumps:
   collecting request-bearing logs. Ambiguous provider outcomes are terminal
   unknown, not automatic resend permission.
 
-The full Orka conformance CLI hardcodes identities not established for this strict
-saved-route receiver. It has **not** been proved against this deployment. Do not
-claim full conformance, inject a reference-adapter route fixture, or alter runtime
+For this strict saved-route receiver, run Orka's conformance CLI with an explicitly
+authorized retained route via `--delivery-fixture`; the default mock identities are
+not valid production routing. The [ACA/Table evaluation](live-validation.md)
+passed this check, but that does not qualify every Kubernetes or authentication
+variant. Do not use `--reference-fixtures`, inject a fake route, or alter runtime
 auth/routing to obtain a green result.
 
 ## Pause, backup, and retirement are different operations

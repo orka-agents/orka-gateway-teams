@@ -767,10 +767,12 @@ late tokens, two-store ownership/unwind and fatal-after-flush. Observe actual cl
 receipt/committed state with bounded condition barriers, not fixture `res.end()` plus
 an arbitrary sleep. Never print synthetic keys/tokens or commit fixture databases.
 
-The production route model has no `conformance` alias. Orka's complete conformance
-checker hardcodes mock identities; it needs an appropriate mock fixture and has not
-been run against this production runtime. Wire fixtures and saved-route integration
-are not live Teams/Orka, live token-service, network-filesystem or power-cut validation.
+The production route model has no `conformance` alias. Orka's checker supports an
+explicit private `--delivery-fixture` containing authorized retained routing values.
+The [live report](docs/live-validation.md) records that check passing against the
+ACA/Table runtime, with one human-confirmed reply and no visible duplicate. Do not
+use `--reference-fixtures` or fabricate a production route. Synthetic wire fixtures
+remain distinct from live delivery, network-filesystem or power-cut validation.
 
 Keep tenant/account, conversation/context, thread, and sender identities separate.
 Sender authorization uses Teams `from.id`, not email, display name, or another user
@@ -786,10 +788,11 @@ The starter follows Orka at `0c8ab6fb`:
 - [Protocol source](https://github.com/orka-agents/orka/blob/0c8ab6fb/internal/gateway/protocol/types.go)
 - [Normative adapter protocol and security contract](https://github.com/orka-agents/orka/blob/0c8ab6fb/docs/development/gateway-protocol-v1.md)
 
-[#549](https://github.com/orka-agents/orka/issues/549) tracks the unfinished broader
-gateway. The bounded converter in [#550](https://github.com/orka-agents/orka/issues/550)
+[#549](https://github.com/orka-agents/orka/issues/549) tracks V1 acceptance and
+closeout. The bounded converter in [#550](https://github.com/orka-agents/orka/issues/550)
 and formatter in [#551](https://github.com/orka-agents/orka/issues/551) are implemented;
 inbound authentication, transport and ingress/routing persistence are implemented.
 Journal-backed Teams sending and authenticated outbound endpoints are implemented
 in opt-in full mode. Container/Kubernetes packaging has separate synthetic gates;
-full conformance and live Teams/Orka deployment validation remain separate work.
+the [live validation report](docs/live-validation.md) records the evaluated
+ACA/Table profile and separates its evidence from unqualified deployment variants.

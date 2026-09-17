@@ -52,8 +52,9 @@ or owner termination. Tests use local HTTPS fixtures, not live Azure.
 For ACA/Table, use the [operator runbook](docs/aca-deployment.md), offline
 `deploy/aca/render.mjs` profiles and optional `npm run test:app-package` gate
 (Python 3 required). No provisioning, capture authorization or store initialization
-is automated. The [live report](docs/live-validation.md) records the outstanding
-stock conformance fixture limitation; full conformance is not claimed.
+is automated. The [live report](docs/live-validation.md) records the real personal-chat
+round trip, Session continuation and passing authorized-fixture conformance check.
+The checker's default mock route is still not a valid production reply route.
 
 For SQLite/Kubernetes, start with the [deployment runbook and prerequisite STOP gate](docs/deployment.md).
 `deploy/kustomization.yaml` renders runtime resources only; storage preparation,
@@ -327,9 +328,11 @@ saved opaque reply key through the already-owned inbox. Fresh sends must match
 current service/recipient allowlists, tenant/account, personal conversation/context
 and nonthread policy. Metadata/references never select a destination. Confirmed
 receipts replay even after routing policy changes; changed immutable input is a
-conflict. There is no production `conformance` routing shortcut. Orka's full
-conformance checker uses hardcoded mock identities and must use a suitable fixture,
-not this production saved-route model unchanged; full Go conformance is not claimed.
+conflict. There is no production `conformance` routing shortcut. Orka's checker
+supports `--delivery-fixture` with an explicitly authorized retained route; its
+default mock identities remain unsuitable for this receiver. The
+[fixture-enabled live check passed](docs/live-validation.md#authorized-fixture-conformance--2026-09-16)
+without changing the saved-route model or enabling reference fault fixtures.
 
 A private closure resolves the **same SDK App's public token factory** only when a
 new authorized send needs it. A fresh SDK HTTP client sends the exact bounded card
