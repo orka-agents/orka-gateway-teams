@@ -21,6 +21,45 @@ private candidate identities from a fresh-code-correlated personal message for
 operator review. It does not authorize senders, run Tasks, reply, or change normal
 authentication; host and explicitly overridden container commands are supported.
 
+## Deploy on Azure Container Apps — start here
+
+Use the **[ACA setup and operations guide](docs/aca-deployment.md)** for the
+live-validated personal-chat deployment. This path uses Azure Table storage and
+managed identities; the SQLite environment-variable examples later in this README
+are **not** the ACA setup procedure.
+
+**Bring your own infrastructure:** a permitted Teams bot/app, an ACA Consumption
+environment with networking, ACR, a Table, managed identities/federation, and an
+existing Orka installation with a working Agent/provider. The guide configures the
+gateway on those resources; it does not provision them or install Orka for you.
+
+| Step | Follow this section | Done when |
+| --- | --- | --- |
+| 1. Check access and infrastructure | [Prerequisites](docs/aca-deployment.md#1-resolve-installation-and-infrastructure-first) | Tenant permissions, identities, networking and Orka are ready |
+| 2. Install the personal Teams app | [Package and install](docs/aca-deployment.md#2-prepare-and-install-the-teams-app) | The intended human can open its personal chat |
+| 3. Build images and prepare profiles | [Build and configuration examples](docs/aca-deployment.md#3-build-and-render-the-fixed-profiles) | Gateway/setup images are digest-pinned; setup/proxy templates render |
+| 4. Capture and approve the chat | [Private capture](docs/aca-deployment.md#4-capture-the-installed-personal-chat) | Candidate retrieved and manually confirmed before setup retirement |
+| 5. Prepare storage | [One-time initialization](docs/aca-deployment.md#5-initialize-each-logical-store-once) | Both new stores initialized once, or existing stores deliberately preserved |
+| 6. Enable request/reply | [Bind and activate](docs/aca-deployment.md#6-bind-the-chat-and-switch-once-to-normal-runtime) | Gateway and Binding Ready; normal runtime owns the stores |
+| 7. Use and verify it | [First request, follow-up and troubleshooting](docs/aca-deployment.md#7-demonstrate-and-operate) | A real Agent reply arrives in the same chat and a follow-up shares its Session |
+
+**Already running a gateway?** Do not replay the first-install steps, reinitialize
+stores, or deploy over an active owner. Follow the guide's quiesce/drain and
+ownership boundaries. Single replica is not a recovery or takeover mechanism.
+
+### Use the Teams chat
+
+Once the operator has activated the normal runtime, open the installed app's
+**personal chat** and send a text request appropriate for the configured Agent.
+Expect one **Orka reply** card, or an **Orka could not complete the request** card
+on failure. Send the next text message in the same chat to continue the conversation.
+The setup challenge is only for installation; it is not part of ordinary use.
+
+Only the approved sender/chat is authorized. Groups, channels, files, streaming and
+approval buttons are outside V1; for text plus attachments, only the text is used.
+If a reply is missing, ask the operator to check Task/provider state rather than
+repeatedly sending the same request—new messages can create new Tasks.
+
 ## Local development
 
 Use Node 24 LTS and npm. From the repository root:

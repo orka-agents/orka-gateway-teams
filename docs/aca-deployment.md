@@ -14,6 +14,22 @@ command in this workflow.
 
 ## 1. Resolve installation and infrastructure first
 
+### Scope and operator tools
+
+This guide starts with **existing infrastructure**, not an empty Azure subscription.
+Arrange the resources and permissions below with your platform/tenant administrator
+before executing deployment commands. Registration, network design, identity/RBAC
+provisioning and Orka installation are prerequisites, not hidden steps performed by
+the renderer. See [Orka's gateway operations guide][orka-gateways] for the Orka side.
+
+Use a reviewed adapter checkout, Node 24.2.0 (the evaluated image version), npm,
+Docker with Linux/amd64 builds, Azure CLI with the `containerapp` commands available,
+and `kubectl` with a dedicated Orka-cluster kubeconfig. Python 3 and `curl` are used
+by the optional local Teams packaging/validation path below. Authenticate Azure
+CLI as your approved operator; do not use storage account keys or enable ACR admin
+credentials as a shortcut. Never enable shell tracing (`set -x`) or CLI debug output
+while handling credentials/capture artifacts.
+
 Before starting a timed capture, confirm:
 
 - One approved work/school tenant and bot application, its Microsoft Teams channel,
@@ -49,12 +65,50 @@ capability-drop guarantees. It uses the image's non-root user and writable,
 ephemeral root-owned sticky `/tmp`; no unverified EmptyDir ownership or `fsGroup`
 assumption is made. Capture retention is ephemeral, not durable storage.
 
+### Keep the three endpoints separate
+
+| Address | Caller and purpose |
+| --- | --- |
+| Public proxy HTTPS origin + `/api/messages` | Teams → gateway; set this as the Azure Bot messaging endpoint |
+| Main app HTTPS origin (no `/api/messages`) | Orka → gateway V1 API; use as Gateway `adapter.endpoint`, restricted to Orka's egress CIDR |
+| Orka HTTPS API base URL | Gateway → Orka; immutable initialized scope, reachable from ACA with the trusted public CA |
+
+The main app's internal port 3978 connects the public proxy to Teams ingress; it is
+not a public V1 endpoint. For the runtime topology and observed boundaries, see the
+[live report](live-validation.md).
+
+### Operator values used in commands
+
+Shell variables below are **not loaded automatically** from the JSON configuration.
+Set them in your operator shell from your approved inventory; keep a consistent
+copy in the private ledger. Replace all `REQUIRED_...` placeholders before use.
+Never assign bearer tokens as command-line arguments.
+
+| Values | Where they come from |
+| --- | --- |
+| `SUBSCRIPTION_ID`, `RESOURCE_GROUP`, `ENVIRONMENT_ID` | Target subscription, existing resource group and full ACA environment ARM resource ID |
+| `ACR_NAME`, `REGISTRY_SERVER` | Existing registry name and its login server (for example, `exampleacr.azurecr.io`) |
+| `IMAGE_TAG` | A unique tag for the reviewed build; deploy only its verified digest |
+| `GATEWAY_APP_NAME`, `PROXY_APP_NAME` | Same names in both stage configs; defaults `orka-teams-gateway` / `orka-teams-public` |
+| `STORAGE_IDENTITY_RESOURCE_ID`, `STORAGE_IDENTITY_CLIENT_ID` | Storage UAMI resource ID and client ID; not the bot application's ID |
+| `BOT_APP_ID`, `TENANT_ID` | Registered bot OAuth app and approved tenant |
+| `TABLE_ACCOUNT`, `TABLE_NAME`, `TABLE_INGRESS_STORE_ID`, `TABLE_DELIVERY_STORE_ID` | Existing physical Table and chosen stable logical store IDs |
+| `ORKA_BASE_URL`, `GATEWAY_NAMESPACE`, `GATEWAY_NAME` | Canonical Orka API base URL and chosen Gateway identity; freeze before initialization |
+| `INGRESS_INIT_JOB`, `DELIVERY_INIT_JOB` | Two distinct names for the one-time manual Jobs |
+| `KUBECONFIG_PATH` | Dedicated kubeconfig for the existing Orka cluster; do not change the global context |
+
+The build step defines `GATEWAY_IMAGE_TAG` and `SETUP_IMAGE_TAG`; after publishing,
+you manually set `GATEWAY_IMAGE_BY_DIGEST` and `SETUP_IMAGE_BY_DIGEST` from the
+registry output. Bot/pull identity IDs and the allowed Orka egress CIDR are entered
+in the stage JSON examples below.
+
 ## 2. Prepare and install the Teams app
 
 Create an ignored/private operator directory; do not edit the checked-in example
 with live identities. From the adapter checkout:
 
 ```sh
+umask 077
 install -d -m 0700 bin/teams-operator
 cp examples/teams-app/manifest.template.json bin/teams-operator/manifest.json
 chmod 0600 bin/teams-operator/manifest.json
@@ -105,19 +159,82 @@ upload instructions][upload].
 
 ## 3. Build and render the fixed profiles
 
-Build/publish the ordinary gateway from the selected reviewed source. Pin the
-published registry manifest digest. Build the small setup derivative from that
-same gateway; it adds only the setup supervisor, not a separate runtime:
+### Build and publish two images
+
+From the reviewed adapter checkout, confirm the source commit with `git rev-parse
+HEAD` and record it. With `ACR_NAME`, `REGISTRY_SERVER` and a unique `IMAGE_TAG` set:
+
+```sh
+az acr login --subscription "$SUBSCRIPTION_ID" --name "$ACR_NAME" --only-show-errors
+GATEWAY_IMAGE_TAG="$REGISTRY_SERVER/orka/teams-gateway:$IMAGE_TAG"
+SETUP_IMAGE_TAG="$REGISTRY_SERVER/orka/teams-setup:$IMAGE_TAG"
+docker build --platform linux/amd64 --tag "$GATEWAY_IMAGE_TAG" .
+docker push "$GATEWAY_IMAGE_TAG"
+az acr repository show --subscription "$SUBSCRIPTION_ID" --name "$ACR_NAME" \
+  --image "orka/teams-gateway:$IMAGE_TAG" --query digest --output tsv
+```
+
+Copy the returned `sha256:...` into `GATEWAY_IMAGE_BY_DIGEST`, in the form
+`REGISTRY_SERVER/orka/teams-gateway@sha256:...`, and record it. This must refer to
+the **ordinary gateway**, not a diagnostic/fixture image. Do not deploy the mutable
+tag. Then build the setup derivative from that exact image:
 
 ```sh
 docker build --platform linux/amd64 \
   --build-arg GATEWAY_IMAGE="$GATEWAY_IMAGE_BY_DIGEST" \
   --file deploy/aca/Dockerfile.setup --tag "$SETUP_IMAGE_TAG" deploy/aca
+docker push "$SETUP_IMAGE_TAG"
+az acr repository show --subscription "$SUBSCRIPTION_ID" --name "$ACR_NAME" \
+  --image "orka/teams-setup:$IMAGE_TAG" --query digest --output tsv
 ```
 
-Publish that image and record its verified digest as well. `GATEWAY_IMAGE_BY_DIGEST`
-must be the ordinary gateway, not a diagnostic or fixture image. The proxy uses
-the checked-in public pinned stock NGINX image, with no identity/ACR credentials.
+Set `SETUP_IMAGE_BY_DIGEST` to the second image's fully qualified digest reference.
+The derivative adds only the setup supervisor; normal operation uses the ordinary
+gateway image. The proxy uses the checked-in public pinned stock NGINX image,
+with no identity/ACR credentials.
+
+### Create private setup and proxy configs
+
+Save the following shapes as `bin/teams-operator/setup.json` and
+`bin/teams-operator/proxy.json` using the private directory and umask established
+above. JSON does **not** expand shell variables: enter the reviewed values
+explicitly. The examples intentionally fail validation until placeholders are
+replaced. In `setup.json`, use the verified `SETUP_IMAGE_BY_DIGEST` value:
+
+```json
+{
+  "location": "REQUIRED_AZURE_REGION",
+  "environmentId": "/subscriptions/REQUIRED_SUBSCRIPTION_ID/resourceGroups/REQUIRED_RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/REQUIRED_ENVIRONMENT",
+  "gatewayAppName": "orka-teams-gateway",
+  "proxyAppName": "orka-teams-public",
+  "registryServer": "REQUIRED_REGISTRY.azurecr.io",
+  "identityResourceId": "/subscriptions/REQUIRED_SUBSCRIPTION_ID/resourceGroups/REQUIRED_RESOURCE_GROUP/providers/Microsoft.ManagedIdentity/userAssignedIdentities/REQUIRED_BOT_AND_PULL_IDENTITY",
+  "operatorAksEgressCidr": "REQUIRED_ORKA_EGRESS_IPV4_CIDR",
+  "image": "REQUIRED_REGISTRY.azurecr.io/orka/teams-setup@sha256:REQUIRED_DIGEST",
+  "bot": {
+    "appId": "REQUIRED_BOT_APP_ID",
+    "tenantId": "REQUIRED_TENANT_ID",
+    "clientId": "REQUIRED_BOT_UAMI_CLIENT_ID",
+    "principalId": "REQUIRED_BOT_UAMI_PRINCIPAL_ID"
+  },
+  "timeoutMs": 900000
+}
+```
+
+The 15-minute capture window starts when the setup child starts, not when the human
+opens Teams. Have the app installed and the operator/human ready first.
+
+For `proxy.json`, use the same environment and app names, **without** image,
+identity, bot or timeout fields:
+
+```json
+{
+  "location": "REQUIRED_AZURE_REGION",
+  "environmentId": "/subscriptions/REQUIRED_SUBSCRIPTION_ID/resourceGroups/REQUIRED_RESOURCE_GROUP/providers/Microsoft.App/managedEnvironments/REQUIRED_ENVIRONMENT",
+  "gatewayAppName": "orka-teams-gateway",
+  "proxyAppName": "orka-teams-public"
+}
+```
 
 `deploy/aca/render.mjs` is **offline preparation only**. It reads an explicit
 stage config, creates a single ARM template with mode 0600 in an existing output
@@ -166,6 +283,20 @@ types are explicit: the live attempt suffered `ProbeFailure` until liveness was
 pointed at 3980 instead of the intentionally closed V1 port. Failed and successful
 capture artifacts are held until the operator explicitly stops the supervisor.
 
+Read only the needed app metadata to locate the deployed revision and managed
+HTTPS hostname (run for each app name as needed):
+
+```sh
+az containerapp show --subscription "$SUBSCRIPTION_ID" \
+  --resource-group "$RESOURCE_GROUP" --name "$GATEWAY_APP_NAME" \
+  --query '{revision:properties.latestRevisionName,fqdn:properties.configuration.ingress.fqdn}' \
+  --output json
+```
+
+Use the **proxy** hostname for the bot messaging endpoint and the **main app**
+hostname for Orka V1. Do not use `--show-secrets` or dump the entire configuration
+into a support report. These metadata fields do not prove readiness or capture.
+
 Record the exact revision and replica. Through the authorized ACA console
 (`az containerapp exec --command /bin/sh`, selecting that revision, replica and
 container `setup`), privately inspect:
@@ -195,7 +326,8 @@ reuse a previous challenge or delete an ambiguous capture.
 
 ## 5. Initialize each logical store once
 
-After the capture/identity review required by Gate 0, initialize new stores.
+After the prerequisite checks and manual capture/identity review in steps 1–4,
+initialize new stores.
 **Skip this step entirely for existing initialized stores.** Create two distinct
 manual ACA Jobs using the ordinary gateway image and the same environment,
 identity and registry permissions. No secret value belongs in initialization arguments.
@@ -272,8 +404,35 @@ retrieved private artifact. Deactivate the exact setup revision and verify its
 replicas have gone before transitioning. A control-plane deactivation acknowledgement
 alone is not process termination proof.
 
-Complete a private runtime config using the same immutable initialized scope/IDs,
-and only the manually approved recipient and service URL. Render it:
+### Complete the runtime config without mixing identities
+
+Copy the [runtime example](../deploy/aca/config.example.json) into your private
+operator directory; do not overwrite an existing configuration:
+
+```sh
+cp -n deploy/aca/config.example.json bin/teams-operator/runtime.json
+chmod 0600 bin/teams-operator/runtime.json
+```
+
+Replace every placeholder, including all five audit budgets with JSON **numbers**,
+not quoted strings. Use the same immutable initialized scope/store IDs and the
+verified **ordinary** `GATEWAY_IMAGE_BY_DIGEST` (not the setup image). Runtime has
+no `timeoutMs`. Carry over the same app names, environment and bot/pull identity.
+If storage uses another UAMI, provide its separate resource ID and client ID in
+`table`; do not silently substitute a different identity.
+
+Manually map the reviewed capture as follows; never paste the complete capture
+into the renderer config or an Orka Task:
+
+| Capture field | Destination / check |
+| --- | --- |
+| `appId`, `tenantId` | Must match the approved `bot.appId` / `bot.tenantId`; tenant also matches Binding `match.accountId` |
+| `recipientId` | Runtime `approvedRecipientId`: the **bot's** Teams recipient identity, not the human sender |
+| `serviceUrl` | Runtime `approvedServiceUrl`: the approved Teams HTTPS service URL |
+| `senderId` | Binding sender allowlist: the **human's** stable Teams sender ID |
+| `conversationId` | Binding `match.contextId`: the confirmed personal chat |
+
+Render only after the manual mapping and scope checks:
 
 ```sh
 node deploy/aca/render.mjs --stage runtime \
@@ -288,8 +447,28 @@ workflow, never literal credential-bearing argv:
 - `orkaPublicCa` (`string`): public CA PEM only, not a private key.
 
 The template contains references to these parameters, not their values. Keep any
-filled parameter file private/outside version control; for example, a 0600
-operator-managed deployment-parameters JSON can be passed by filename:
+filled parameter file private/outside version control. The expected shape is:
+
+```json
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "orkaBearerToken": { "value": "REQUIRED_EXISTING_INBOUND_SECRET_TOKEN" },
+    "orkaOutboundBearerToken": { "value": "REQUIRED_DISTINCT_OUTBOUND_SECRET_TOKEN" },
+    "orkaPublicCa": { "value": "REQUIRED_PUBLIC_CA_PEM_WITH_JSON_ESCAPED_NEWLINES" }
+  }
+}
+```
+
+This is a **shape only**, not deployable credentials. Use your protected workflow
+to populate the two existing Secret values and JSON-encode the public CA PEM
+(newlines as `\n`); no private key belongs here. ARM `secureString` protects the
+parameter's handling, not plaintext files on your workstation. Create the filled
+file with mode 0600 inside a 0700 directory **before writing values**, do not print
+it, and retain/remove it according to your secret-handling policy.
+
+For example, pass that private file by filename:
 
 ```sh
 az deployment group create --subscription "$SUBSCRIPTION_ID" \
@@ -306,10 +485,49 @@ block references without rotating credentials. The public proxy remains unchange
 
 ## 7. Demonstrate and operate
 
-With the provider ready, have the human send a harmless normal request. Observe a
-successful real Agent Task and have the human confirm the reply in the same Teams
-chat. Send a follow-up and verify both Tasks' `spec.sessionRef.name` match; inspect
-only safe execution metadata, not raw activities, prompts, tokens or transcripts.
+### First request and follow-up
+
+With the normal replica, Gateway and Binding Ready and the provider authenticated,
+have the approved human open the installed app's personal chat. For a harmless
+conversation check, ask it to remember a made-up word for this conversation, then
+ask for that word in a second message. This checks conversation context, not a
+durable-memory feature. Use requests appropriate for the configured Agent.
+
+Expect one **Orka reply** card for each successful Task, or an **Orka could not
+complete the request** card for a failed Task. No streaming output is expected.
+Do not send the setup challenge again; normal messages are new requests.
+
+The operator should confirm the real Task succeeded and both Tasks'
+`spec.sessionRef.name` match. Use the intended Task names and safe projections:
+
+```sh
+kubectl --kubeconfig "$KUBECONFIG_PATH" --namespace "$GATEWAY_NAMESPACE" \
+  get tasks "$FIRST_TASK_NAME" "$FOLLOWUP_TASK_NAME" \
+  -o 'custom-columns=NAME:.metadata.name,PHASE:.status.phase,SESSION:.spec.sessionRef.name'
+```
+
+`FIRST_TASK_NAME` and `FOLLOWUP_TASK_NAME` are the actual Orka Task names for the
+two requests, obtained from your authorized Orka view. Do not invent them or dump
+full Task bodies/status, raw activities, prompts, tokens or transcripts. Have the
+human confirm both cards arrived in the same chat and the follow-up used context.
+
+### If setup or a reply fails
+
+| Symptom | Check first | Do not do |
+| --- | --- | --- |
+| Teams upload/install is unavailable | Tenant custom-app policy and approved administrator installation route | Bypass tenant policy or start timed capture before the chat exists |
+| `aca-render: invalid-input` | Stage-specific allowed keys, unresolved placeholders, numeric budgets, digest-pinned image, existing private output directory and whether the output already exists | Add unrelated stage fields or overwrite an existing template blindly |
+| Setup is live but no candidate appears | Exact revision/replica, `child-running`, correct bot proxy endpoint, fresh unexpired challenge, then `child-closed-ok` and private candidate retrieval | Interpret HTTP3980 health or console exit status as capture success |
+| Gateway or Binding is not Ready | Distinct Secret references and metadata, exact main HTTPS origin, trusted CA, approved Orka egress IP, Agent and sender policy | Point V1 at the Teams-only proxy, disable TLS/SSRF/auth checks, or rotate tokens speculatively |
+| No Task appears | Normal runtime active rather than setup; approved tenant/sender/chat and supported nonempty personal text | Repeatedly send new messages before diagnosing admission; they can create new Tasks |
+| Task fails or no reply arrives | Authorized Task phase, provider readiness/login, gateway readiness and safe delivery state | Treat an uncertain send as permission to retry or resend |
+| Store opening/initialization is blocked | Recorded initialization execution, exact immutable scope/IDs and actual previous-owner shutdown evidence | Rerun init, reset stores, change store IDs, or redeploy over an active owner |
+
+See [identity setup](managed-identity-auth.md), [Table lifecycle](table-runtime.md)
+and [gateway operations][orka-gateways] for deeper diagnosis. Keep error evidence
+bounded and private; do not gather raw request-bearing logs for convenience.
+
+### Conformance and shutdown are separate operations
 
 [Live evidence and conformance results](live-validation.md) separate the passing
 authorized-fixture check from the historical unconfigured-route rejection. Use the
@@ -343,5 +561,6 @@ The ACA tests cover renderer/profile contracts and supervisor lifecycle using
 synthetic inputs; the existing container gate still tests the ordinary runtime.
 No test uploads a Teams app, provisions Azure, or proves crash recovery/HA.
 
+[orka-gateways]: https://github.com/orka-agents/orka/blob/main/website/docs/operations/gateways.md
 [upload]: https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/apps-upload
 [validation]: https://dev.teams.microsoft.com/tools/store-validation
