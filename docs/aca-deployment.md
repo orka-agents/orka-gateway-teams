@@ -147,8 +147,9 @@ python3 scripts/package-teams-app.py \
 
 The validator uses JavaScript Unicode regex support: the Microsoft schema has
 patterns that Python's standard `re` does not implement. The packager's own
-checks are a narrow personal-profile preflight, not full schema validation. It
-packages exactly root `manifest.json`, `color.png`, `outline.png`, and refuses to
+checks are a narrow selected-profile preflight (personal by default), not full
+schema validation. It packages exactly root `manifest.json`, `color.png`,
+`outline.png`, and refuses to
 overwrite an existing ZIP. Use a new output name for a revised artifact.
 
 In Teams desktop/web, use **Apps → Manage your apps → Upload an app → Upload a
@@ -156,6 +157,38 @@ custom app**, select the ZIP, then **Add → Open**. Confirm the personal chat i
 open **before** asking the user to send a timed challenge. If installation is
 blocked, stop and use the organization's approved process. See [Microsoft's
 upload instructions][upload].
+
+### Opt-in shared-room package (packaging only)
+
+The default template and commands above remain personal-only. For the shared-room
+work tracked by [Orka #641](https://github.com/orka-agents/orka/issues/641), a separate
+`examples/teams-app/manifest.shared-rooms.template.json` offers exactly `personal`,
+`groupChat`, and `team` bot scopes. Copy it to a **new private operator directory**,
+fill its placeholders, provide reviewed icons, and perform the same full manifest
+validation before packaging:
+
+```sh
+python3 scripts/package-teams-app.py --profile shared-rooms \
+  --manifest bin/teams-rooms-operator/manifest.json \
+  --color bin/teams-rooms-operator/color.png \
+  --outline bin/teams-rooms-operator/outline.png \
+  --output bin/teams-rooms-operator/teams-shared-rooms.zip
+```
+
+`--profile personal` is equivalent to omitting the option. `--profile shared-rooms`
+requires all three scopes, in any order, without duplicates; it does not rewrite
+or widen the supplied manifest. A shared-room manifest is rejected by the default
+profile. Both profiles reject RSC authorization and keep files, calling, video,
+and notification-only operation disabled. Packaging still includes only the
+reviewed manifest and two icons, with no overwrite or upload.
+
+**A successful package is not shared-room runtime support or live validation.**
+The current runtime and authenticated setup capture remain personal-only. Do not
+roll out the shared-room package until the adapter implements bot-targeted
+@mention filtering, room/thread routing, and explicit pilot-member allowlists.
+Do not add read-all-message RSC permissions or sender policy `all` to bypass those
+gates. The shared-room live result will be recorded separately in
+[live validation](live-validation.md); the existing personal result is unchanged.
 
 ## 3. Build and render the fixed profiles
 
