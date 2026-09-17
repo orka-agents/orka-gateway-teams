@@ -311,9 +311,14 @@ successful real Agent Task and have the human confirm the reply in the same Team
 chat. Send a follow-up and verify both Tasks' `spec.sessionRef.name` match; inspect
 only safe execution metadata, not raw activities, prompts, tokens or transcripts.
 
-[Live evidence and the outstanding conformance limitation](live-validation.md)
-separate what passed from what remains unresolved. Do not use reference fixtures,
-a fake tenant/route fallback, or weakened auth to manufacture a conformance pass.
+[Live evidence and conformance results](live-validation.md) separate the passing
+authorized-fixture check from the historical unconfigured-route rejection. Use the
+Orka checker's explicit `--delivery-fixture` only with approved retained routing
+values; it sends a real test reply and repeats the same request. If namespace
+isolation blocks fixture access, obtain a separately authorized namespace-scoped
+read-only export rather than disabling the guard or borrowing elevated credentials.
+Do not use `--reference-fixtures`, a fake tenant/route fallback, or weakened auth
+to manufacture a conformance pass.
 
 Before ending an evaluation: inhibit intake/restore the previous bot endpoint,
 quiesce Orka delivery, drain/close the actual gateway owners and prove termination
