@@ -23,19 +23,20 @@ function png(size: number, alpha = true): Buffer {
   return Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), chunk('IHDR', header),
     chunk('IDAT', deflateSync(Buffer.alloc(size * (1 + size * (alpha ? 4 : 3))))), chunk('IEND', Buffer.alloc(0))]);
 }
-function fixture() {
+function fixture(source = template) {
   const directory = mkdtempSync(join(tmpdir(), 'teams-app-package-'));
-  const manifest = JSON.parse(template);
+  const manifest = JSON.parse(source);
   manifest.id = '11111111-1111-4111-8111-111111111111';
   manifest.bots[0].botId = '22222222-2222-4222-8222-222222222222';
   manifest.developer = { name: 'Example', websiteUrl: 'https://example.com/', privacyUrl: 'https://example.com/privacy', termsOfUseUrl: 'https://example.com/terms' };
   writeFileSync(join(directory, 'color.png'), png(192, false));
   writeFileSync(join(directory, 'outline.png'), png(32));
   const output = join(directory, 'personal.zip');
-  return { directory, manifest, output, run(failureMode?: 'write' | 'verify' | 'interrupt-write' | 'interrupt-verify') {
+  return { directory, manifest, output, run(failureMode?: 'write' | 'verify' | 'interrupt-write' | 'interrupt-verify', profile?: string) {
     writeFileSync(join(directory, 'manifest.json'), JSON.stringify(manifest));
     return spawnSync('python3', [...(failureMode ? [fault, script, failureMode] : [script]), '--manifest', join(directory, 'manifest.json'), '--color', join(directory, 'color.png'),
-      '--outline', join(directory, 'outline.png'), '--output', output], { encoding: 'utf8', timeout: 15000 });
+      '--outline', join(directory, 'outline.png'), '--output', output, ...(profile === undefined ? [] : ['--profile', profile])],
+      { encoding: 'utf8', timeout: 15000 });
   }, close() { rmSync(directory, { recursive: true, force: true }); } };
 }
 
@@ -74,6 +75,100 @@ test('Teams package contains only the three named public files', () => {
     assert.equal(readFileSync(f.output).includes(Buffer.from('unrelated-private-file')), false);
   } finally { f.close(); }
 });
+test('Teams package shared-room scopes require explicit profile selection and preserve reviewed bytes', () => {
+  const f = fixture();
+  try {
+    f.manifest.bots[0].scopes = ['personal', 'groupChat', 'team'];
+    assert.equal(f.run().status, 1);
+    assert.throws(() => readFileSync(f.output));
+    assert.equal(f.run(undefined, 'personal').status, 1);
+    assert.throws(() => readFileSync(f.output));
+    const result = f.run(undefined, 'shared-rooms'); assert.equal(result.status, 0);
+    const extracted = spawnSync('python3', ['-c',
+      'import sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); assert z.namelist() == ["manifest.json", "color.png", "outline.png"]; sys.stdout.buffer.write(z.read("manifest.json"))',
+      f.output], { encoding: 'utf8', timeout: 15000 });
+    assert.equal(extracted.status, 0);
+    assert.equal(extracted.stdout === readFileSync(join(f.directory, 'manifest.json'), 'utf8'), true,
+      'packaging must not rewrite the reviewed manifest');
+  } finally { f.close(); }
+});
+
+test('Teams shared-room template packages only with explicit opt-in', () => {
+  const f = fixture(readFileSync(new URL('../../examples/teams-app/manifest.shared-rooms.template.json', import.meta.url), 'utf8'));
+  try {
+    assert.deepEqual(f.manifest.bots[0].scopes, ['personal', 'groupChat', 'team']);
+    assert.equal(f.run().status, 1);
+    assert.throws(() => readFileSync(f.output));
+    assert.equal(f.run(undefined, 'shared-rooms').status, 0);
+  } finally { f.close(); }
+});
+
+test('Teams package shared-room scope order does not change profile eligibility', () => {
+  const f = fixture();
+  try {
+    f.manifest.bots[0].scopes = ['team', 'personal', 'groupChat'];
+    assert.equal(f.run(undefined, 'shared-rooms').status, 0);
+  } finally { f.close(); }
+});
+
+for (const scopes of [['personal'], ['groupChat'], ['team'], ['personal', 'groupChat'],
+  ['personal', 'groupChat', 'team', 'copilot'], ['personal', 'groupChat', 'team', 'team']]) {
+  test(`Teams shared-room profile rejects incomplete or extra scopes: ${scopes.join(',')}`, () => {
+    const f = fixture();
+    try {
+      f.manifest.bots[0].scopes = scopes;
+      const result = f.run(undefined, 'shared-rooms'); assert.equal(result.status, 1);
+      assert.equal(result.stdout, '');
+      assert.equal(result.stderr === '{"packaged": false, "reason": "invalid input or output unavailable"}\n', true);
+      assert.throws(() => readFileSync(f.output));
+    } finally { f.close(); }
+  });
+}
+
+for (const profile of ['personal', 'shared-rooms']) {
+  test(`Teams ${profile} profile rejects object-shaped scopes rather than treating keys as scopes`, () => {
+    const f = fixture();
+    try {
+      f.manifest.bots[0].scopes = profile === 'personal' ? { personal: true } : { personal: true, groupChat: true, team: true };
+      const result = f.run(undefined, profile); assert.equal(result.status, 1);
+      assert.equal(result.stdout, '');
+      assert.equal(result.stderr === '{"packaged": false, "reason": "invalid input or output unavailable"}\n', true);
+      assert.throws(() => readFileSync(f.output));
+    } finally { f.close(); }
+  });
+}
+
+for (const invalid of ['rsc', 'files', 'calling', 'video', 'notification-only', 'second-bot']) {
+  test(`Teams shared-room profile still rejects ${invalid} before creating output`, () => {
+    const f = fixture();
+    try {
+      f.manifest.bots[0].scopes = ['personal', 'groupChat', 'team'];
+      if (invalid === 'rsc') f.manifest.authorization = { permissions: { resourceSpecific: [
+        { name: 'ChannelMessage.Read.Group', type: 'Application' },
+      ] } };
+      if (invalid === 'files') f.manifest.bots[0].supportsFiles = true;
+      if (invalid === 'calling') f.manifest.bots[0].supportsCalling = true;
+      if (invalid === 'video') f.manifest.bots[0].supportsVideo = true;
+      if (invalid === 'notification-only') f.manifest.bots[0].isNotificationOnly = true;
+      if (invalid === 'second-bot') f.manifest.bots.push({ ...f.manifest.bots[0] });
+      const result = f.run(undefined, 'shared-rooms'); assert.equal(result.status, 1);
+      assert.equal(result.stdout, '');
+      assert.equal(result.stderr === '{"packaged": false, "reason": "invalid input or output unavailable"}\n', true);
+      assert.throws(() => readFileSync(f.output));
+    } finally { f.close(); }
+  });
+}
+
+test('Teams package rejects unknown profiles without echoing operator input', () => {
+  const f = fixture();
+  try {
+    const result = f.run(undefined, 'SYNTHETIC_OPERATOR_PROFILE');
+    assert.equal(result.status, 2); assert.equal(result.stdout, '');
+    assert.equal(result.stderr === '{"packaged": false, "reason": "invalid input or output unavailable"}\n', true);
+    assert.throws(() => readFileSync(f.output));
+  } finally { f.close(); }
+});
+
 for (const invalid of ['group', 'placeholder', 'credentials', 'extra-field', 'wrong-size', 'missing-alpha', 'bad-header']) {
   test(`Teams package rejects ${invalid} before creating an archive`, () => {
     const f = fixture();

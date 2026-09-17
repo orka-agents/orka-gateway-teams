@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package a reviewed personal Teams manifest and icons. No upload, credentials, or network access."""
+"""Package a reviewed Teams manifest and icons. Personal profile by default; no upload, credentials, or network access."""
 import argparse
 import hashlib
 import json
@@ -12,20 +12,23 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
-def manifest_bytes(path):
+def manifest_bytes(path, profile='personal'):
     raw = path.read_bytes()
     if len(raw) > 65536:
         raise ValueError('manifest too large')
     value = json.loads(raw)
     expected = {'$schema', 'manifestVersion', 'version', 'id', 'developer', 'name', 'description', 'icons', 'accentColor', 'bots'}
     if set(value) != expected or 'REQUIRED_' in raw.decode('utf-8'):
-        raise ValueError('use the completed personal manifest template')
+        raise ValueError('use the completed manifest template for the selected profile')
     if value['manifestVersion'] != '1.30' or value['icons'] != {'color': 'color.png', 'outline': 'outline.png'}:
         raise ValueError('unexpected manifest version or icon paths')
     uuid.UUID(value['id'])
-    if len(value['bots']) != 1 or value['bots'][0]['scopes'] != ['personal']:
-        raise ValueError('exactly one personal bot is required')
+    scopes = ['personal'] if profile == 'personal' else ['personal', 'groupChat', 'team']
+    if len(value['bots']) != 1:
+        raise ValueError('exactly one bot is required')
     bot = value['bots'][0]
+    if not isinstance(bot['scopes'], list) or sorted(bot['scopes']) != sorted(scopes):
+        raise ValueError('the selected profile scopes are required')
     uuid.UUID(bot['botId'])
     if set(bot) != {'botId', 'scopes', 'isNotificationOnly', 'supportsFiles', 'supportsCalling', 'supportsVideo'}:
         raise ValueError('unexpected bot settings')
@@ -64,12 +67,14 @@ class QuietArgumentParser(argparse.ArgumentParser):
 
 def main():
     parser = QuietArgumentParser(description=__doc__)
+    parser.add_argument('--profile', choices=('personal', 'shared-rooms'), default='personal',
+                        help='required manifest scopes: personal (default), or personal + groupChat + team')
     parser.add_argument('--manifest', required=True, type=Path)
     parser.add_argument('--color', required=True, type=Path)
     parser.add_argument('--outline', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
-    files = {'manifest.json': manifest_bytes(args.manifest), 'color.png': png_bytes(args.color, 192),
+    files = {'manifest.json': manifest_bytes(args.manifest, args.profile), 'color.png': png_bytes(args.color, 192),
              'outline.png': png_bytes(args.outline, 32, outline=True)}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     created_output = False

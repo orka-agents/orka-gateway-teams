@@ -136,7 +136,13 @@ gate requiring Python 3; it does not add Python to the default runtime/test path
 checks PNG headers rather than decoding/reviewing artwork, and refuses overwrite.
 Full manifest validation uses the Developer Portal or the documented optional,
 pinned JavaScript validators; no runtime dependencies are added. Keep PNG/ZIP,
-legal metadata and live configuration out of source.
+legal metadata and live configuration out of source. The default package profile
+and `manifest.template.json` remain personal-only. The explicit `--profile
+shared-rooms` option requires exactly personal/groupChat/team scopes and uses the
+separate shared-room template; it grants no RSC permissions and does not enable
+runtime support. Preserve default-profile rejection of shared-room manifests,
+byte-for-byte packaging, fixed error diagnostics, and all existing capability and
+output-ownership checks when extending the optional packaging tests.
 
 ## Setup capture boundaries
 
