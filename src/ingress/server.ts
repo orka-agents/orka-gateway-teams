@@ -6,6 +6,7 @@ import type { Token } from '@microsoft/teams.common/http';
 import type { INetworkModule } from '@azure/msal-node';
 import { prepareCertificate } from '../auth/certificate.js';
 import { prepareManagedIdentity } from '../auth/managed-identity.js';
+import { prepareWorkloadIdentity } from '../auth/workload-identity.js';
 import type { ManagedIdentityDependencies } from '../auth/managed-identity.js';
 import { assertSelectedTokenCredentials, denyBotToken } from '../auth/credentials.js';
 import type { DeliveryJournalPort } from '../delivery/types.js';
@@ -23,7 +24,8 @@ import type { AdmissionResult, IngressStore, ReplyRoute } from './types.js';
 import type { EventEnvelope } from '../protocol/types.js';
 
 export interface ReceiverDependencies { sdkCloud?: CloudEnvironment; fetchKeys?: (url: string, options: RequestInit) => Promise<Response>;
-  botToken?: Token; providerPost?: ProviderPost; certificateNetwork?: INetworkModule; managedIdentity?: ManagedIdentityDependencies }
+  botToken?: Token; providerPost?: ProviderPost; certificateNetwork?: INetworkModule; managedIdentity?: ManagedIdentityDependencies;
+  workloadIdentityNetwork?: INetworkModule }
 export interface AdmissionSink { readonly scope: IngressStore['scope'];
   admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>): AdmissionResult | Promise<AdmissionResult> }
 export interface ReceiverOutbound { journal: DeliveryJournalPort; getRoute: (key: string) => ReplyRoute | undefined | Promise<ReplyRoute | undefined> }
@@ -37,15 +39,18 @@ export function prepareReceiver(input: ReceiverConfig, dependencies: ReceiverDep
     ...(dependencies.managedIdentity === undefined ? {} : { managedIdentity: { ...dependencies.managedIdentity } }) };
   let credential: { assertUsable(): void; createToken(): TokenCredentials['token'] } | undefined;
   try {
-    if (config.credentialMode === 'certificate' || config.credentialMode === 'managed-identity-federation') {
+    if (config.credentialMode === 'certificate' || config.credentialMode === 'managed-identity-federation' || config.credentialMode === 'workload-identity') {
       if (deps.botToken !== undefined || (deps.sdkCloud !== undefined &&
           (deps.sdkCloud.botScope !== PUBLIC.botScope || deps.sdkCloud.loginEndpoint !== PUBLIC.loginEndpoint))) throw new ConfigurationError();
       if (config.credentialMode === 'certificate') {
         const certificate = prepareCertificate(config);
         credential = { assertUsable: certificate.assertUsable, createToken: () => certificate.createToken(deps.certificateNetwork) };
-      } else {
+      } else if (config.credentialMode === 'managed-identity-federation') {
         const identity = prepareManagedIdentity(config);
         credential = { assertUsable: identity.assertUsable, createToken: () => identity.createToken(deps.managedIdentity) };
+      } else {
+        const identity = prepareWorkloadIdentity(config);
+        credential = { assertUsable: identity.assertUsable, createToken: () => identity.createToken(deps.workloadIdentityNetwork) };
       }
     }
   } catch { throw new ConfigurationError(); }
@@ -73,7 +78,7 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
   credential?.assertUsable();
   const token = credential ? (outbound ? credential.createToken() : denyBotToken) : undefined;
   const app = new App({ clientId: config.appId, tenantId: config.tenantId,
-    ...(config.credentialMode === 'certificate' || config.credentialMode === 'managed-identity-federation' ? { token: token! } : { clientSecret: config.clientSecret }),
+    ...(config.credentialMode === undefined || config.credentialMode === 'client-secret' ? { clientSecret: config.clientSecret } : { token: token! }),
     httpServerAdapter: adapter, logger: safeSdkLogger, dangerouslyAllowUnauthenticatedRequests: false,
     cloud: dependencies.sdkCloud ?? PUBLIC, plugins: [], oauth: { fetchUserToken: false },
     serviceUrl: config.serviceUrls[0]!, messagingEndpoint: '/api/messages' });

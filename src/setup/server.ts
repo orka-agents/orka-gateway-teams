@@ -1,6 +1,7 @@
 import { App } from '@microsoft/teams.apps';
 import { assertCredentialSeparation, prepareCertificate } from '../auth/certificate.js';
 import { prepareManagedIdentity } from '../auth/managed-identity.js';
+import { prepareWorkloadIdentity } from '../auth/workload-identity.js';
 import { assertSelectedTokenCredentials, denyBotToken, validateBotCredential } from '../auth/credentials.js';
 import { PUBLIC } from '@microsoft/teams.api';
 import type { Activity, CloudEnvironment } from '@microsoft/teams.api';
@@ -22,7 +23,8 @@ export async function startSetupCapture(input: SetupConfig, dependencies: SetupA
   if (signal?.aborted) throw failure();
   assertCredentialSeparation(config, [config.challengeFile, config.captureFile]);
   const credential = config.credentialMode === 'certificate' ? prepareCertificate(config) :
-    config.credentialMode === 'managed-identity-federation' ? prepareManagedIdentity(config) : undefined;
+    config.credentialMode === 'managed-identity-federation' ? prepareManagedIdentity(config) :
+      config.credentialMode === 'workload-identity' ? prepareWorkloadIdentity(config) : undefined;
   const artifact = openSetupArtifact(config);
   const adapter = new NativeAdapter(createStrictAuth(config.appId, dependencies.fetchKeys));
   const deadline = performance.now() + config.timeoutMs;
@@ -60,7 +62,7 @@ export async function startSetupCapture(input: SetupConfig, dependencies: SetupA
   try {
     credential?.assertUsable();
     const app = new App({ clientId: config.appId, tenantId: config.tenantId,
-      ...(config.credentialMode === 'certificate' || config.credentialMode === 'managed-identity-federation' ? { token: denyBotToken } : { clientSecret: config.clientSecret }),
+      ...(config.credentialMode === undefined || config.credentialMode === 'client-secret' ? { clientSecret: config.clientSecret } : { token: denyBotToken }),
       httpServerAdapter: adapter, logger: safeSdkLogger, dangerouslyAllowUnauthenticatedRequests: false,
       cloud: dependencies.sdkCloud ?? PUBLIC, plugins: [], oauth: { fetchUserToken: false },
       // Unused SDK client configuration only, not a discovered route or a URL we request.

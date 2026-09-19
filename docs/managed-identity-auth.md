@@ -37,6 +37,10 @@ code or unrelated principals: access to that identity is a privileged boundary.
 A laptop can validate configuration and run acquisition-free setup, but cannot
 prove host assignment or use its CLI login for outbound sends.
 
+For a bot that directly trusts an AKS service-account projection, use the separate
+[workload-identity mode](workload-identity-auth.md). It does not chain a
+workload-federated UAMI token through this mode's existing-app exchange.
+
 A bounded live Linux ACI test exercised the bundled Node 24.2.0 credential provider
 and public SDK token decoder with the platform environment intact. It verified
 MI-to-existing-app Bot Framework token issuance and cached app-token reuse: two

@@ -33,7 +33,9 @@ transport. The [recorded ACA evaluation](live-validation.md) exercised the
 actual identity path and personal-chat round trip, not every hosting/policy variant.
 Setup is acquisition-free;
 full outbound use requires qualified hosting and an approved FIC. No App Service,
-AKS token-file, local Azure CLI or default-identity fallback is provided.
+local Azure CLI or default-identity fallback is provided. Explicit
+[AKS workload identity](workload-identity-auth.md) is a separate mode that
+exchanges a projected service-account token directly for the registered bot's token.
 
 ### Required configuration
 
@@ -51,10 +53,11 @@ still apply; Table selection is not automatic initialization or recovery.
 | `ORKA_GATEWAY_NAMESPACE`, `ORKA_GATEWAY_NAME` | Stable target Gateway |
 | `INGRESS_DB` | Absolute new/existing ingress DB path; existing private parent directory |
 | `TEAMS_CLIENT_SECRET` | Required only in default/explicit `client-secret` mode; absent in other modes |
-| `TEAMS_CREDENTIAL_MODE` | Optional `client-secret` (default), explicit `certificate`, or explicit `managed-identity-federation` |
+| `TEAMS_CREDENTIAL_MODE` | Optional `client-secret` (default), explicit `certificate`, `managed-identity-federation`, or `workload-identity` |
 | `TEAMS_CERTIFICATE_FILE`, `TEAMS_PRIVATE_KEY_FILE` | Required only in certificate mode; private matching PEM pair, absent in other modes |
 | `TEAMS_MANAGED_IDENTITY_CLIENT_ID`, `TEAMS_MANAGED_IDENTITY_PRINCIPAL_ID` | Required only in managed-identity-federation mode; explicit UAMI client and principal GUIDs, absent in other modes |
 | `TEAMS_MANAGED_IDENTITY_HOST` | Federation only: omitted/`imds` preserves VM/ACI; explicit `azure-container-apps` uses the supported local platform endpoint |
+| `AZURE_FEDERATED_TOKEN_FILE`, `TEAMS_WORKLOAD_IDENTITY_ISSUER`, `TEAMS_WORKLOAD_IDENTITY_SUBJECT` | Required only in workload-identity mode: projected token path, exact public AKS issuer, and exact service-account subject |
 | `ORKA_BEARER_TOKEN` | Required adapter-to-Orka bearer for ingress POST only |
 | `TEAMS_RECIPIENT_IDS` | Required JSON array of exact allowed bot recipient IDs |
 | `TEAMS_SERVICE_URLS` | Required JSON array of exact allowed HTTPS service base URLs |
@@ -63,7 +66,8 @@ The first five rows (including both Gateway fields) suffice for `init`. Serve
 requires all required noncredential settings and exactly one credential set:
 `TEAMS_CLIENT_SECRET` for default/explicit client-secret mode, or both PEM file
 settings with explicit `TEAMS_CREDENTIAL_MODE=certificate`, or both UAMI GUIDs with
-explicit `TEAMS_CREDENTIAL_MODE=managed-identity-federation`. Optional settings remain
+explicit `TEAMS_CREDENTIAL_MODE=managed-identity-federation`, or the three workload
+identity settings with explicit `TEAMS_CREDENTIAL_MODE=workload-identity`. Optional settings remain
 optional. Lists contain 1–100 explicit entries; no wildcards, first-request
 learning, or inferred `28:` prefix. Obtain the bot recipient IDs and public-cloud
 service URLs from trusted deployment configuration or operator-reviewed
