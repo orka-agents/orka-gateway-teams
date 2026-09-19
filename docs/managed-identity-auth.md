@@ -87,7 +87,7 @@ npm start
 
 Real serve still requires the reviewed app/tenant, routing allowlists, directional
 Orka credentials, initialized private stores and externally managed HTTPS from
-[the runtime guide](../README.md#run-durable-ingress). Never paste real credentials
+[the runtime guide](runtime-reference.md#run-durable-ingress). Never paste real credentials
 in argv, logs, chat or source. Do not substitute either UAMI ID for a Teams sender,
 recipient or conversation ID.
 

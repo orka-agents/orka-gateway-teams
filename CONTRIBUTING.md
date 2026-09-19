@@ -10,7 +10,7 @@ No live credentials, Teams registration, provider sends or cluster setup are
 needed for development/tests. Running serve requires explicit configured bot credentials
 (default client secret, an approved private certificate pair, or explicit managed-identity
 federation) and directional Orka secrets;
-see [configuration and provisioning](README.md#run-durable-ingress).
+see [configuration and provisioning](docs/runtime-reference.md#run-durable-ingress).
 
 ## Development and checks
 
@@ -319,7 +319,7 @@ Keep backend/Gateway UID/ledger stable and retention longer than the absolute
 replay window. Quarantine preserves acknowledged text for investigation; terminal
 logical removal is not secure erasure. Routes/tombstones remain indefinitely,
 capacity backpressures, and no pruning/reset/redrive or HA claim exists. See
-[operational limits](README.md#inbox-retention-and-operational-limits) before
+[operational limits](docs/runtime-reference.md#inbox-retention-and-operational-limits) before
 changing scheduling, retention, route lifecycle or startup recovery.
 
 ## Incoming fixture and event identity
@@ -405,7 +405,7 @@ export type FormatDelivery = (delivery: Readonly<DeliveryRequest>) => OutgoingTe
 ```
 
 The converter exports `convertActivity: ConvertActivity`; see the
-[converter usage example](README.md#convert-a-verified-personal-message).
+[converter usage example](docs/library-examples.md#convert-a-verified-personal-message).
 The formatter exports `formatDelivery: FormatDelivery`; use it on an
 already-validated `DeliveryRequest`:
 
@@ -580,7 +580,7 @@ npm run --silent preview:card -- oversized
 ```
 
 The last selection uses the protocol-bounded multibyte `oversizedDelivery` fixture
-to demonstrate actual shortening. Follow the [README preview steps](README.md#card-preview).
+to demonstrate actual shortening. Follow the [card preview steps](docs/library-examples.md#card-preview).
 The export omits the message envelope; JSON assertions and HTTP access to the
 designer do not establish visual rendering. Local card rendering is not live
 Teams compatibility validation.
@@ -614,7 +614,7 @@ export function initializeDeliveryJournal(path: string, scope: Readonly<JournalS
 export function openDeliveryJournal(path: string, scope: Readonly<JournalScope>): DeliveryJournal;
 ```
 
-Use [the runnable synthetic example and operational limits](README.md#local-durable-delivery-journal).
+Use [the runnable synthetic example and operational limits](docs/library-examples.md#local-durable-delivery-journal).
 Initialization exclusively provisions a new store; never use it as a fallback for
 missing/corrupt storage on startup. Normal open requires the initialized main file
 and permanent ownership sidecar. A live owner is acquired **before** main database
@@ -692,7 +692,7 @@ commit SQLite and a remote send.
 
 ## Full-runtime boundaries and tests
 
-See [full-mode configuration, API and limits](README.md#enable-the-full-requestreply-runtime).
+See [full-mode configuration, API and limits](docs/runtime-reference.md#enable-the-full-requestreply-runtime).
 Keep these ownership boundaries intact:
 
 - `startReceiver(config, sink, dependencies?, outbound?)` preserves the SDK-only
