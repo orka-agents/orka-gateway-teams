@@ -78,7 +78,7 @@ not use or initialize the other domain. Initializers need storage identity acces
 but **no bot credential, bot-token probe, directional Orka bearer or listener**.
 For ingress-only `serve`, omit delivery ID and all outbound settings; set
 `OUTBOUND_ENABLED` absent/`false`. Full mode uses `OUTBOUND_ENABLED=true` and the
-[existing HTTP configuration](../README.md#enable-the-full-requestreply-runtime),
+[existing HTTP configuration](runtime-reference.md#enable-the-full-requestreply-runtime),
 replacing `DELIVERY_DB` with `TABLE_DELIVERY_STORE_ID`.
 
 Serve refuses missing, occupied, unsupported or incompletely initialized stores.
