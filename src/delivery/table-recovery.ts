@@ -4,7 +4,7 @@ import { createTableForeignInspectorV2 } from '../storage/table/inspection.js';
 import { createTableOperatorReclaimerV2 } from '../storage/table/recovery.js';
 import { OWNED_AUDIT_BUDGET_EXHAUSTED, TableError } from '../storage/table/types.js';
 import type { BoundTable, ForeignOwnerFenceV2, ForeignInspectionBudget, ForeignInspectionOptions, StoredRecordV2, TableBinding, TableDependencies } from '../storage/table/types.js';
-import { auditV2Foreign, corrupt } from './table-codec.js';
+import { auditV2Foreign, corrupt, deliveryRecoveryDigest } from './table-codec.js';
 
 /** Compare complete native envelope identities as well as rows (not just page counts).
  * Payloads are bound by their decoded digest; ETags detect same-payload rewrites. */
@@ -12,7 +12,7 @@ function same(a: StoredRecordV2 | undefined, b: Readonly<StoredRecordV2>): void 
   if (!a || a.row !== b.row || a.etag !== b.etag || a.value.digest !== b.value.digest) corrupt();
 }
 function validator(bound: BoundTable, maxTrackingBytes: number, expected: Readonly<ForeignOwnerFenceV2>) {
-  const records: StoredRecordV2[] = []; let index = 0; let used = 0; let finished = false;
+  const records: StoredRecordV2[] = []; let index = 0; let used = 0; let validated: { state: Buffer; result: Buffer } | undefined;
   return {
     records,
     visitor: { passes: 2 as const,
@@ -29,9 +29,9 @@ function validator(bound: BoundTable, maxTrackingBytes: number, expected: Readon
         if (pass === 1 && !records.length) corrupt();
         if (pass === 2 && index !== records.length) corrupt();
       },
-      finalize(): undefined { if (index !== records.length) corrupt(); auditV2Foreign(bound, records, expected); finished = true; },
+      finalize(): undefined { if (index !== records.length) corrupt(); validated = auditV2Foreign(bound, records, expected); },
     },
-    check() { if (!finished) corrupt(); return auditV2Foreign(bound, records, expected); },
+    check() { if (!validated) corrupt(); return validated; },
   };
 }
 
@@ -58,7 +58,7 @@ export async function reclaimTableDeliveryOperatorV2(binding: TableBinding, depe
     h = digest(['orka-recovery-row-v2', h, record.row, record.value.digest]); count++;
   }
   const preData = digest(['orka-recovery-data-end-v2', h, count]);
-  const dispositionDigest = digest(['orka-delivery-recovery-v2', b, state.toString('base64'), result.toString('base64'), preData, count, 'epoch-restart']);
+  const dispositionDigest = deliveryRecoveryDigest(bound, state, result, preData, count);
   const reclaimer = createTableOperatorReclaimerV2(binding, dependencies, expected);
   let index = 0; let finished = false; let failure: unknown;
   try {
@@ -73,8 +73,8 @@ export async function reclaimTableDeliveryOperatorV2(binding: TableBinding, depe
       state, dispositionDigest, operatorAttestationDigest: attestation,
       complete(summary) {
         if (!finished || summary.dataRowCount !== count + 1) corrupt();
-        return { result, domainDispositionDigest: digest(['orka-delivery-recovery-v2', b, state.toString('base64'),
-          result.toString('base64'), summary.postDataDigest, summary.dataRowCount, 'epoch-restart']) };
+        return { result, domainDispositionDigest: deliveryRecoveryDigest(bound, state, result,
+          summary.postDataDigest, summary.dataRowCount) };
       },
     }, auditOptions);
   } catch (error) { failure = error; }

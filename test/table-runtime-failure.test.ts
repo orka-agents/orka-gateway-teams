@@ -26,6 +26,20 @@ test('missing Table inbox is diagnosed without opening a listener or exposing ba
   tables.drained(); identity.drained();
 });
 
+test('corrupt Table open retains its diagnosis even when shutdown is requested during that open', async t => {
+  const identity = await runtimeIdentity(t); const tables = await runtimeTableService(t, scope);
+  const abort = new AbortController();
+  tables.inbox.controls.hook = event => {
+    if (event.req.method === 'GET' && event.path.includes("RowKey='M'")) {
+      abort.abort(); event.res.writeHead(200, { 'content-type': 'application/json' }); event.res.end('{}');
+    } else event.reply();
+  };
+  await assert.rejects(startIngressRuntime(tableRuntimeConfig(scope), {
+    tableRequest: tables.request, storageIdentity: { request: identity.request },
+  }, abort.signal), failure('store-open-failed', 'corrupt', 'ingress'));
+  tables.drained(); identity.drained();
+});
+
 test('occupied Table inbox reports operator reclaim required without modifying either store', async t => {
   const identity = await runtimeIdentity(t); const tables = await runtimeTableService(t, scope);
   const config = tableRuntimeConfig(scope);

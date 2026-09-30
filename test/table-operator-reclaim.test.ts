@@ -200,7 +200,7 @@ test('normal owned kernel cannot forge a reserved recovery audit row', async t =
     kind: 'create', key: { type: 'control', id: 'control_recovery:11111111-1111-4111-8111-111111111111' }, payload: Buffer.from('{}'),
   }] }));
   assert.equal(result.kind, 'cancelled'); assert.equal(s.rows.has(`control_${Buffer.from('control_recovery:11111111-1111-4111-8111-111111111111').toString('base64url')}`), false);
-  // The legacy kernel may reconcile a rejected plan with an ordinary M barrier, never a recover write or audit row.
+  // The owned V2 kernel may reconcile a rejected plan with an ordinary M barrier, never a recover write or audit row.
   assert.equal(s.stats.writes, before + 1); assert.equal(s.rows.get('M')?.Operation, 'barrier');
   await zombie.close();
 });

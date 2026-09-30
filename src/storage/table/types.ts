@@ -20,12 +20,10 @@ export interface Metadata {
 export interface CleanReleaseExit {
   kind: 'clean-release'; oldOwner: string; oldEpoch: number; invocation: string; planDigest: string;
 }
-export interface OperatorRecoveryExit {
+export type OperatorRecoveryExit = {
   kind: 'operator-recovery'; oldOwner: string; oldEpoch: number; invocation: string;
   originalMDigest: string; planDigest: string; domainDispositionDigest: string; operatorAttestationDigest: string;
-  /** Present together on new audited transitions; absent on historical V2 recovery receipts. */
-  auditId?: string; auditDigest?: string;
-}
+} & ({ auditId: string; auditDigest: string } | { auditId?: never; auditDigest?: never });
 export type ExitReceipt = CleanReleaseExit | OperatorRecoveryExit;
 export interface MetadataV2 extends Omit<Metadata, 'operation' | 'release'> {
   operation: Metadata['operation'] | 'recover'; exit: ExitReceipt | undefined;

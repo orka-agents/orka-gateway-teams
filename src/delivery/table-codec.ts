@@ -115,6 +115,10 @@ export function auditV2Startup(binding: BoundTable, records: readonly StoredReco
   if (exit?.kind === 'operator-recovery') auditOperatorRecoveryCommitment(binding, records, metadata);
   return epoch;
 }
+export function deliveryRecoveryDigest(binding: BoundTable, state: Buffer, result: Buffer, dataDigest: string, count: number): string {
+  return digest(['orka-delivery-recovery-v2', binding.bytes.toString('base64'), state.toString('base64'),
+    result.toString('base64'), dataDigest, count, 'epoch-restart']);
+}
 /** Exit commits data only at the unchanged acquisition boundary, not after later
  * legitimate owner mutations. Shared by normal startup and a foreign acquire. */
 function auditOperatorRecoveryCommitment(binding: BoundTable, records: readonly StoredRecordV2[], metadata: MetadataV2): void {
@@ -132,13 +136,9 @@ function auditOperatorRecoveryCommitment(binding: BoundTable, records: readonly 
     } else { before = digest(['orka-recovery-row-v2', before, record.row, record.value.digest]); beforeCount++; }
   }
   const data = digest(['orka-recovery-data-end-v2', h, count]);
-  const expected = digest(['orka-delivery-recovery-v2', b, metadata.state.toString('base64'), metadata.result.toString('base64'), data, count, 'epoch-restart']);
-  if (expected !== exit.domainDispositionDigest) corrupt();
-  if (exit.auditId) {
-    if (!currentAudit || currentAudit.dispositionDigest !== digest(['orka-delivery-recovery-v2', b,
-        metadata.state.toString('base64'), metadata.result.toString('base64'),
-        digest(['orka-recovery-data-end-v2', before, beforeCount]), beforeCount, 'epoch-restart'])) corrupt();
-  }
+  if (deliveryRecoveryDigest(binding, metadata.state, metadata.result, data, count) !== exit.domainDispositionDigest) corrupt();
+  if (exit.auditId && (!currentAudit || currentAudit.dispositionDigest !== deliveryRecoveryDigest(binding,
+      metadata.state, metadata.result, digest(['orka-recovery-data-end-v2', before, beforeCount]), beforeCount))) corrupt();
 }
 /** Foreign-owner domain proof. The inspector supplies a complete, fenced two-pass snapshot;
  * unlike startup, M must still be occupied by the exact old owner. */

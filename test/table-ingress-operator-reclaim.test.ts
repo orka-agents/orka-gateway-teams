@@ -13,6 +13,7 @@ import { options } from './support/table-ingress-store.js';
 import { ingressBinding } from './support/table-service.js';
 import { auditBudget, inboxOwned, indexBudget, install, pair, wireData } from './support/table-ingress-audit.js';
 import { armId, attemptId, sealFixture, stateFixture } from './support/table-ingress.js';
+import { changedM2 } from './support/table-v2.js';
 
 const code = (want: string) => (e: unknown) => e instanceof TableError && e.code === want;
 const fence = (m: StoredRecordV2) => {
@@ -77,6 +78,18 @@ test('current operator Exit refuses a digest-mismatched audit row on the next ow
   const value = JSON.parse(Buffer.from(String(s.rows.get(row)!.B0), 'base64').toString());
   value.operatorAttestationDigest = 'a'.repeat(64);
   s.rows.set(row, wireData(s, 'control', key, Buffer.from(JSON.stringify(value))));
+  const next = createTableKernelV2(ingressBinding, s.dependencies); await next.acquire();
+  await assert.rejects(auditInbox(next, ingressBinding, auditBudget, indexBudget), code('unresolved'));
+  await assert.rejects(next.close(), code('unresolved')); await assert.rejects(k.close(), code('unresolved'));
+});
+
+test('operator Exit cannot drop its audit reference while the matching audit row remains', async t => {
+  const { s, k } = await inboxOwned(t); const m = await k.read('M'); assert.ok(m);
+  await reclaimTableIngress(ingressBinding, s.dependencies, fence(m), auditBudget, indexBudget, 'd'.repeat(64));
+  const owned = s.rows.get('M')!;
+  const exit = JSON.parse(Buffer.from(String(owned.Exit), 'base64').toString());
+  delete exit.auditId; delete exit.auditDigest;
+  s.rows.set('M', changedM2(owned, { Exit: Buffer.from(JSON.stringify(exit)).toString('base64') }, 984));
   const next = createTableKernelV2(ingressBinding, s.dependencies); await next.acquire();
   await assert.rejects(auditInbox(next, ingressBinding, auditBudget, indexBudget), code('unresolved'));
   await assert.rejects(next.close(), code('unresolved')); await assert.rejects(k.close(), code('unresolved'));

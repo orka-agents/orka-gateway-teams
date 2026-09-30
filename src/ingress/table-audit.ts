@@ -98,6 +98,8 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
           const audit = decodeRecoveryAudit(d.payload);
           if (recoveryAuditId(audit.invocation) !== d.id || audit.oldEpoch > header.metadata.epoch) throw new TableError('corrupt');
           const x = header.metadata.exit;
+          if (x?.kind === 'operator-recovery' && x.invocation === audit.invocation && x.oldEpoch === audit.oldEpoch &&
+              (!x.auditId || !x.auditDigest)) throw new TableError('corrupt');
           if (x?.kind === 'operator-recovery' && x.auditId === audit.invocation) {
             if (x.invocation !== audit.invocation || x.auditDigest !== d.digest ||
                 x.oldOwner !== audit.oldOwner || x.oldEpoch !== audit.oldEpoch ||

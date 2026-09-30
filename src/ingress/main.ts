@@ -133,10 +133,13 @@ export async function startIngressRuntime(config: RuntimeServeConfig, dependenci
     if (outbound) { phase = 'outbound-listener'; api = await startOutboundServer(outbound, receiver.outbound!, journalScope, () => ready); }
     phase = 'startup'; assertStarting(); ready = true;
   } catch (error) {
-    const failure = signal?.aborted ? new StartupFailure('startup-failed', 'cancelled') :
-      phase === 'ingress-store' || phase === 'delivery-store' ? openFailure(error, phase === 'ingress-store' ? 'ingress' : 'delivery', table !== undefined) :
-      phase === 'ingress-listener' || phase === 'outbound-listener' ? new StartupFailure('listener-failed', phase === 'ingress-listener' ? 'ingress' : 'outbound') :
-      new StartupFailure('startup-failed', 'unavailable');
+    const storeFailure = phase === 'ingress-store' || phase === 'delivery-store' ?
+      openFailure(error, phase === 'ingress-store' ? 'ingress' : 'delivery', table !== undefined) : undefined;
+    const failure = storeFailure && ['corrupt', 'unresolved', 'incomplete'].includes(storeFailure.reason) ? storeFailure :
+      signal?.aborted ? new StartupFailure('startup-failed', 'cancelled') : storeFailure ??
+      (phase === 'ingress-listener' || phase === 'outbound-listener' ?
+        new StartupFailure('listener-failed', phase === 'ingress-listener' ? 'ingress' : 'outbound') :
+        new StartupFailure('startup-failed', 'unavailable'));
     ready = false; abort.abort();
     // Late open/initialize work reaches here only after it actually completes.
     const listeners = await Promise.allSettled([api?.stop(), receiver?.stop()]);
@@ -279,7 +282,7 @@ async function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
       const config = parseTableRecoveryConfig(env, args[0] === 'recover-ingress' ? 'ingress' : 'delivery');
       process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
       await reclaimTableStore(config, {}, abort.signal);
-      logIngress('reclaimed'); return 0;
+      logIngress('reclaimed', undefined, config.target.kind); return 0;
     }
     if (args[0] === 'init' || args[0] === 'init-delivery') {
       const config = parseRuntimeConfig(env, args[0]);
