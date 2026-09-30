@@ -11,6 +11,14 @@ function m(): Metadata {
     invocation: String(wire.Invocation), operation: 'initialize', plan: String(wire.Plan), state: Buffer.alloc(0), result: Buffer.alloc(0), release: Buffer.alloc(0), digest: String(wire.Digest) };
 }
 function safe(e: unknown): boolean { return e instanceof Error && /^Table storage: [a-z-]+$/u.test(e.message) && !('cause' in e) && !('request' in e) && !('response' in e); }
+test('ordinary Table clients do not expose the operator recovery writer', async t => {
+  const s = await tableService(t);
+  const client = new OwnedTableClient(bindTable(tableBinding), s.dependencies);
+  assert.equal('writeRecover' in client, false);
+  assert.equal('transaction' in client, false, 'internal transaction cannot bypass recovery validation at runtime');
+  await client.close();
+});
+
 test('owned public SDK creates, raw reads and exact-replaces real native multipart bytes', async t => {
   const s = await tableService(t); const client = new OwnedTableClient(bindTable(tableBinding), s.dependencies);
   await client.write(m(), undefined, [], context());

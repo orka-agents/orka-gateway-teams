@@ -121,8 +121,10 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
       }
     });
   }
-  /** Restricted V2-only transaction; not available from the normal kernel write path. */
-  writeRecover(original: StoredRecordV2, m: MetadataV2, audit: DataRecord, seal: DataAction | undefined, context: WorkContext): Promise<void> {
+  write(m: MetadataFor<F>, originalETag: string | undefined, actions: readonly DataAction[], context: WorkContext): Promise<void> {
+    return this.#transaction(m, originalETag, actions, context, false);
+  }
+  protected checkedRecoveryWrite(original: StoredRecordV2, m: MetadataV2, audit: DataRecord, seal: DataAction | undefined, context: WorkContext): Promise<void> {
     try {
       const entry = decodeRecoveryAudit(audit.payload);
       if (this.format !== 2 || original.row !== 'M' || original.value.kind !== 'metadata' || !original.value.owner ||
@@ -139,14 +141,11 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
           entry.originalMDigest !== m.exit.originalMDigest || entry.operatorAttestationDigest !== m.exit.operatorAttestationDigest) fail();
       if (seal && (this.binding.kind !== 'ingress' || seal.kind !== 'create' || seal.key.type !== 'control' ||
         !/^generation:[1-9][0-9]*$/u.test(seal.key.id))) fail();
-      return this.transaction(m as MetadataFor<F>, original.etag,
+      return this.#transaction(m as MetadataFor<F>, original.etag,
         [{ kind: 'create', key: { type: audit.type, id: audit.id }, payload: audit.payload }, ...(seal ? [seal] : [])], context, true);
     } catch { return Promise.reject(new TableError('invalid-input')); }
   }
-  write(m: MetadataFor<F>, originalETag: string | undefined, actions: readonly DataAction[], context: WorkContext): Promise<void> {
-    return this.transaction(m, originalETag, actions, context, false);
-  }
-  private transaction(m: MetadataFor<F>, originalETag: string | undefined, actions: readonly DataAction[], context: WorkContext, recover: boolean): Promise<void> {
+  #transaction(m: MetadataFor<F>, originalETag: string | undefined, actions: readonly DataAction[], context: WorkContext, recover: boolean): Promise<void> {
     // Inputs here are kernel-owned; copy actions and validate their closed shapes before any SDK/auth work.
     let transaction: TransactionAction[];
     try {
@@ -304,6 +303,16 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
     });
   }
 }
+
+/** Internal recovery-only transport; ordinary owned clients cannot issue recovery writes. */
+export class RecoveryTableClient extends OwnedTableClient<2> {
+  constructor(binding: BoundTable, dependencies: TableDependencies) { super(binding, dependencies, 2); }
+
+  writeRecover(original: StoredRecordV2, m: MetadataV2, audit: DataRecord, seal: DataAction | undefined, context: WorkContext): Promise<void> {
+    return this.checkedRecoveryWrite(original, m, audit, seal, context);
+  }
+}
+
 function header(value: string | string[] | undefined): string | undefined { if (Array.isArray(value)) throw new TableError('corrupt'); return value; }
 function continuation(value: string | string[] | undefined): string | undefined {
   const text = header(value);

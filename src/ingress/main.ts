@@ -13,6 +13,7 @@ import { createTableIngressStore } from './table-store.js';
 import { reclaimTableIngress } from './table-recovery.js';
 import { reclaimTableDeliveryOperatorV2 } from '../delivery/table-recovery.js';
 import { createTableKernelV2 } from '../storage/table/owner.js';
+import { TableRecoveryUncertainError } from '../storage/table/recovery.js';
 import { hex, integer, uuid } from '../storage/table/codec.js';
 import type { ForeignOwnerFenceV2, TableBinding } from '../storage/table/types.js';
 import { createTableDeliveryJournalV2, TableDeliveryStartupFailure } from '../delivery/table-journal.js';
@@ -243,8 +244,9 @@ export async function reclaimTableStore(config: TableRecoveryConfig,
       selected.maxIndexBytes, attestation, signal ? { signal } : undefined);
     else await reclaimTableDeliveryOperatorV2(binding, native, fence, config.audit, attestation, signal ? { signal } : undefined);
   } catch (error) {
-    failure = error instanceof RecoveryFailure ? error : new RecoveryFailure(error instanceof TableError && error.code === 'unresolved' ?
-      'outcome-uncertain' : error instanceof TableError && error.code === 'busy' ? 'already-unowned' : 'audit-or-storage-failed');
+    failure = error instanceof RecoveryFailure ? error : new RecoveryFailure(error instanceof TableRecoveryUncertainError ?
+      'outcome-uncertain' : signal?.aborted ? 'cancelled' : error instanceof TableError && error.code === 'busy' ?
+        'already-unowned' : 'audit-or-storage-failed');
   }
   const drained = await Promise.allSettled([reader.close(), provider.close()]);
   if (drained.some(result => result.status === 'rejected')) throw new RecoveryFailure('outcome-uncertain');

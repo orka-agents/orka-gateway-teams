@@ -49,7 +49,11 @@ The budget values have **no default full-history profile**. An accepted numeric
 configuration may still be too small to open retained history. For example,
 tracking has an initial 80,926-byte reservation before growth. Separate M point
 bodies, native buffers and SDK work are not included in collection body bytes;
-index/tracking budgets are not heap/RSS measurements. See the exact
+index/tracking budgets are not heap/RSS measurements. `recover-ingress` retains
+bounded disposition data while rebuilding an independent proof, so it reserves
+60 KiB from the second index budget; even an empty inbox needs at least
+4,255,744 `TABLE_MAX_INDEX_BYTES` to recover. A smaller budget fails closed
+without writing. See the exact
 [audit meanings](table-storage.md#explicit-owned-streaming-audit) and
 [inbox index accounting](table-inbox.md). Delivery keeps its existing complete
 `scan()` limits (10,000 pages / 64 MiB by default and its existing caller deadline);

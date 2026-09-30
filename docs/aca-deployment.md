@@ -580,11 +580,12 @@ are operator setup steps, not commands this repository executes. See Microsoft's
 [Container Apps logging options](https://learn.microsoft.com/en-us/azure/container-apps/log-options)
 and [Log Analytics retention settings](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure).
 
-`store-owned-requires-operator-recovery: occupied` identifies a blocked V2
-partition, **not** proof its former owner is dead or that a lease will expire.
-`store-open-failed: missing/corrupt/unavailable` and `listener-failed` require
-separate diagnosis. `startup-cleanup-failed` says a failed close did not prove
-release. Preserve the first log and confirm account, table, scope, store IDs and
+`store-owned-requires-operator-recovery (ingress): occupied` (or `(delivery)`)
+identifies a blocked V2 partition, **not** proof its former owner is dead or
+that a lease will expire. `store-open-failed (ingress): missing` (or a delivery
+store with `corrupt`/`unavailable`) and `listener-failed: ingress` (or
+`listener-failed: outbound`) require separate diagnosis.
+`startup-cleanup-failed` says a failed close did not prove release. Preserve the first log and confirm account, table, scope, store IDs and
 init history; do not rotate identities or initialize over an occupied row.
 
 For an approved reclaim, stop intake and prevent both the old revision and any

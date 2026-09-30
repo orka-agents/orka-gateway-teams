@@ -6,6 +6,7 @@ import { TableError } from '../storage/table/types.js';
 import type { DataAction, ForeignInspectionBudget, ForeignInspectionOptions, ForeignOwnerFenceV2, TableBinding, TableDependencies } from '../storage/table/types.js';
 import { validateScope } from './codec.js';
 import { createInboxAuditProjection } from './table-audit.js';
+import type { InboxAuditHeader } from './table-audit.js';
 import { encodeSeal, encodeState } from './table-codec.js';
 import { InboxIndex } from './table-index.js';
 import { encodeResult, stateDigest, validateResult } from './table-result.js';
@@ -48,7 +49,8 @@ export async function reclaimTableIngress(binding: TableBinding, dependencies: T
   try {
     await inspector.inspect(initial.visitor, limits, safeOptions);
     initial.releaseScratch();
-    const header = initial.result().header;
+    let header: Readonly<InboxAuditHeader> | undefined = initial.result().header;
+    const firstTimestamp = header.version.timestamp;
     const proof = initial.proof();
     const old = header.state;
     const arm = old.handoffClockArm;
@@ -72,7 +74,11 @@ export async function reclaimTableIngress(binding: TableBinding, dependencies: T
     const attestation = operatorAttestationDigest;
     // Do not retain the first foreign transport after its complete drain.
     await inspector.close();
-    const second = new InboxIndex(maxIndexBytes);
+    // The first graph is no longer needed. Reserve its bounded metadata-derived
+    // values from the second index budget while the disposition remains live.
+    header = undefined;
+    initial.dispose();
+    const second = new InboxIndex(maxIndexBytes - 60 * 1024);
     const check = createInboxAuditProjection(snapshot, second);
     let transport: ReturnType<typeof createTableOperatorReclaimerV2>;
     try { transport = createTableOperatorReclaimerV2(snapshot, dependencies, fence); }
@@ -85,9 +91,8 @@ export async function reclaimTableIngress(binding: TableBinding, dependencies: T
         finalize(): undefined {
           visitor.finalize();
           const h = check.result().header; const again = check.proof();
-          if (h.version.digest !== header.version.digest || h.version.etag !== header.version.etag ||
-              h.version.timestamp !== header.version.timestamp || again.versions !== proof.versions || again.count !== proof.count ||
-              !h.metadata.state.equals(header.metadata.state) || !h.metadata.result.equals(header.metadata.result)) throw new TableError('corrupt');
+          if (h.version.digest !== fence.mDigest || h.version.etag !== fence.etag ||
+              h.version.timestamp !== firstTimestamp || again.versions !== proof.versions || again.count !== proof.count) throw new TableError('corrupt');
         },
       }, limits, {
         state, dispositionDigest, operatorAttestationDigest: attestation, ...(seal ? { seal } : {}),
@@ -99,14 +104,14 @@ export async function reclaimTableIngress(binding: TableBinding, dependencies: T
             dataRowCount: summary.dataRowCount });
           const domainDispositionDigest = digest(['orka-inbox-recovery-v2', bound.bytes.toString('base64'), result.toString('base64')]);
           validateResult({ binding: bound,
-            metadata: { ...header.metadata, epoch: fence.epoch, owner: '', operation: 'recover', state, result,
+            metadata: { ...check.result().header.metadata, epoch: fence.epoch, owner: '', operation: 'recover', state, result,
               exit: { kind: 'operator-recovery', oldOwner: fence.owner, oldEpoch: fence.epoch,
                 invocation: summary.auditId, originalMDigest: fence.mDigest, planDigest: fence.mDigest,
                 domainDispositionDigest, operatorAttestationDigest: attestation, auditId: summary.auditId, auditDigest: summary.auditDigest } },
             state: post,
-            graph: { eventByOrder: n => first.eventByOrder(n), eventById: id => first.eventById(id),
-              eventByTarget: id => first.eventByTarget(id),
-              sealByGeneration: n => sealPayload?.generation === n ? sealPayload : first.sealByGeneration(n) },
+            graph: { eventByOrder: n => second.eventByOrder(n), eventById: id => second.eventById(id),
+              eventByTarget: id => second.eventByTarget(id),
+              sealByGeneration: n => sealPayload?.generation === n ? sealPayload : second.sealByGeneration(n) },
             postDataDigest: summary.postDataDigest, dataRowCount: summary.dataRowCount });
           return { result, domainDispositionDigest };
         },

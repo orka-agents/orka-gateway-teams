@@ -6,6 +6,7 @@ import { createTableDeliveryJournalV2 } from '../src/delivery/table-journal.js';
 import { scope } from './support/ingress-auth.js';
 import { runtimeIdentity, runtimeTableService, storageClientId } from './support/table-runtime.js';
 import { syntheticToken } from './support/table-service.js';
+import { changedM2 } from './support/table-v2.js';
 
 function recovery(owner: string, epoch: number) {
   return parseTableRecoveryConfig({ GATEWAY_STORAGE_BACKEND: 'table-v2', TABLE_ACCOUNT: 'Example123', TABLE_NAME: 'Journal',
@@ -21,6 +22,49 @@ test('pre-aborted operator command reports cancellation without opening storage'
   const abort = new AbortController(); abort.abort();
   await assert.rejects(reclaimTableStore(recovery('22222222-2222-4222-8222-222222222222', 1), {}, abort.signal),
     { message: 'operator-recovery-failed: cancelled' });
+});
+
+test('fence drift during foreign inspection reports an audit failure, not an uncertain submission', async t => {
+  const identity = await runtimeIdentity(t); const tables = await runtimeTableService(t, scope);
+  const binding = { kind: 'delivery' as const, account: 'example123', table: 'journal', storeId: 'stable',
+    scope: { appId: scope.appId, tenantId: scope.tenantId } };
+  const deps = { tableRequest: tables.request, storageIdentity: { request: identity.request } };
+  await initializeTableStore(recovery('22222222-2222-4222-8222-222222222222', 1).target, deps);
+  const previous = createTableDeliveryJournalV2(binding, { token: async () => syntheticToken, request: tables.request });
+  await previous.open();
+  const current = tables.delivery.rows.get('M')!; const writes = tables.delivery.stats.writes;
+  let changed = false;
+  tables.delivery.controls.hook = event => {
+    if (!changed && event.req.method === 'GET' && event.path.includes("RowKey='M'")) {
+      changed = true; event.reply(); tables.delivery.rows.set('M', changedM2(current, {}, 999));
+    } else event.reply();
+  };
+  await assert.rejects(reclaimTableStore(recovery(String(current.Owner), Number(current.Epoch)), deps),
+    { message: 'operator-recovery-failed: audit-or-storage-failed' });
+  assert.equal(changed, true); assert.equal(tables.delivery.stats.writes, writes);
+  assert.equal([...tables.delivery.rows.keys()].filter(key => key.startsWith('control_')).length, 0);
+  delete tables.delivery.controls.hook; await assert.rejects(previous.close()); tables.drained(); identity.drained();
+});
+
+test('operator abort during foreign inspection reports cancellation without a write', async t => {
+  const identity = await runtimeIdentity(t); const tables = await runtimeTableService(t, scope);
+  const binding = { kind: 'delivery' as const, account: 'example123', table: 'journal', storeId: 'stable',
+    scope: { appId: scope.appId, tenantId: scope.tenantId } };
+  const deps = { tableRequest: tables.request, storageIdentity: { request: identity.request } };
+  await initializeTableStore(recovery('22222222-2222-4222-8222-222222222222', 1).target, deps);
+  const previous = createTableDeliveryJournalV2(binding, { token: async () => syntheticToken, request: tables.request });
+  await previous.open();
+  const m = tables.delivery.rows.get('M')!; const abort = new AbortController(); const writes = tables.delivery.stats.writes;
+  let requested = false;
+  tables.delivery.controls.hook = event => {
+    if (!requested && event.req.method === 'GET' && event.path.includes("RowKey='M'")) {
+      requested = true; event.reply(); abort.abort();
+    } else event.reply();
+  };
+  await assert.rejects(reclaimTableStore(recovery(String(m.Owner), Number(m.Epoch)), deps, abort.signal),
+    { message: 'operator-recovery-failed: cancelled' });
+  assert.equal(requested, true); assert.equal(tables.delivery.stats.writes, writes);
+  delete tables.delivery.controls.hook; await previous.close(); tables.drained(); identity.drained();
 });
 
 test('reclaim refuses a wrong owner or epoch, then atomically releases the exact owner with a durable audit row', async t => {

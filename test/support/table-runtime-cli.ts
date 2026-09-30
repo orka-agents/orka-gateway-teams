@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { FixtureHooks } from './ingress-https.js';
 import type { EventEnvelope } from '../../src/protocol/types.js';
+import { createTableKernelV2 } from '../../src/storage/table/index.js';
 import { activity, authFixture, post, recipientId, scope, serviceUrl } from './ingress-auth.js';
 import { httpsFixture } from './ingress-https.js';
 import { runtimeIdentity, runtimeTableService, storageClientId } from './table-runtime.js';
@@ -282,6 +283,30 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
     const before = JSON.stringify([[...tables.inbox.rows], [...tables.delivery.rows]]);
     await finished(launch(mode, common), 1, 'startup-failed');
     assert.equal(JSON.stringify([[...tables.inbox.rows], [...tables.delivery.rows]]) === before, true, 'existing data not adopted/reset');
+  }
+  assert.equal(identity.calls.bot, 0); assert.equal(effects.entra, 0);
+  for (const kind of ['ingress', 'delivery'] as const) {
+    const rows = kind === 'ingress' ? tables.inbox.rows : tables.delivery.rows;
+    const binding = kind === 'ingress' ? { kind, account: common.TABLE_ACCOUNT, table: common.TABLE_NAME,
+      storeId: common.TABLE_INGRESS_STORE_ID, scope } : { kind, account: common.TABLE_ACCOUNT, table: common.TABLE_NAME,
+      storeId: common.TABLE_DELIVERY_STORE_ID, scope: { appId: scope.appId, tenantId: scope.tenantId } };
+    const previous = createTableKernelV2(binding, { token: async () => syntheticToken, request: tables.request });
+    await previous.acquire();
+    const before = rows.get('M')!;
+    assert.notEqual(before.Owner, '', 'public owner handle acquired the initialized store');
+    const auditCount = [...rows.keys()].filter(key => key.startsWith('control_')).length;
+    await finished(launch(`recover-${kind}`, { ...recoveryEnv,
+      TABLE_RECOVERY_EXPECTED_OWNER: String(before.Owner), TABLE_RECOVERY_EXPECTED_EPOCH: String(before.Epoch) }), 0, `reclaimed (${kind})`);
+    const recovered = rows.get('M')!;
+    const exit = JSON.parse(Buffer.from(String(recovered.Exit), 'base64').toString());
+    assert.equal(recovered.Owner, ''); assert.equal(recovered.Operation, 'recover');
+    assert.equal(recovered.Epoch, before.Epoch); assert.equal(exit.kind, 'operator-recovery');
+    assert.equal(exit.oldOwner, before.Owner); assert.equal(exit.originalMDigest, before.Digest);
+    assert.equal(exit.operatorAttestationDigest, recoveryEnv.TABLE_RECOVERY_ATTESTATION_DIGEST);
+    const audit = rows.get(`control_${Buffer.from(`control_recovery:${exit.auditId}`).toString('base64url')}`)!;
+    assert.ok(audit); assert.equal(exit.auditDigest, audit.Digest);
+    assert.equal([...rows.keys()].filter(key => key.startsWith('control_')).length, auditCount + 1);
+    await assert.rejects(previous.close(), 'superseded owner cannot release the recovered store');
   }
   assert.equal(identity.calls.bot, 0); assert.equal(effects.entra, 0);
   // Strict verification accepts the real signature, but the default SDK fetches

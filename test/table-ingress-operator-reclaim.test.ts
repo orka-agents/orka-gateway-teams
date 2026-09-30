@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { auditInbox } from '../src/ingress/table-audit.js';
+import { InboxIndex } from '../src/ingress/table-index.js';
 import { digest, encode } from '../src/ingress/codec.js';
 import { createTableIngressStore } from '../src/ingress/table-store.js';
 import { encodeState } from '../src/ingress/table-codec.js';
@@ -21,6 +22,33 @@ const fence = (m: StoredRecordV2) => {
   return { initId: m.value.initId, initDigest: m.value.initDigest, owner: m.value.owner,
     epoch: m.value.epoch, mDigest: m.value.digest, etag: m.etag };
 };
+
+test('reclaim releases the first inbox index before building the second proof', async t => {
+  const { s, k } = await inboxOwned(t); const m = await k.read('M'); assert.ok(m);
+  const dispose = InboxIndex.prototype.dispose; let disposed = 0; let inspectedSecond = false;
+  InboxIndex.prototype.dispose = function () { disposed++; dispose.call(this); };
+  t.after(() => { InboxIndex.prototype.dispose = dispose; });
+  let pages = 0;
+  s.controls.hook = event => {
+    if (event.req.method === 'GET' && !event.path.includes("RowKey='")) {
+      pages++;
+      if (pages === 3) { inspectedSecond = true; assert.ok(disposed > 0, 'first index released before the second inspection'); }
+    }
+    event.reply();
+  };
+  await reclaimTableIngress(ingressBinding, s.dependencies, fence(m), auditBudget, indexBudget, 'd'.repeat(64));
+  assert.equal(inspectedSecond, true); delete s.controls.hook;
+  await assert.rejects(k.close(), code('unresolved'));
+});
+
+test('inbox recovery refuses a budget too small to retain the disposition across proofs', async t => {
+  const { s, k } = await inboxOwned(t); const m = await k.read('M'); assert.ok(m);
+  const writes = s.stats.writes;
+  await assert.rejects(reclaimTableIngress(ingressBinding, s.dependencies, fence(m), auditBudget,
+    4 * 1024 * 1024, 'd'.repeat(64)), code('incomplete'));
+  assert.equal(s.stats.writes, writes); assert.equal([...s.rows.keys()].filter(row => row.startsWith('control_')).length, 0);
+  await k.close();
+});
 
 test('foreign unarmed inbox recovery retains rows, adds data-free audit, and next ordinary open can audit', async t => {
   const { s, k } = await inboxOwned(t); const entry = pair();

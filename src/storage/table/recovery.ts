@@ -1,18 +1,23 @@
 import { randomUUID } from 'node:crypto';
 import { types } from 'node:util';
 import { auditConfig, auditFields, containCallbackPromise } from './audit.js';
-import { OwnedTableClient } from './client.js';
+import { RecoveryTableClient } from './client.js';
 import { bindTable, bytes, data, dataRow, digest, etag, fail, hex, initializationDigestV2, integer, metadataV2, recoveryAuditId, encodeRecoveryAudit, uuid } from './codec.js';
 import { createTableForeignInspectorV2 } from './inspection.js';
 import { MAX_STATE_BYTES, TableError } from './types.js';
 import type { DataAction, ForeignInspectionBudget, ForeignInspectionOptions, ForeignInspectionVisitorV2, ForeignOwnerFenceV2,
   OperatorReclaimDispositionV2, StoredRecordV2, TableBinding, TableDependencies } from './types.js';
 
+/** A submitted recovery without conclusive readback remains uncertain. */
+export class TableRecoveryUncertainError extends TableError {
+  constructor() { super('unresolved'); }
+}
+
 /** A one-use storage transport, not a domain recovery validator or termination proof.
  * The caller MUST supply a trusted complete domain-aware two-pass visitor, independently validated
  * disposition and attestation digest. Do not pass user JSON directly as either argument. */
 export function createTableOperatorReclaimerV2(binding: TableBinding, dependencies: TableDependencies, expected: Readonly<ForeignOwnerFenceV2>) {
-  let bound; let fence: ForeignOwnerFenceV2; let client: OwnedTableClient<2>; let inspector: ReturnType<typeof createTableForeignInspectorV2>;
+  let bound; let fence: ForeignOwnerFenceV2; let client: RecoveryTableClient; let inspector: ReturnType<typeof createTableForeignInspectorV2>;
   try {
     const b = auditFields(binding, ['account', 'table', 'storeId', 'kind', 'scope']);
     b.scope = auditFields(b.scope, b.kind === 'ingress' ? ['appId', 'tenantId', 'orkaBaseUrl', 'gatewayNamespace', 'gatewayName'] : ['appId', 'tenantId']);
@@ -22,7 +27,7 @@ export function createTableOperatorReclaimerV2(binding: TableBinding, dependenci
     fence = { initId: uuid(f.initId), initDigest: hex(f.initDigest), owner: uuid(f.owner),
       epoch: integer(f.epoch, 1, Number.MAX_SAFE_INTEGER), mDigest: hex(f.mDigest), etag: etag(f.etag) };
     if (fence.initDigest !== initializationDigestV2(bound, fence.initId) || fence.epoch === Number.MAX_SAFE_INTEGER) fail();
-    client = new OwnedTableClient(bound, dependencies, 2);
+    client = new RecoveryTableClient(bound, dependencies);
     inspector = createTableForeignInspectorV2(b as TableBinding, dependencies, fence);
   } catch { throw new TableError('invalid-input'); }
   let consumed = false; let closing: Promise<void> | undefined; let active: Promise<void> | undefined;
@@ -41,7 +46,7 @@ export function createTableOperatorReclaimerV2(binding: TableBinding, dependenci
       if (consumed) return Promise.reject(new TableError('not-submitted'));
       consumed = true;
       active = (async () => {
-        let prior: StoredRecordV2 | undefined;
+        let prior: StoredRecordV2 | undefined; let writeAttempted = false;
         try {
           const d = auditFields(disposition, ['state', 'dispositionDigest', 'operatorAttestationDigest', 'seal', 'complete']);
           if (Object.keys(d).length < 4 || typeof d.complete !== 'function' || (d.seal !== undefined && bound.kind !== 'ingress')) fail();
@@ -105,6 +110,7 @@ export function createTableOperatorReclaimerV2(binding: TableBinding, dependenci
             exit: { kind: 'operator-recovery', oldOwner: fence.owner, oldEpoch: fence.epoch, invocation, originalMDigest: fence.mDigest,
               planDigest: plan, domainDispositionDigest, operatorAttestationDigest, auditId: invocation, auditDigest: audit.digest } });
           if (closing || context.signal.aborted || performance.now() >= context.deadline) throw new TableError('incomplete');
+          writeAttempted = true;
           try { await client.writeRecover(prior, next, audit, seal, context); } catch { /* ACK is never commit authority. */ }
           // Reconcile on an independent bounded context, after the native write has actually drained.
           const cleanup = { signal: new AbortController().signal, deadline: performance.now() + 30000 };
@@ -113,7 +119,10 @@ export function createTableOperatorReclaimerV2(binding: TableBinding, dependenci
           if (observedM?.value.kind !== 'metadata' || observedM.value.digest !== next.digest || observedM.value.operation !== 'recover' ||
               observedM.value.owner !== '' || observedM.value.epoch !== fence.epoch || observedAudit?.value.kind !== 'data' ||
               observedAudit.value.digest !== audit.digest || !observedAudit.value.payload.equals(audit.payload)) throw new TableError('unresolved');
-        } catch (error) { throw error instanceof TableError ? error : new TableError('invalid-input'); }
+        } catch (error) {
+          if (writeAttempted && error instanceof TableError && error.code === 'unresolved') throw new TableRecoveryUncertainError();
+          throw error instanceof TableError ? error : new TableError('invalid-input');
+        }
       })();
       return active;
     },
