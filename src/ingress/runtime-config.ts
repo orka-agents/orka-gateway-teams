@@ -3,7 +3,7 @@ import { ConfigurationError, parseScopeConfig, parseServeSettings, parseSqliteCo
   validateOutboundServerConfig, validateReceiverConfig } from './config.js';
 import { validatePolicy, validateScope } from './codec.js';
 import { auditConfig, auditFields } from '../storage/table/audit.js';
-import { bindTable, integer } from '../storage/table/codec.js';
+import { bindTable, hex, integer, uuid } from '../storage/table/codec.js';
 import type { InitConfig, ServeConfig } from './config.js';
 import type { StorageIdentityConfig } from '../auth/storage-identity.js';
 import type { OwnedAuditBudget } from '../storage/table/types.js';
@@ -20,10 +20,30 @@ export interface TableServeConfig extends Omit<ServeConfig, 'dbPath' | 'outbound
   outbound?: OutboundServerConfig;
 }
 export type RuntimeServeConfig = ServeConfig | TableServeConfig;
+export interface TableRecoveryConfig {
+  target: TableInitConfig; expectedOwner: string; expectedEpoch: number; attestationDigest: string; audit: OwnedAuditBudget;
+}
+const recoveryKeys = ['TABLE_RECOVERY_EXPECTED_OWNER', 'TABLE_RECOVERY_EXPECTED_EPOCH', 'TABLE_RECOVERY_ATTESTATION_DIGEST'] as const;
+export function parseTableRecoveryConfig(env: NodeJS.ProcessEnv, kind: 'ingress' | 'delivery'): TableRecoveryConfig {
+  try {
+    if (env.GATEWAY_STORAGE_BACKEND !== 'table-v2') throw new ConfigurationError();
+    const expectedOwner = uuid(env.TABLE_RECOVERY_EXPECTED_OWNER);
+    const expectedEpoch = requiredNumber(env.TABLE_RECOVERY_EXPECTED_EPOCH);
+    const attestationDigest = hex(env.TABLE_RECOVERY_ATTESTATION_DIGEST);
+    const clean = { ...env }; for (const key of recoveryKeys) delete clean[key];
+    const target = parseRuntimeConfig(clean, kind === 'ingress' ? 'init' : 'init-delivery');
+    if (!('storage' in target)) throw new ConfigurationError();
+    const audit = budgets({ audit: { maxPages: requiredNumber(env.TABLE_AUDIT_MAX_PAGES),
+      maxPageBytes: requiredNumber(env.TABLE_AUDIT_MAX_BYTES), maxDurationMs: requiredNumber(env.TABLE_AUDIT_MAX_DURATION_MS),
+      maxTrackingBytes: requiredNumber(env.TABLE_AUDIT_MAX_TRACKING_BYTES) }, maxIndexBytes: requiredNumber(env.TABLE_MAX_INDEX_BYTES) }).audit;
+    return Object.freeze({ target, expectedOwner, expectedEpoch, attestationDigest, audit });
+  } catch { throw new ConfigurationError(); }
+}
 export function parseRuntimeConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'init-delivery'): InitConfig | TableInitConfig;
 export function parseRuntimeConfig(env: NodeJS.ProcessEnv, mode: 'serve'): RuntimeServeConfig;
 export function parseRuntimeConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'init-delivery' | 'serve'): InitConfig | TableInitConfig | RuntimeServeConfig {
   try {
+    if (recoveryKeys.some(key => env[key] !== undefined)) throw new ConfigurationError();
     if (parseStorageBackend(env) === 'sqlite') return parseSqliteConfig(env, mode);
     const scope = parseScopeConfig(env);
     const storage = { backend: 'table-v2' as const, account: env.TABLE_ACCOUNT!, table: env.TABLE_NAME!,

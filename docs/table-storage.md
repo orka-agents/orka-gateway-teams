@@ -8,8 +8,9 @@ body-free two-pass domain audit and durable handoff arm. The compiled CLI ships
 [explicit Table V2 runtime selection](table-runtime.md) and purpose-specific
 storage identity; SQLite remains the default. This page describes the underlying
 library APIs (including the library-only foreign-owner inspector), not provisioning
-or hosting instructions. There is no Azure provisioning, recovery command, lease,
-takeover, migration, deletion or pruning.
+or hosting instructions. There is no Azure provisioning, lease, automatic
+takeover, migration, deletion or pruning. An explicit audited V2 operator
+reclaim command is described in [Table runtime](table-runtime.md#manual-owner-reclaim).
 
 ## Library contract
 
@@ -130,7 +131,9 @@ it is one of these closed shapes (shown in exact wire property order):
 
 - `{kind: 'clean-release', oldOwner, oldEpoch, invocation, planDigest}`
 - `{kind: 'operator-recovery', oldOwner, oldEpoch, invocation, originalMDigest,
-  planDigest, domainDispositionDigest, operatorAttestationDigest}`
+  planDigest, domainDispositionDigest, operatorAttestationDigest, auditId, auditDigest}`
+  for command-issued reclaims. Historical V2 recovery receipts omit the last two
+  fields; a new command always supplies both or neither is accepted.
 
 Exit encoding is canonical UTF-8 JSON in canonical Binary, at most 1,024 decoded
 bytes. UUIDv4, positive safe epochs, lowercase SHA256 digests, exact property order
@@ -148,13 +151,21 @@ acquisition. A recovery tag cannot satisfy that proof even when its owner, epoch
 invocation and plan fields match. Superseded proof remains unresolved. The same
 bounded scan, queue, exact-ETag barriers, invalidation and actual drain apply.
 
-Recovery-shaped metadata is supported for reading/validation and subsequent normal
-acquisition only. The normal transport refuses `recover` writes. This is **not an
-operator recovery implementation**: the separate foreign-owner inspector below
-provides envelope observation only, not a recovery handle, writer or runtime selector. The V2 inbox can validate retained
-recovery results and their complete graph/data commitments. The explicit V2
-delivery factory below validates the exact retained snapshot's recovery commitment
-at startup only. Neither reader authorizes or executes recovery.
+The normal owned transport refuses `recover` writes. The separate V2 operator
+reclaimer requires exact occupied owner/epoch and current metadata ETag, complete
+foreign domain validation and independent physical-termination confirmation by the
+operator. It atomically changes M to owner-empty `recover` **at the same epoch**,
+with an `operator-recovery` Exit and a separate append-only audit data row. New
+receipts include the audit invocation and data-envelope digest. Historical V2
+operator-recovery receipts remain readable; a new command never fabricates
+historical audit rows. The next normal acquisition advances the epoch and
+validates the retained recovery commitment before serving. The recovery audit
+row is a closed `control` subtype, not a delivery operation or inbox generation
+seal; both domain audits validate it without granting send/forward permission.
+M's Exit may later become a clean-release receipt, while the separate audit
+row remains inspectable. A normal clean-close open needs no recovery receipt.
+The foreign-owner inspector remains GET-only; its generic envelope scan is not
+itself domain validation, owner permission or a recovery writer.
 
 Reads request `application/json;odata=fullmetadata`. The raw decoder runs **before
 SDK normalization**, detecting fatal UTF-8/BOM errors, decoded duplicate JSON keys,
@@ -187,9 +198,9 @@ Official service references:
 
 ## M authority, uncertainty and cleanup truth
 
-Ownership is nonexpiring. Every submitted mutation, acquisition, barrier and release
-conditionally replaces M using the **exact original ETag**, together with its data
-actions in one partition. Initialization is the sole create-only exception. The
+Ownership is nonexpiring. Every submitted mutation, acquisition, barrier, release
+and explicit operator reclaim conditionally replaces M using the **exact original
+ETag**, together with its data actions in one partition. Initialization is the sole create-only exception. The
 kernel allocates private invocation UUIDs; it never resubmits an original write.
 
 Every write gets mandatory raw M readback regardless of SDK success/failure:
@@ -214,9 +225,10 @@ unconfirmed acquisition forbids release writes. It still attempts local transpor
 drain. **A rejected close is not evidence that ownership was released**: inspect
 local certainty and investigate persisted state without assuming takeover is safe.
 A confirmed release cancellation similarly leaves the owner installed and makes
-close reject. There is no force/recovery API. Crash recovery and an operator's
-independent proof of old-process termination remain deferred; neither local close,
-a fixture, nor an orchestration stop acknowledgement proves physical termination.
+close reject. Explicit operator reclaim is the only supported intervention for
+an occupied V2 owner, after independent proof of old-process termination. Neither
+local close, a fixture, nor an orchestration stop acknowledgement proves physical
+termination. There is no automatic crash recovery or force/reset API.
 
 ## Bounds and work tracking
 
@@ -688,7 +700,7 @@ V2 changes only metadata lifecycle/envelopes, not delivery marker, result, opera
 or alias schemas. Opening preserves exact accepted state/result and physical data
 bytes, including valid historical JSON whitespace. There is no recovery-tagged
 delivery result. Old physical sending remains physically sending and becomes
-logically unknown; a recovery fixture does not grant resend permission.
+logically unknown; a successful operator reclaim does not grant resend permission.
 
 After its private kernel freshly acquires, the V2 wrapper requires owned `acquire`
 metadata with current epoch exactly `Exit.oldEpoch + 1` (or epoch one without Exit).
@@ -733,9 +745,9 @@ release normally; V1 startup cleanup behavior is unchanged.
 
 **Availability consequence:** an interrupted V2 startup can retain an installed
 owner and block ordinary reopening even when the incomplete scan never established
-whether a recovery Exit existed. A failed close is not release evidence. There is
-no automatic takeover, reset or recovery executor. The separate
-[runtime selector](table-runtime.md) does not relax these library failure rules.
+whether a recovery Exit existed. A failed close is not release evidence. There is no automatic takeover or reset. An operator may use the audited
+[runtime recovery command](table-runtime.md#manual-owner-reclaim) only after
+independent termination proof; a failed close is not evidence of release.
 
 Delivery deliberately retains legacy `scan()` limits (10,000 pages / 64 MiB by
 default and the existing caller deadline), not the inbox's streaming/index audit.

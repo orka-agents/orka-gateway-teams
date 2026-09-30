@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { identity, validateScope as deliveryScope } from '../../delivery/identity.js';
 import { validateScope as ingressScope } from '../../ingress/codec.js';
 import { MAX_PAYLOAD_BYTES, MAX_RESPONSE_BYTES, TableError } from './types.js';
-import type { BoundTable, DataKey, DataRecord, ExitReceipt, Metadata, MetadataV2, RecordValue, RecordValueV2, StoredRecord, StoredRecordV2, TableBinding } from './types.js';
+import type { BoundTable, DataKey, DataRecord, ExitReceipt, Metadata, MetadataV2, OperatorRecoveryAuditV2, RecordValue, RecordValueV2, StoredRecord, StoredRecordV2, TableBinding } from './types.js';
 
 export function fail(): never { throw new TableError('invalid-input'); }
 export function object(value: unknown, keys?: readonly string[]): Record<string, unknown> {
@@ -218,12 +218,14 @@ export function encodeExit(input: ExitReceipt | undefined): Buffer {
   const v = object(input);
   const common = ['kind', 'oldOwner', 'oldEpoch', 'invocation'];
   const keys = v.kind === 'clean-release' ? [...common, 'planDigest'] :
-    v.kind === 'operator-recovery' ? [...common, 'originalMDigest', 'planDigest', 'domainDispositionDigest', 'operatorAttestationDigest'] : fail();
+    v.kind === 'operator-recovery' ? [...common, 'originalMDigest', 'planDigest', 'domainDispositionDigest', 'operatorAttestationDigest',
+      ...(v.auditId === undefined && v.auditDigest === undefined ? [] : ['auditId', 'auditDigest'])] : fail();
   object(v, keys);
   const base = { kind: v.kind, oldOwner: uuid(v.oldOwner), oldEpoch: integer(v.oldEpoch, 1, Number.MAX_SAFE_INTEGER), invocation: uuid(v.invocation) };
   const receipt = v.kind === 'clean-release' ? { ...base, planDigest: hex(v.planDigest) } : { ...base,
     originalMDigest: hex(v.originalMDigest), planDigest: hex(v.planDigest), domainDispositionDigest: hex(v.domainDispositionDigest),
-    operatorAttestationDigest: hex(v.operatorAttestationDigest) };
+    operatorAttestationDigest: hex(v.operatorAttestationDigest), ...(v.auditId === undefined && v.auditDigest === undefined ? {} :
+      { auditId: uuid(v.auditId), auditDigest: hex(v.auditDigest) }) };
   return bytes(Buffer.from(JSON.stringify(receipt)), 1024);
 }
 export function decodeExit(input: Uint8Array): ExitReceipt | undefined {
@@ -231,6 +233,20 @@ export function decodeExit(input: Uint8Array): ExitReceipt | undefined {
     const raw = bytes(input, 1024); if (!raw.length) return undefined;
     const receipt = rawJSON(raw) as ExitReceipt;
     if (!encodeExit(receipt).equals(raw)) fail(); return receipt;
+  } catch { throw new TableError('corrupt'); }
+}
+export function recoveryAuditId(invocation: string): string { return `control_recovery:${uuid(invocation)}`; }
+/** Canonical, bounded and data-free; independently verifiable after later M changes. */
+export function encodeRecoveryAudit(input: OperatorRecoveryAuditV2): Buffer {
+  const v = object(input, ['schema', 'kind', 'invocation', 'oldOwner', 'oldEpoch', 'originalMDigest', 'dispositionDigest', 'operatorAttestationDigest']);
+  if (Object.keys(v).length !== 8 || v.schema !== 1 || v.kind !== 'operator-recovery-audit') fail();
+  return bytes(Buffer.from(JSON.stringify({ schema: 1, kind: 'operator-recovery-audit', invocation: uuid(v.invocation), oldOwner: uuid(v.oldOwner),
+    oldEpoch: integer(v.oldEpoch, 1, Number.MAX_SAFE_INTEGER), originalMDigest: hex(v.originalMDigest),
+    dispositionDigest: hex(v.dispositionDigest), operatorAttestationDigest: hex(v.operatorAttestationDigest) })), 1024);
+}
+export function decodeRecoveryAudit(input: Uint8Array): OperatorRecoveryAuditV2 {
+  try { const raw = bytes(input, 1024); const value = rawJSON(raw) as OperatorRecoveryAuditV2;
+    if (!encodeRecoveryAudit(value).equals(raw)) fail(); return value;
   } catch { throw new TableError('corrupt'); }
 }
 export function initializationDigestV2(binding: BoundTable, id: string): string { return digest(['orka-init-v2', binding.bytes.toString('base64'), id]); }

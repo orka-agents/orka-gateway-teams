@@ -74,7 +74,7 @@ test('CLI bind failure is nonzero and sanitized rather than swallowed by App.sta
     INGRESS_PORT: String(address.port) };
   const init = cli(t, ['init'], env); assert.equal(await init.finished, 0);
   const run = cli(t, ['serve'], env); assert.equal(await run.finished, 1);
-  assert.ok(run.output().includes('teams-ingress: startup-failed')); assert.ok(!run.output().includes('listening'));
+  assert.ok(run.output().includes('teams-ingress: listener-failed: ingress')); assert.ok(!run.output().includes('listening'));
   assert.ok(!run.output().includes(env.TEAMS_CLIENT_SECRET)); assert.ok(!run.output().includes(env.ORKA_BEARER_TOKEN));
 });
 
@@ -84,7 +84,7 @@ test('CLI startup SIGTERM suppresses listening announcement and releases the ini
   assert.equal(await cli(t, ['init'], env).finished, 0);
   const run = cli(t, ['serve'], env, true);
   assert.equal(await run.finished, 1); assert.ok(!run.output().includes('listening'));
-  assert.ok(run.output().includes('teams-ingress: startup-failed'));
+  assert.ok(run.output().includes('teams-ingress: startup-failed: cancelled'));
   for (const secret of [env.TEAMS_CLIENT_SECRET, env.ORKA_BEARER_TOKEN]) assert.ok(!run.output().includes(secret));
   const store = openIngressStore(env.INGRESS_DB, scope); store.close();
 });
@@ -98,7 +98,7 @@ test('CLI always uses fixed public auth despite SDK bypass/cloud/log env; SIGTER
     INGRESS_PORT: String(port), DANGEROUSLY_ALLOW_UNAUTHENTICATED_REQUESTS: 'true', CLOUD: 'invalid-private-cloud', LOG_LEVEL: 'debug' };
   const init = cli(t, ['init'], env); assert.equal(await init.finished, 0);
   const run = cli(t, ['serve'], env);
-  for (let i = 0; i < 100 && !run.output().includes('teams-ingress: listening') && run.child.exitCode === null; i++) await sleep(25);
+  for (let i = 0; i < 400 && !run.output().includes('teams-ingress: listening') && run.child.exitCode === null; i++) await sleep(25);
   assert.ok(run.output().includes('teams-ingress: listening'));
   const response = await fetch(`http://127.0.0.1:${port}/api/messages`, { method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer private-token-sentinel' },

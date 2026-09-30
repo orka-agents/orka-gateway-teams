@@ -6,9 +6,9 @@ import { createHttpHeaders, defaultRetryPolicy, bearerTokenAuthenticationPolicyN
   logPolicyName, proxyPolicyName, redirectPolicyName, tracingPolicyName } from '@azure/core-rest-pipeline';
 import type { PipelineRequest, PipelineResponse } from '@azure/core-rest-pipeline';
 import { tlsVerificationEnabled } from '../../ingress/config.js';
-import { data, dataRow, encodeRecord, etag, fail, object, rawJSON } from './codec.js';
+import { data, dataRow, decodeRecoveryAudit, encodeRecord, etag, fail, metadataV2, object, rawJSON, recoveryAuditId } from './codec.js';
 import { MAX_RESPONSE_BYTES, MAX_WIRE_BYTES, TableError } from './types.js';
-import type { BoundTable, DataAction, TableDependencies } from './types.js';
+import type { BoundTable, DataAction, DataRecord, MetadataV2, StoredRecordV2, TableDependencies } from './types.js';
 import { encodeMetadata, readPage, readRecord, receiptBytes } from './format.js';
 import type { MetadataFor, MetadataFormat, StoredFor } from './format.js';
 
@@ -121,12 +121,37 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
       }
     });
   }
+  /** Restricted V2-only transaction; not available from the normal kernel write path. */
+  writeRecover(original: StoredRecordV2, m: MetadataV2, audit: DataRecord, seal: DataAction | undefined, context: WorkContext): Promise<void> {
+    try {
+      const entry = decodeRecoveryAudit(audit.payload);
+      if (this.format !== 2 || original.row !== 'M' || original.value.kind !== 'metadata' || !original.value.owner ||
+          m.operation !== 'recover' || m.owner !== '' || m.epoch !== original.value.epoch || m.initId !== original.value.initId ||
+          m.initDigest !== original.value.initDigest || m.exit?.kind !== 'operator-recovery' ||
+          m.exit.oldOwner !== original.value.owner || m.exit.oldEpoch !== original.value.epoch ||
+          m.exit.originalMDigest !== original.value.digest || m.exit.invocation !== m.invocation || m.exit.planDigest !== m.plan ||
+          m.exit.auditId !== m.invocation || audit.type !== 'control' || audit.id !== recoveryAuditId(m.invocation) ||
+          audit.digest !== m.exit.auditDigest ||
+          data(this.binding, { type: audit.type, id: audit.id }, audit.payload).digest !== audit.digest ||
+          metadataV2(this.binding, m).digest !== m.digest ||
+          metadataV2(this.binding, original.value).digest !== original.value.digest ||
+          entry.invocation !== m.invocation || entry.oldOwner !== m.exit.oldOwner || entry.oldEpoch !== m.exit.oldEpoch ||
+          entry.originalMDigest !== m.exit.originalMDigest || entry.operatorAttestationDigest !== m.exit.operatorAttestationDigest) fail();
+      if (seal && (this.binding.kind !== 'ingress' || seal.kind !== 'create' || seal.key.type !== 'control' ||
+        !/^generation:[1-9][0-9]*$/u.test(seal.key.id))) fail();
+      return this.transaction(m as MetadataFor<F>, original.etag,
+        [{ kind: 'create', key: { type: audit.type, id: audit.id }, payload: audit.payload }, ...(seal ? [seal] : [])], context, true);
+    } catch { return Promise.reject(new TableError('invalid-input')); }
+  }
   write(m: MetadataFor<F>, originalETag: string | undefined, actions: readonly DataAction[], context: WorkContext): Promise<void> {
+    return this.transaction(m, originalETag, actions, context, false);
+  }
+  private transaction(m: MetadataFor<F>, originalETag: string | undefined, actions: readonly DataAction[], context: WorkContext, recover: boolean): Promise<void> {
     // Inputs here are kernel-owned; copy actions and validate their closed shapes before any SDK/auth work.
     let transaction: TransactionAction[];
     try {
       // Recovery-shaped metadata is readable, not writable through this normal-owner transport.
-      if (this.format === 2 && m.operation === 'recover') fail();
+      if (this.format === 2 && (m.operation === 'recover') !== recover) fail();
       if (!Array.isArray(actions) || actions.length > 99 || (originalETag === undefined && actions.length)) fail();
       if (originalETag !== undefined) etag(originalETag);
       const entity = encodeMetadata(this.format, this.binding, m) as TableEntity;
@@ -137,6 +162,7 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
         object(action, action.kind === 'replace' ? ['kind', 'key', 'payload', 'etag'] : ['kind', 'key', 'payload']);
         if (action.kind !== 'create' && action.kind !== 'replace') fail();
         const value = data(this.binding, action.key, action.payload); const row = dataRow(this.binding, action.key);
+        if (!recover && action.key.type === 'control' && action.key.id.startsWith('control_recovery:')) fail();
         if (rows.has(row)) fail(); rows.add(row);
         upper += 8192 + 4 * Math.ceil(value.payload.length / 3) + 16;
         if (upper > MAX_WIRE_BYTES) fail();

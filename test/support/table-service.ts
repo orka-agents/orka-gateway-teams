@@ -64,10 +64,12 @@ function checkEntity(e: Record<string, unknown>, expectedPartition: string, expe
       const x = JSON.parse(exit.toString());
       const base = { kind: x.kind, oldOwner: x.oldOwner, oldEpoch: x.oldEpoch, invocation: x.invocation };
       const canonical = x.kind === 'clean-release' ? { ...base, planDigest: x.planDigest } : x.kind === 'operator-recovery' ? { ...base,
-        originalMDigest: x.originalMDigest, planDigest: x.planDigest, domainDispositionDigest: x.domainDispositionDigest, operatorAttestationDigest: x.operatorAttestationDigest } : undefined;
+        originalMDigest: x.originalMDigest, planDigest: x.planDigest, domainDispositionDigest: x.domainDispositionDigest, operatorAttestationDigest: x.operatorAttestationDigest,
+        ...(x.auditId === undefined && x.auditDigest === undefined ? {} : { auditId: x.auditId, auditDigest: x.auditDigest }) } : undefined;
       if (JSON.stringify(canonical) !== exit.toString()) return false;
     }
-    return e.Operation !== 'recover' && e.Binding === expectedBinding.toString('base64') && e.InitDigest === hash(['orka-init-v2', e.Binding, e.InitId]) &&
+    return (e.Operation !== 'recover' || (exit.length > 0 && JSON.parse(exit.toString()).auditId !== undefined)) &&
+      e.Binding === expectedBinding.toString('base64') && e.InitDigest === hash(['orka-init-v2', e.Binding, e.InitId]) &&
       e.Digest === hash(['orka-m-v2', e.Binding, e.InitId, e.InitDigest, e.Owner, Number(e.Epoch), e.Invocation, e.Operation, e.Plan, e.State, e.Result, e.Exit]);
   }
   const chunks = Array.from({ length: Number(e.Count) }, (_, i) => Buffer.from(String(e[`B${i}`]), 'base64'));
@@ -110,6 +112,15 @@ export async function tableService(t: FixtureHooks, kind: 'delivery' | 'ingress'
         } else actions.push({ method: req.method!, ...(req.headers['if-match'] ? { etag: String(req.headers['if-match']) } : {}), entity: JSON.parse(body.toString()) });
         stats.lastActions = actions.length;
         if (!actions.length || actions.length > 100 || actions.filter(a => a.entity.RowKey === 'M').length !== 1 || !actions.every(a => checkEntity(a.entity, partition, expectedBinding, metadataFormat))) stats.violation = true;
+        if (actions[0]?.entity.Operation === 'recover') {
+          const m = actions[0].entity; const receipt = JSON.parse(Buffer.from(String(m.Exit), 'base64').toString());
+          const audit = actions.find(a => a.entity.RowKey === `control_${Buffer.from(`control_recovery:${receipt.auditId}`).toString('base64url')}`);
+          if (metadataFormat !== 2 || actions[0].method !== 'PUT' || actions[0].etag === undefined ||
+              !audit || audit.method !== 'POST' || receipt.auditDigest !== audit.entity.Digest ||
+              String(m.Owner) !== '' || (actions[0].etag === rows.get('M')?.['odata.etag'] &&
+                (String(m.Epoch) !== String(rows.get('M')?.Epoch) || receipt.oldOwner !== rows.get('M')?.Owner ||
+                  receipt.originalMDigest !== rows.get('M')?.Digest))) stats.violation = true;
+        }
       }
       let committed: boolean | undefined;
       const commit = () => {

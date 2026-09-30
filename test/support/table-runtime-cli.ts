@@ -231,7 +231,7 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
     await until(() => run.child.exitCode !== null || run.child.signalCode !== null, 'CLI exited without forced fixture cleanup');
     const result = await run.done;
     assert.equal(result.code, code, 'CLI exit code'); assert.equal(result.signal, null, 'natural CLI exit');
-    assert.equal(result.stdout.length, 0); assert.equal(result.stderr.includes(`teams-ingress: ${event}\n`), true, 'fixed CLI lifecycle');
+    assert.equal(result.stdout.length, 0); assert.equal(result.stderr.includes(`teams-ingress: ${event}`), true, 'fixed CLI lifecycle');
     const privateValues = [acaHeader, syntheticToken, finalToken, receipt, orkaReceipt, incomingToken, finalDelivery.text,
       serving.ORKA_BEARER_TOKEN, serving.ORKA_OUTBOUND_BEARER_TOKEN, common.IDENTITY_ENDPOINT, common.MSI_ENDPOINT, legacySecret];
     assert.equal(privateValues.some(value => result.stderr.includes(value)), false, 'private values absent from CLI output');
@@ -273,6 +273,11 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
   const initializedInbox = JSON.stringify([...tables.inbox.rows]);
   await finished(launch('init-delivery', common), 0, 'initialized');
   assert.equal(JSON.stringify([...tables.inbox.rows]) === initializedInbox, true, 'delivery init does not rewrite ingress');
+  const recoveryEnv = { ...common, TABLE_RECOVERY_EXPECTED_OWNER: '22222222-2222-4222-8222-222222222222',
+    TABLE_RECOVERY_EXPECTED_EPOCH: '1', TABLE_RECOVERY_ATTESTATION_DIGEST: 'a'.repeat(64) };
+  const beforeRecovery = JSON.stringify([...tables.delivery.rows]);
+  await finished(launch('recover-delivery', recoveryEnv), 1, 'operator-recovery-failed: already-unowned');
+  assert.equal(JSON.stringify([...tables.delivery.rows]), beforeRecovery, 'already-unowned command makes no audit row');
   for (const mode of ['init', 'init-delivery']) {
     const before = JSON.stringify([[...tables.inbox.rows], [...tables.delivery.rows]]);
     await finished(launch(mode, common), 1, 'startup-failed');
@@ -286,7 +291,7 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
   assert.equal(payloads(tables.inbox.rows, 'event').length, 0); await stop(denied); sdkWrongKey = false;
 
   const running = await start(); assert.equal(identity.calls.bot, 0);
-  const occupied = launch('serve', serving); await finished(occupied, 1, 'startup-failed');
+  const occupied = launch('serve', serving); await finished(occupied, 1, 'store-owned-requires-operator-recovery (ingress): occupied');
   assert.equal(occupied.output().includes('teams-ingress: listening'), false, 'occupied writer cannot listen');
   assert.equal((await post(ingressPort, auth.token({ aud: 'wrong-audience' }))).status, 401);
   assert.equal((await post(ingressPort, incomingToken)).status, 200);

@@ -271,7 +271,7 @@ export function validateResult(context: ResultValidationContext): void {
     const { binding, metadata, state, graph, postDataDigest, dataRowCount } = context;
     const physical = decodeState(metadata.state);
     if (!encodeState(state).equals(metadata.state)) fail();
-    integer(metadata.epoch, 1, Number.MAX_SAFE_INTEGER); hex(postDataDigest); integer(dataRowCount, 0, 3 * MAX_INBOX_RECORDS);
+    integer(metadata.epoch, 1, Number.MAX_SAFE_INTEGER); hex(postDataDigest); integer(dataRowCount, 0, Number.MAX_SAFE_INTEGER);
     const result = decodeResult(metadata.result);
     if (result.operation === 'operator-recovery') { recoveryConsistency(result, context, physical); return; }
     if (result.epoch > metadata.epoch || result.postStateDigest !== stateDigest(binding, metadata.state)) fail();
