@@ -229,8 +229,13 @@ export async function reclaimTableStore(config: TableRecoveryConfig,
   const binding: TableBinding = selected.kind === 'ingress' ? { kind: 'ingress', account: storage.account, table: storage.table,
     storeId: storage.storeId, scope: selected.scope } : { kind: 'delivery', account: storage.account, table: storage.table,
     storeId: storage.storeId, scope: { appId: selected.scope.appId, tenantId: selected.scope.tenantId } };
-  const provider = prepareTableProvider(storage.identity, dependencies);
-  const native: TableDependencies = { token: provider.token, ...(dependencies.tableRequest ? { request: dependencies.tableRequest } : {}) };
+  let deps: Pick<IngressRuntimeDependencies, 'tableRequest' | 'storageIdentity'>;
+  let provider: StorageTokenProvider;
+  try {
+    deps = auditFields(dependencies, ['tableRequest', 'storageIdentity']);
+    provider = prepareTableProvider(storage.identity, deps);
+  } catch { throw new ConfigurationError(); }
+  const native: TableDependencies = { token: provider.token, ...(deps.tableRequest === undefined ? {} : { request: deps.tableRequest }) };
   const reader = createTableKernelV2(binding, native);
   let failure: unknown;
   try {

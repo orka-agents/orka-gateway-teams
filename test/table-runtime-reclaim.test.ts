@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { initializeTableStore, reclaimTableStore } from '../src/ingress/main.js';
+import { ConfigurationError } from '../src/ingress/config.js';
 import { parseTableRecoveryConfig } from '../src/ingress/runtime-config.js';
 import { createTableDeliveryJournalV2 } from '../src/delivery/table-journal.js';
 import { scope } from './support/ingress-auth.js';
@@ -22,6 +23,13 @@ test('pre-aborted operator command reports cancellation without opening storage'
   const abort = new AbortController(); abort.abort();
   await assert.rejects(reclaimTableStore(recovery('22222222-2222-4222-8222-222222222222', 1), {}, abort.signal),
     { message: 'operator-recovery-failed: cancelled' });
+});
+
+test('operator recovery rejects accessor-backed native dependencies before opening storage', async () => {
+  let reads = 0;
+  const dependencies = { get tableRequest() { reads++; return () => { throw new Error('unexpected native request'); }; } };
+  await assert.rejects(reclaimTableStore(recovery('22222222-2222-4222-8222-222222222222', 1), dependencies), ConfigurationError);
+  assert.equal(reads, 0, 'untrusted accessor must not be invoked');
 });
 
 test('fence drift during foreign inspection reports an audit failure, not an uncertain submission', async t => {
