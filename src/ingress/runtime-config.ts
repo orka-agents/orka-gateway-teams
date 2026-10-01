@@ -26,16 +26,17 @@ export interface TableRecoveryConfig {
 const recoveryKeys = ['TABLE_RECOVERY_EXPECTED_OWNER', 'TABLE_RECOVERY_EXPECTED_EPOCH', 'TABLE_RECOVERY_ATTESTATION_DIGEST'] as const;
 export function parseTableRecoveryConfig(env: NodeJS.ProcessEnv, kind: 'ingress' | 'delivery'): TableRecoveryConfig {
   try {
-    if (env.GATEWAY_STORAGE_BACKEND !== 'table-v2') throw new ConfigurationError();
-    const expectedOwner = uuid(env.TABLE_RECOVERY_EXPECTED_OWNER);
-    const expectedEpoch = requiredNumber(env.TABLE_RECOVERY_EXPECTED_EPOCH);
-    const attestationDigest = hex(env.TABLE_RECOVERY_ATTESTATION_DIGEST);
-    const clean = { ...env }; for (const key of recoveryKeys) delete clean[key];
+    const captured = { ...env };
+    if (captured.GATEWAY_STORAGE_BACKEND !== 'table-v2') throw new ConfigurationError();
+    const expectedOwner = uuid(captured.TABLE_RECOVERY_EXPECTED_OWNER);
+    const expectedEpoch = requiredNumber(captured.TABLE_RECOVERY_EXPECTED_EPOCH);
+    const attestationDigest = hex(captured.TABLE_RECOVERY_ATTESTATION_DIGEST);
+    const clean = { ...captured }; for (const key of recoveryKeys) delete clean[key];
     const target = parseRuntimeConfig(clean, kind === 'ingress' ? 'init' : 'init-delivery');
     if (!('storage' in target)) throw new ConfigurationError();
-    const audit = budgets({ audit: { maxPages: requiredNumber(env.TABLE_AUDIT_MAX_PAGES),
-      maxPageBytes: requiredNumber(env.TABLE_AUDIT_MAX_BYTES), maxDurationMs: requiredNumber(env.TABLE_AUDIT_MAX_DURATION_MS),
-      maxTrackingBytes: requiredNumber(env.TABLE_AUDIT_MAX_TRACKING_BYTES) }, maxIndexBytes: requiredNumber(env.TABLE_MAX_INDEX_BYTES) }).audit;
+    const audit = budgets({ audit: { maxPages: requiredNumber(captured.TABLE_AUDIT_MAX_PAGES),
+      maxPageBytes: requiredNumber(captured.TABLE_AUDIT_MAX_BYTES), maxDurationMs: requiredNumber(captured.TABLE_AUDIT_MAX_DURATION_MS),
+      maxTrackingBytes: requiredNumber(captured.TABLE_AUDIT_MAX_TRACKING_BYTES) }, maxIndexBytes: requiredNumber(captured.TABLE_MAX_INDEX_BYTES) }).audit;
     return Object.freeze({ target, expectedOwner, expectedEpoch, attestationDigest, audit });
   } catch { throw new ConfigurationError(); }
 }

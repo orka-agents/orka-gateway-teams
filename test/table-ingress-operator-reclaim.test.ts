@@ -1,22 +1,44 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { auditInbox } from '../src/ingress/table-audit.js';
+import { auditInbox, createInboxAuditProjection } from '../src/ingress/table-audit.js';
 import { InboxIndex } from '../src/ingress/table-index.js';
 import { digest, encode } from '../src/ingress/codec.js';
 import { createTableIngressStore } from '../src/ingress/table-store.js';
 import { encodeState } from '../src/ingress/table-codec.js';
 import { stateDigest } from '../src/ingress/table-result.js';
-import { bindTable } from '../src/storage/table/codec.js';
+import { bindTable, decodeObjectV2 } from '../src/storage/table/codec.js';
 import type { StoredRecordV2 } from '../src/storage/table/types.js';
 import { reclaimTableIngress } from '../src/ingress/table-recovery.js';
 import { createTableKernelV2, TableError } from '../src/storage/table/index.js';
 import { options } from './support/table-ingress-store.js';
-import { ingressBinding } from './support/table-service.js';
+import { hash, ingressBinding } from './support/table-service.js';
 import { auditBudget, inboxOwned, indexBudget, install, pair, wireData } from './support/table-ingress-audit.js';
 import { armId, attemptId, sealFixture, stateFixture } from './support/table-ingress.js';
 import { changedM2 } from './support/table-v2.js';
 
 const code = (want: string) => (e: unknown) => e instanceof TableError && e.code === want;
+const auditKey = (invocation: string) => `control_recovery:${invocation}`;
+const auditRow = (invocation: string) => 'control_' + Buffer.from(auditKey(invocation)).toString('base64url');
+const forgedInvocation = '88888888-8888-4888-8888-888888888888';
+const forgedAudit = (oldEpoch: number) => encode({ schema: 1, kind: 'operator-recovery-audit', invocation: forgedInvocation,
+  oldOwner: '99999999-9999-4999-8999-999999999999', oldEpoch, originalMDigest: 'a'.repeat(64),
+  dispositionDigest: 'b'.repeat(64), operatorAttestationDigest: 'c'.repeat(64) });
+function auditUnowned(s: Awaited<ReturnType<typeof inboxOwned>>['s']): void {
+  const binding = ingressBinding;
+  if (binding.kind !== 'ingress') throw new Error('ingress fixture required');
+  const bound = bindTable(binding);
+  const rows = [...s.rows.values()].map(raw => decodeObjectV2(bound, raw))
+    .sort((a, b) => a.row === 'M' ? -1 : b.row === 'M' ? 1 : a.row < b.row ? -1 : a.row > b.row ? 1 : 0);
+  const projection = createInboxAuditProjection(binding, new InboxIndex(indexBudget));
+  try {
+    for (const pass of [1, 2] as const) {
+      for (const row of rows) projection.visitor.record(pass, row);
+      projection.visitor.endPass(pass);
+    }
+    projection.visitor.finalize();
+    assert.equal(projection.result().header.metadata.owner, '');
+  } finally { projection.dispose(); }
+}
 const fence = (m: StoredRecordV2) => {
   if (m.value.kind !== 'metadata') throw new Error('M expected');
   return { initId: m.value.initId, initDigest: m.value.initDigest, owner: m.value.owner,
@@ -55,6 +77,7 @@ test('foreign unarmed inbox recovery retains rows, adds data-free audit, and nex
   await install(k, { state: stateFixture(), pairs: [entry] });
   const m = await k.read('M'); assert.ok(m);
   await reclaimTableIngress(ingressBinding, s.dependencies, fence(m), auditBudget, indexBudget, 'd'.repeat(64));
+  auditUnowned(s); // Recovery writes the audit at exactly this unowned M epoch.
   const recovered = s.rows.get('M')!; assert.equal(recovered.Operation, 'recover');
   assert.equal(recovered.Owner, ''); assert.equal(recovered.Epoch, String(fence(m).epoch));
   const x = JSON.parse(Buffer.from(String(recovered.Exit), 'base64').toString());
@@ -85,6 +108,7 @@ test('armed handoff seals its active generation, clears arm without a clock samp
   await install(k, { state, pairs: [p], result });
   const m = await k.read('M'); assert.ok(m);
   await reclaimTableIngress(ingressBinding, s.dependencies, fence(m), auditBudget, indexBudget, 'd'.repeat(64));
+  auditUnowned(s);
   const recovered = JSON.parse(Buffer.from(String(s.rows.get('M')!.State), 'base64').toString());
   assert.equal(recovered.handoffClockArm, null); assert.equal(recovered.currentGeneration, null);
   assert.equal(recovered.lastNow, 100); assert.equal(recovered.bodies, 1);
@@ -95,6 +119,100 @@ test('armed handoff seals its active generation, clears arm without a clock samp
   const next = createTableIngressStore(ingressBinding, s.dependencies, options);
   await next.open(); assert.equal(await next.claimForForwarding(), undefined);
   await next.close(); await assert.rejects(k.close(), code('unresolved'));
+});
+
+for (const [oldEpoch, guard] of [[3, 'existing > guard'], [2, 'new equality guard']] as const) test(`acquired M rejects a forged recovery audit at epoch ${oldEpoch} (${guard})`, async t => {
+  const { s, k } = await inboxOwned(t);
+  await install(k, { state: stateFixture(), pairs: [pair()] }); await k.close();
+  const next = createTableKernelV2(ingressBinding, s.dependencies); await next.acquire();
+  assert.equal(s.rows.get('M')!.Epoch, '2');
+  s.rows.set(auditRow(forgedInvocation), wireData(s, 'control', auditKey(forgedInvocation), forgedAudit(oldEpoch)));
+  await assert.rejects(auditInbox(next, ingressBinding, auditBudget, indexBudget), code('unresolved'));
+  await assert.rejects(next.close(), code('unresolved'));
+});
+
+test('ordinary startup rejects a forged audit at its clean-release Exit epoch', async t => {
+  const { s, k } = await inboxOwned(t);
+  await install(k, { state: stateFixture(), pairs: [pair()] }); await k.close();
+  assert.equal(JSON.parse(Buffer.from(String(s.rows.get('M')!.Exit), 'base64').toString()).oldEpoch, 1);
+  s.rows.set(auditRow(forgedInvocation), wireData(s, 'control', auditKey(forgedInvocation), forgedAudit(1)));
+  const next = createTableIngressStore(ingressBinding, s.dependencies, options);
+  await assert.rejects(next.open(), code('unresolved'));
+  await assert.rejects(next.close(), code('unresolved'));
+});
+
+test('current operator Exit refuses a coherent rewrite of only the audit disposition digest', async t => {
+  const { s, k } = await inboxOwned(t); const m = await k.read('M'); assert.ok(m);
+  await reclaimTableIngress(ingressBinding, s.dependencies, fence(m), auditBudget, indexBudget, 'd'.repeat(64));
+  const owned = s.rows.get('M')!;
+  const exit = JSON.parse(Buffer.from(String(owned.Exit), 'base64').toString());
+  const key = auditKey(exit.auditId);
+  const row = auditRow(exit.auditId);
+  const audit = JSON.parse(Buffer.from(String(s.rows.get(row)!.B0), 'base64').toString());
+  audit.dispositionDigest = 'f'.repeat(64);
+  s.rows.set(row, wireData(s, 'control', key, encode(audit)));
+  let fold = hash(['orka-recovery-data-v2', owned.Binding]); let count = 0;
+  for (const [name, data] of [...s.rows].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) if (name !== 'M') {
+    fold = hash(['orka-recovery-row-v2', fold, name, data.Digest]); count++;
+  }
+  const result = JSON.parse(Buffer.from(String(owned.Result), 'base64').toString());
+  result.postDataDigest = hash(['orka-recovery-data-end-v2', fold, count]);
+  assert.equal(result.dataRowCount, count);
+  const resultBase64 = encode(result).toString('base64');
+  exit.auditDigest = s.rows.get(row)!.Digest;
+  exit.domainDispositionDigest = hash(['orka-inbox-recovery-v2', owned.Binding, resultBase64]);
+  const plan = hash(['recover', exit.originalMDigest, exit.invocation, exit.auditDigest, exit.domainDispositionDigest,
+    owned.State, resultBase64, null]);
+  exit.planDigest = plan;
+  s.rows.set('M', changedM2(owned, { Result: resultBase64, Exit: encode(exit).toString('base64'), Plan: plan }, 985));
+  const next = createTableKernelV2(ingressBinding, s.dependencies); await next.acquire();
+  await assert.rejects(auditInbox(next, ingressBinding, auditBudget, indexBudget), code('unresolved'));
+  await assert.rejects(next.close(), code('unresolved')); await assert.rejects(k.close(), code('unresolved'));
+});
+
+test('recovered armed inbox rejects a forged regression seal despite coherent result and M digests', async t => {
+  const { s, k } = await inboxOwned(t); const p = pair();
+  Object.assign(p.event, { state: 'forwarding', attempt: 1, attemptId, attemptEpoch: 1 });
+  const before = stateFixture();
+  const state = stateFixture({ handoffClockArm: { id: armId, ownerEpoch: 1, generation: 1, order: 1, attemptId } });
+  const claim = { schema: 1 as const, operation: 'claim' as const, epoch: 1,
+    basis: { records: before.records, bodies: before.bodies, lastNow: before.lastNow, restartEpoch: before.restartEpoch,
+      currentGeneration: before.currentGeneration, arm: null }, clock: { time: 100 },
+    decision: { kind: 'claimed' as const, eventId: p.id, attemptId, attempt: 1 },
+    postStateDigest: stateDigest(bindTable(ingressBinding), encodeState(state)) };
+  await install(k, { state, pairs: [p], result: claim });
+  const m = await k.read('M'); assert.ok(m);
+  await reclaimTableIngress(ingressBinding, s.dependencies, fence(m), auditBudget, indexBudget, 'd'.repeat(64));
+  auditUnowned(s); // Genuine created-seal commitment is accepted before tampering.
+
+  const owned = s.rows.get('M')!;
+  const exit = JSON.parse(Buffer.from(String(owned.Exit), 'base64').toString());
+  const auditPayload = String(s.rows.get(auditRow(exit.auditId))!.B0);
+  const sealKey = 'generation:1';
+  const sealRow = 'control_' + Buffer.from(sealKey).toString('base64url');
+  const original = JSON.parse(Buffer.from(String(s.rows.get(sealRow)!.B0), 'base64').toString());
+  assert.equal(original.reason, 'clock-uncertain'); assert.equal(original.observation, null);
+  assert.ok(original.watermark > 0);
+  const forged = encode({ ...original, observation: original.watermark - 1, reason: 'clock-regression' });
+  assert.notEqual(forged.toString('base64'), String(s.rows.get(sealRow)!.B0));
+  s.rows.set(sealRow, wireData(s, 'control', sealKey, forged));
+
+  let fold = hash(['orka-recovery-data-v2', owned.Binding]); let count = 0;
+  for (const [name, data] of [...s.rows].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) if (name !== 'M') {
+    fold = hash(['orka-recovery-row-v2', fold, name, data.Digest]); count++;
+  }
+  const result = JSON.parse(Buffer.from(String(owned.Result), 'base64').toString());
+  result.postDataDigest = hash(['orka-recovery-data-end-v2', fold, count]);
+  assert.equal(result.dataRowCount, count);
+  const resultBase64 = encode(result).toString('base64');
+  exit.domainDispositionDigest = hash(['orka-inbox-recovery-v2', owned.Binding, resultBase64]);
+  const plan = hash(['recover', exit.originalMDigest, exit.invocation, exit.auditDigest, exit.domainDispositionDigest,
+    owned.State, resultBase64, [sealKey, forged.toString('base64')]]);
+  exit.planDigest = plan;
+  s.rows.set('M', changedM2(owned, { Result: resultBase64, Exit: encode(exit).toString('base64'), Plan: plan }, 986));
+  assert.equal(s.rows.get(auditRow(exit.auditId))!.B0, auditPayload);
+  assert.throws(() => auditUnowned(s), code('corrupt'));
+  await assert.rejects(k.close(), code('unresolved'));
 });
 
 test('current operator Exit refuses a digest-mismatched audit row on the next owned audit', async t => {
@@ -161,6 +279,7 @@ test('armed handoff with an already proved regression preserves its original sea
   await install(k, { state, pairs: [p], seals: [seal], result });
   const m = await k.read('M'); assert.ok(m);
   await reclaimTableIngress(ingressBinding, s.dependencies, fence(m), auditBudget, indexBudget, 'd'.repeat(64));
+  auditUnowned(s);
   const recovered = JSON.parse(Buffer.from(String(s.rows.get('M')!.State), 'base64').toString());
   assert.equal(recovered.handoffClockArm, null); assert.equal(recovered.currentGeneration, null);
   const sealed = s.rows.get('control_' + Buffer.from('generation:1').toString('base64url'))!;

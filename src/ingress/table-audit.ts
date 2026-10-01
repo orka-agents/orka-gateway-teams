@@ -5,9 +5,10 @@ import { bindTable, digest, initializationDigestV2, object, decodeRecoveryAudit,
 import type { BoundTable, ForeignInspectionVisitorV2, MetadataV2, OwnedAuditBudget, OwnedAuditOptions, StoredRecordV2, TableBinding } from '../storage/table/types.js';
 import { InboxIndex } from './table-index.js';
 import type { IndexVersion, IndexWorkingCredit } from './table-index.js';
-import { decodeEvent, decodeRoute, decodeSeal, decodeState } from './table-codec.js';
+import { decodeEvent, decodeRoute, decodeSeal, decodeState, encodeSeal } from './table-codec.js';
 import { encode, fingerprint, matchRoute, validateScope } from './codec.js';
 import { decodeResult, validateResult } from './table-result.js';
+import { sealKey } from './table-state.js';
 import type { IngressScope } from './types.js';
 import type { InboxState } from './table-types.js';
 
@@ -63,7 +64,7 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
   const scope = snapshot.scope;
   let meta: IndexWorkingCredit | undefined; let scratch: IndexWorkingCredit | undefined;
   let header: InboxAuditHeader | undefined; let bound: BoundTable | undefined;
-  let fold = ''; let count = 0; let referencedAudit = 0;
+  let fold = ''; let count = 0; let referencedAudit = 0; let referencedDispositionDigest: string | undefined;
   const versions = ['', '']; const versionCounts = [0, 0];
   const visitor: ForeignInspectionVisitorV2 = { passes: 2, record(this: void, pass: 1 | 2, record: Readonly<StoredRecordV2>): undefined {
       if (record.value.kind === 'data') {
@@ -96,15 +97,17 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
             payloadBytes: d.payload.length, version });
         } else if (d.type === 'control' && d.id.startsWith('control_recovery:')) {
           const audit = decodeRecoveryAudit(d.payload);
-          if (recoveryAuditId(audit.invocation) !== d.id || audit.oldEpoch > header.metadata.epoch) throw new TableError('corrupt');
-          const x = header.metadata.exit;
+          const m = header.metadata; const x = m.exit;
+          if (recoveryAuditId(audit.invocation) !== d.id || audit.oldEpoch > m.epoch ||
+              (audit.oldEpoch === m.epoch && (m.owner !== '' || x?.kind !== 'operator-recovery' || x.auditId !== audit.invocation)) ||
+              (x?.kind === 'clean-release' && audit.oldEpoch === x.oldEpoch)) throw new TableError('corrupt');
           if (x?.kind === 'operator-recovery' && x.invocation === audit.invocation && x.oldEpoch === audit.oldEpoch &&
               (!x.auditId || !x.auditDigest)) throw new TableError('corrupt');
           if (x?.kind === 'operator-recovery' && x.auditId === audit.invocation) {
             if (x.invocation !== audit.invocation || x.auditDigest !== d.digest ||
                 x.oldOwner !== audit.oldOwner || x.oldEpoch !== audit.oldEpoch ||
                 x.originalMDigest !== audit.originalMDigest || x.operatorAttestationDigest !== audit.operatorAttestationDigest) throw new TableError('corrupt');
-            if (pass === 1) referencedAudit++;
+            if (pass === 1) { referencedAudit++; referencedDispositionDigest = audit.dispositionDigest; }
           }
         } else {
           const seal = decodeSeal(key, d.payload);
@@ -155,6 +158,14 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
       }
       validateResult({ binding: bound!, metadata: h.metadata, state: h.state, graph: index,
         postDataDigest: digest(['orka-recovery-data-end-v2', fold, count]), dataRowCount: count });
+      if (x?.kind === 'operator-recovery' && x.auditId !== undefined && result.operation === 'operator-recovery') {
+        const seal = result.disposition.kind === 'inbox-clock-uncertain' ? index.sealByGeneration(result.disposition.generation) : undefined;
+        // A regression seal predates reclaim; only a new uncertain seal is in
+        // the writer's disposition commitment. Compare exact canonical bytes.
+        const createdSeal = seal?.reason === 'clock-uncertain' ? encodeSeal(sealKey(seal.generation), seal).toString('base64') : null;
+        if (referencedDispositionDigest !== digest(['orka-inbox-recovery-disposition-v1', bound!.bytes.toString('base64'),
+          result.originalMDigest, h.metadata.state.toString('base64'), createdSeal])) throw new TableError('corrupt');
+      }
     } };
   return {
     visitor,

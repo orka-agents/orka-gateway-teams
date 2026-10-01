@@ -67,6 +67,29 @@ test('operator abort during foreign inspection reports cancellation without a wr
   delete tables.delivery.controls.hook; await previous.close(); tables.drained(); identity.drained();
 });
 
+test('a caller cannot change the audit budget after the recovery command reads M', async t => {
+  const identity = await runtimeIdentity(t); const tables = await runtimeTableService(t, scope);
+  const binding = { kind: 'delivery' as const, account: 'example123', table: 'journal', storeId: 'stable',
+    scope: { appId: scope.appId, tenantId: scope.tenantId } };
+  const deps = { tableRequest: tables.request, storageIdentity: { request: identity.request } };
+  await initializeTableStore(recovery('22222222-2222-4222-8222-222222222222', 1).target, deps);
+  const previous = createTableDeliveryJournalV2(binding, { token: async () => syntheticToken, request: tables.request });
+  await previous.open();
+  const m = tables.delivery.rows.get('M')!;
+  const parsed = recovery(String(m.Owner), Number(m.Epoch));
+  const config = { ...parsed, audit: { ...parsed.audit } };
+  let changed = false;
+  tables.delivery.controls.hook = event => {
+    if (!changed && event.req.method === 'GET' && event.path.includes("RowKey='M'")) {
+      changed = true; event.reply(); config.audit.maxPages = 1;
+    } else event.reply();
+  };
+  await reclaimTableStore(config, deps);
+  assert.equal(changed, true); assert.equal(tables.delivery.rows.get('M')?.Owner, '');
+  assert.equal(tables.delivery.rows.get('M')?.Operation, 'recover');
+  delete tables.delivery.controls.hook; await assert.rejects(previous.close()); tables.drained(); identity.drained();
+});
+
 test('reclaim refuses a wrong owner or epoch, then atomically releases the exact owner with a durable audit row', async t => {
   const identity = await runtimeIdentity(t); const tables = await runtimeTableService(t, scope);
   const binding = { kind: 'delivery' as const, account: 'example123', table: 'journal', storeId: 'stable',

@@ -17,7 +17,7 @@ import { TableRecoveryUncertainError } from '../storage/table/recovery.js';
 import { hex, integer, uuid } from '../storage/table/codec.js';
 import type { ForeignOwnerFenceV2, TableBinding } from '../storage/table/types.js';
 import { createTableDeliveryJournalV2, TableDeliveryStartupFailure } from '../delivery/table-journal.js';
-import { auditFields } from '../storage/table/audit.js';
+import { auditConfig, auditFields } from '../storage/table/audit.js';
 import type { ServeConfig } from './config.js';
 import { logIngress } from './logger.js';
 import { createOrkaClient } from './client.js';
@@ -216,11 +216,13 @@ export async function initializeTableStore(config: TableInitConfig,
 export async function reclaimTableStore(config: TableRecoveryConfig,
   dependencies: Pick<IngressRuntimeDependencies, 'tableRequest' | 'storageIdentity'> = {}, signal?: AbortSignal): Promise<void> {
   const selected = snapshotTableInitConfig(config.target);
-  let expectedOwner: string; let expectedEpoch: number; let attestation: string;
+  let expectedOwner: string; let expectedEpoch: number; let attestation: string; let budget: TableRecoveryConfig['audit'];
   try {
     expectedOwner = uuid(config.expectedOwner); expectedEpoch = integer(config.expectedEpoch, 1, Number.MAX_SAFE_INTEGER);
     attestation = hex(config.attestationDigest);
-    auditFields(config.audit, ['maxPages', 'maxPageBytes', 'maxDurationMs', 'maxTrackingBytes']);
+    const validated = auditConfig<2>({ passes: 2, record() {}, endPass() {}, finalize() {} }, config.audit);
+    budget = { maxPages: validated.maxPages, maxPageBytes: validated.maxPageBytes,
+      maxDurationMs: validated.maxDurationMs, maxTrackingBytes: validated.maxTrackingBytes };
   } catch { throw new ConfigurationError(); }
   if (signal?.aborted) throw new RecoveryFailure('cancelled');
   const storage = selected.storage;
@@ -240,9 +242,9 @@ export async function reclaimTableStore(config: TableRecoveryConfig,
     const fence: ForeignOwnerFenceV2 = { initId: m.initId, initDigest: m.initDigest, owner: m.owner,
       epoch: m.epoch, mDigest: m.digest, etag: record.etag };
     await reader.close();
-    if (selected.kind === 'ingress') await reclaimTableIngress(binding, native, fence, config.audit,
+    if (selected.kind === 'ingress') await reclaimTableIngress(binding, native, fence, budget,
       selected.maxIndexBytes, attestation, signal ? { signal } : undefined);
-    else await reclaimTableDeliveryOperatorV2(binding, native, fence, config.audit, attestation, signal ? { signal } : undefined);
+    else await reclaimTableDeliveryOperatorV2(binding, native, fence, budget, attestation, signal ? { signal } : undefined);
   } catch (error) {
     failure = error instanceof RecoveryFailure ? error : new RecoveryFailure(error instanceof TableRecoveryUncertainError ?
       'outcome-uncertain' : signal?.aborted ? 'cancelled' : error instanceof TableError && error.code === 'busy' ?
