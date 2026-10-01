@@ -81,8 +81,9 @@ files or command-line arguments, for credentials.
   `GATEWAY_STORAGE_BACKEND=table-v2` and provide the Table identities and budgets
   instead of SQLite paths.
 - **Bot authentication is explicit.** Client-secret mode is the default;
-  [certificate authentication](docs/certificate-auth.md) and
-  [managed-identity federation](docs/managed-identity-auth.md) are separate options
+  [certificate authentication](docs/certificate-auth.md),
+  [managed-identity federation](docs/managed-identity-auth.md), and
+  [AKS workload identity](docs/workload-identity-auth.md) are explicit options
   with their own hosting and identity requirements.
 
 See the [runtime reference](docs/runtime-reference.md) for environment variables,
@@ -142,7 +143,7 @@ focused tests, and the optional container, Kubernetes, and app-packaging checks.
 | Deploy and operate | [Azure Container Apps](docs/aca-deployment.md) · [Kubernetes](docs/deployment.md) |
 | Configure the runtime and HTTP API | [Runtime reference](docs/runtime-reference.md) · [Table runtime](docs/table-runtime.md) |
 | Establish trusted chat identities | [Authenticated setup capture](docs/setup-capture.md) |
-| Authenticate the bot | [Certificates](docs/certificate-auth.md) · [Managed-identity federation](docs/managed-identity-auth.md) |
+| Authenticate the bot | [Certificates](docs/certificate-auth.md) · [Managed-identity federation](docs/managed-identity-auth.md) · [AKS workload identity](docs/workload-identity-auth.md) |
 | Understand storage internals | [Table kernel and delivery journal](docs/table-storage.md) · [Table inbox](docs/table-inbox.md) |
 | Develop and test | [Contributing](CONTRIBUTING.md) · [Library examples](docs/library-examples.md) |
 | Review deployment evidence | [Live validation](docs/live-validation.md) |

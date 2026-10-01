@@ -14,7 +14,7 @@ were separately observed; synthetic tests alone do not establish compatibility o
 ## Prerequisites and boundaries
 
 - The operator must already have approval for the bot/application, exact tenant,
-  the selected client-secret, certificate or managed-identity-federation credential
+  the selected client-secret, certificate, managed-identity-federation or workload-identity credential
   mode, Teams channel, installation and intended personal chat. A custom-upload
   option or successful local listener is not proof of these.
   This command does not register/install apps, change tenant policy/consent, use
@@ -77,6 +77,13 @@ credential files. Setup uses the same deny-only callback and does not contact
 IMDS/ACA or construct a CCA. It cannot prove
 host UAMI assignment, FIC acceptance or outbound acquisition. The six-field
 artifact and dual incoming JWT verification remain unchanged.
+
+For explicit [AKS workload identity](workload-identity-auth.md), supply
+`TEAMS_CREDENTIAL_MODE=workload-identity`, `AZURE_FEDERATED_TOKEN_FILE`,
+`TEAMS_WORKLOAD_IDENTITY_ISSUER` and `TEAMS_WORKLOAD_IDENTITY_SUBJECT`, with
+secret, certificate and managed-identity-federation settings absent. Setup
+validates these settings structurally but never opens the projected token
+file or contacts Entra. Outbound credential qualification remains separate.
 
 CLI rejects `ORKA_*`, `INGRESS_*`, `OUTBOUND_*`, `DELIVERY_DB`,
 `TEAMS_RECIPIENT_IDS` and `TEAMS_SERVICE_URLS`, even when empty/disabled. Do not

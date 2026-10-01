@@ -26,6 +26,7 @@ import type { IngressPort, IngressScope, StoreOptions } from './types.js';
 import { relayOne } from './relay.js';
 import { prepareReceiver } from './server.js';
 import { assertCredentialSeparation } from '../auth/certificate.js';
+import { assertWorkloadIdentitySeparation } from '../auth/workload-identity.js';
 import type { Receiver, ReceiverDependencies } from './server.js';
 import { initializeDeliveryJournal, openDeliveryJournal } from '../delivery/journal.js';
 import { DeliveryJournalError } from '../delivery/types.js';
@@ -71,11 +72,14 @@ export async function startIngressRuntime(config: RuntimeServeConfig, dependenci
   const outbound = table?.outbound ?? sqliteOutbound;
   try {
     const databases = sqlite === undefined ? [] : [sqlite.dbPath, ...(sqliteOutbound ? [sqliteOutbound.dbPath, `${sqliteOutbound.dbPath}.owner.sqlite`] : [])];
-    assertCredentialSeparation(receiverConfig, databases.flatMap((path) => [path, `${path}-journal`, `${path}-wal`, `${path}-shm`]));
+    const paths = databases.flatMap((path) => [path, `${path}-journal`, `${path}-wal`, `${path}-shm`]);
+    assertCredentialSeparation(receiverConfig, paths);
+    if (sqliteOutbound) assertWorkloadIdentitySeparation(receiverConfig, paths);
   } catch { throw new ConfigurationError(); }
   if (signal?.aborted) throw new StartupFailure('startup-failed', 'cancelled');
   // Snapshot before any opening await; credentials and CA are prepared before
-  // ownership, so neither can be reread through a live SQLite inode.
+  // ownership. Rotating workload tokens have a separate, checked mount so their
+  // lazy reads cannot close an alias to an owned SQLite inode.
   const dbPath = sqlite?.dbPath; const scope = { ...selected.scope }; const policy = { ...selected.policy };
   const deps = { ...dependencies };
   if (table && (deps.openIngressStore !== undefined || deps.openDeliveryJournal !== undefined)) throw new ConfigurationError();

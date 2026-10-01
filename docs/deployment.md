@@ -47,8 +47,13 @@ explicit logical initialization and controlled clean handover; it does not provi
 an ACA deployment or change these **SQLite/client-secret Kubernetes assets**.
 Actual ACA endpoint/identity, Table data role and physical table, service atomicity,
 persistent hosting and public Teams/Orka HTTPS still require separately authorized
-qualification. No App Service or AKS token-file support is added. ACI/Azure Files
+qualification. That federation mode does not add App Service or AKS token-file support. ACI/Azure Files
 is not automatically qualified for the SQLite lifecycle.
+
+The separate [AKS workload-identity mode](workload-identity-auth.md) supports
+an explicitly selected projected service-account token. Its guide describes
+the required federated trust and changes to a private copy of this Deployment;
+the checked-in assets retain client-secret mode.
 
 For Table operations, use the [Table runtime guide](table-runtime.md), not the PVC/
 SQLite preparation steps below. Keep one writer and confirm clean process stop
@@ -70,7 +75,7 @@ operator action, using the Microsoft sources linked below.
 | --- | --- |
 | Bot OAuth client / Microsoft App ID | `TEAMS_APP_ID`, valid GUID; also manifest `bots[0].botId`. **Not** necessarily the Teams package ID. |
 | Tenant GUID | `TEAMS_TENANT_ID` and binding `match.accountId`; exact trusted tenant, no `common` or multi-tenant inference. |
-| Bot credential | Default Kubernetes assets: `teams-bot` Secret key `client-secret` → `TEAMS_CLIENT_SECRET`, a client-secret **value**, not its ID. Explicit certificate authentication supports host/Docker; managed-identity federation supports VM/ACI IMDS and the explicit ACA local subset ([one profile evaluated live](live-validation.md); other hosting/policy variants still require validation). Neither mode supplies a Kubernetes overlay. |
+| Bot credential | Default Kubernetes assets: `teams-bot` Secret key `client-secret` → `TEAMS_CLIENT_SECRET`, a client-secret **value**, not its ID. Certificate and managed-identity federation have separate hosting requirements. For AKS projected service-account tokens, use the explicit [workload-identity configuration](workload-identity-auth.md) and remove the client-secret entry from the copied Deployment. |
 | Verified bot recipient IDs | `TEAMS_RECIPIENT_IDS`, JSON array of exact allowed incoming `recipient.id` values, 1–100 entries. |
 | Verified service base URLs | `TEAMS_SERVICE_URLS`, JSON array of exact canonical public-cloud HTTPS URLs, 1–100 entries. Match path case/trailing slash; no query/fragment/userinfo/nonstandard service port. |
 | Verified sender IDs | Binding `senderPolicy.allowedSenderIds`: exact activity `from.id`, not display name, email, AAD ID or a guessed prefix. |
