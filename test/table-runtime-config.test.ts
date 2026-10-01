@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ConfigurationError, parseConfig } from '../src/ingress/config.js';
-import { parseRuntimeConfig, snapshotTableInitConfig, snapshotTableServeConfig } from '../src/ingress/runtime-config.js';
+import { parseRuntimeConfig, parseTableRecoveryConfig, snapshotTableInitConfig, snapshotTableServeConfig } from '../src/ingress/runtime-config.js';
 import { receiverConfig, scope } from './support/ingress-auth.js';
 
 function environment(): NodeJS.ProcessEnv {
@@ -133,6 +133,60 @@ test('direct Table shape refuses SQLite paths, duplicate bindings, scope mismatc
   const identity = { clientId: value.storage.identity.clientId, get host() { reads++; return reads === 1 ? 'unsupported' : 'imds'; } };
   assert.throws(() => snapshotTableServeConfig({ ...value, storage: { ...value.storage, identity } } as typeof value), ConfigurationError);
   assert.equal(reads, 0, 'closed Table inputs reject accessors rather than falling back after a reread');
+});
+
+test('operator recovery requires exact V2 owner, epoch and attestation digest without bot credentials', () => {
+  const env = environment(); for (const key of ['TEAMS_CLIENT_SECRET', 'TEAMS_RECIPIENT_IDS', 'TEAMS_SERVICE_URLS', 'ORKA_BEARER_TOKEN', 'ORKA_OUTBOUND_BEARER_TOKEN']) delete env[key];
+  Object.assign(env, { TABLE_RECOVERY_EXPECTED_OWNER: '22222222-2222-4222-8222-222222222222', TABLE_RECOVERY_EXPECTED_EPOCH: '17',
+    TABLE_RECOVERY_ATTESTATION_DIGEST: 'a'.repeat(64) });
+  for (const kind of ['ingress', 'delivery'] as const) {
+    const config = parseTableRecoveryConfig(env, kind);
+    assert.equal(config.target.kind, kind); assert.equal(config.target.storage.storeId, 'stable');
+    assert.equal(config.expectedOwner, env.TABLE_RECOVERY_EXPECTED_OWNER);
+    assert.equal(config.expectedEpoch, 17); assert.equal(config.attestationDigest, 'a'.repeat(64));
+    assert.deepEqual(config.audit, { maxPages: 100, maxPageBytes: 10485760, maxDurationMs: 30000, maxTrackingBytes: 1048576 });
+  }
+  for (const key of ['TABLE_RECOVERY_EXPECTED_OWNER', 'TABLE_RECOVERY_EXPECTED_EPOCH', 'TABLE_RECOVERY_ATTESTATION_DIGEST']) {
+    const broken = { ...env }; delete broken[key]; assert.throws(() => parseTableRecoveryConfig(broken, 'ingress'), ConfigurationError);
+  }
+  for (const change of [{ TABLE_RECOVERY_EXPECTED_OWNER: '' }, { TABLE_RECOVERY_EXPECTED_EPOCH: '0' },
+    { TABLE_RECOVERY_ATTESTATION_DIGEST: 'not-a-digest' }, { GATEWAY_STORAGE_BACKEND: 'sqlite' }, { INGRESS_DB: '/tmp/unsafe' }]) {
+    assert.throws(() => parseTableRecoveryConfig({ ...env, ...change }, 'delivery'), ConfigurationError);
+  }
+  assert.throws(() => parseRuntimeConfig(env, 'serve'), ConfigurationError);
+});
+
+test('operator recovery captures environment selectors, attestation and budgets once', () => {
+  const env = environment();
+  const changing = [
+    ['GATEWAY_STORAGE_BACKEND', 'table-v2', 'sqlite'],
+    ['TABLE_RECOVERY_EXPECTED_OWNER', '22222222-2222-4222-8222-222222222222', 'invalid-owner'],
+    ['TABLE_RECOVERY_EXPECTED_EPOCH', '17', '0'],
+    ['TABLE_RECOVERY_ATTESTATION_DIGEST', 'a'.repeat(64), 'invalid-digest'],
+    ['TABLE_AUDIT_MAX_PAGES', '100', '0'],
+    ['TABLE_AUDIT_MAX_BYTES', '10485760', '0'],
+    ['TABLE_AUDIT_MAX_DURATION_MS', '30000', '0'],
+    ['TABLE_AUDIT_MAX_TRACKING_BYTES', '1048576', '0'],
+    ['TABLE_MAX_INDEX_BYTES', '16777216', '0'],
+  ] as const;
+  const reads = new Map<string, number>();
+  for (const [key, first, subsequent] of changing) {
+    Object.defineProperty(env, key, { enumerable: true, get() {
+      const count = (reads.get(key) ?? 0) + 1; reads.set(key, count);
+      return count === 1 ? first : subsequent;
+    } });
+  }
+
+  const config = parseTableRecoveryConfig(env, 'ingress');
+  assert.ok(config.target.kind === 'ingress');
+  assert.equal(config.target.storage.backend, 'table-v2');
+  assert.equal(config.expectedOwner, '22222222-2222-4222-8222-222222222222');
+  assert.equal(config.expectedEpoch, 17);
+  assert.equal(config.attestationDigest, 'a'.repeat(64));
+  assert.deepEqual(config.audit, { maxPages: 100, maxPageBytes: 10485760, maxDurationMs: 30000, maxTrackingBytes: 1048576 });
+  assert.deepEqual(config.target.audit, config.audit);
+  assert.equal(config.target.maxIndexBytes, 16777216);
+  for (const [key] of changing) assert.equal(reads.get(key), 1, `${key} must only be read once`);
 });
 
 test('backend and storage host selectors are captured once, not reread into a different selection', () => {

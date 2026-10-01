@@ -20,10 +20,10 @@ export interface Metadata {
 export interface CleanReleaseExit {
   kind: 'clean-release'; oldOwner: string; oldEpoch: number; invocation: string; planDigest: string;
 }
-export interface OperatorRecoveryExit {
+export type OperatorRecoveryExit = {
   kind: 'operator-recovery'; oldOwner: string; oldEpoch: number; invocation: string;
   originalMDigest: string; planDigest: string; domainDispositionDigest: string; operatorAttestationDigest: string;
-}
+} & ({ auditId: string; auditDigest: string } | { auditId?: never; auditDigest?: never });
 export type ExitReceipt = CleanReleaseExit | OperatorRecoveryExit;
 export interface MetadataV2 extends Omit<Metadata, 'operation' | 'release'> {
   operation: Metadata['operation'] | 'recover'; exit: ExitReceipt | undefined;
@@ -65,6 +65,19 @@ export interface ForeignOwnerFenceV2 {
 export type ForeignInspectionBudget = OwnedAuditBudget;
 export type ForeignInspectionOptions = OwnedAuditOptions;
 export type ForeignInspectionVisitorV2 = OwnedAuditVisitorV2;
+/** Trusted domain validator output ONLY. The storage layer validates closed wire shapes but cannot prove domain safety from these bytes. */
+export interface OperatorReclaimDispositionV2 {
+  state: Uint8Array; dispositionDigest: string; operatorAttestationDigest: string;
+  /** Only an inbox generation seal CREATE is permitted; domain audit must validate its meaning. */
+  seal?: DataAction;
+  /** Trusted synchronous finalization, after the post-transaction data fold includes audit and seal. */
+  complete(this: void, summary: Readonly<{ postDataDigest: string; dataRowCount: number; auditId: string; auditDigest: string }>):
+    { result: Uint8Array; domainDispositionDigest: string };
+}
+export interface OperatorRecoveryAuditV2 {
+  schema: 1; kind: 'operator-recovery-audit'; invocation: string; oldOwner: string; oldEpoch: number;
+  originalMDigest: string; dispositionDigest: string; operatorAttestationDigest: string;
+}
 /** Only this exact thrown value marks trusted domain-allocator exhaustion. */
 export const OWNED_AUDIT_BUDGET_EXHAUSTED: unique symbol = Symbol('owned-audit-budget-exhausted');
 export interface TableDependencies {

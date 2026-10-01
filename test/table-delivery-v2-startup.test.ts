@@ -20,7 +20,8 @@ for (const budget of ['pages', 'time', 'bytes'] as const) test(`V2 ${budget}-inc
     scanPages: budget === 'pages' ? 1 : 10000, scanBytes: budget === 'bytes' ? 1 : 64 * 1024 * 1024,
     callTimeoutMs: budget === 'time' ? 1000 : 30000,
   } });
-  let done = false; const opening = assert.rejects(j.open(), code('unavailable')).then(() => { done = true; });
+  let done = false; const opening = assert.rejects(j.open(), error => code('unavailable')(error) &&
+    (budget !== 'pages' || (error as { startupReason?: string }).startupReason === 'incomplete')).then(() => { done = true; });
   if (budget === 'time') {
     await eventually(() => entered); await eventually(() => j.status().lifecycle === 'failed');
     // Legacy native HTTP deadlines drain before the held service handler replies.

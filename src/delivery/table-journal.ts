@@ -17,6 +17,11 @@ export interface TableDeliveryJournalLimits { maxPending?: number; maxPendingByt
 type Snapshot = { operation: 'begin'; identity: RequestIdentity } | { operation: 'settle'; claim: DeliveryClaim; outcome: DeliveryOutcome };
 type Job = { snapshot: Snapshot; bytes: number; resolve: (value: BeginDeliveryResult | SettlementResult) => void; reject: (error: DeliveryJournalError) => void };
 type Lifecycle = 'new' | 'initializing' | 'opening' | 'ready' | 'failed' | 'closing' | 'closed';
+/** Startup-only safe diagnostic; the public journal error code remains unavailable. */
+export class TableDeliveryStartupFailure extends DeliveryJournalError {
+  readonly startupReason = 'incomplete' as const;
+  constructor() { super('unavailable'); }
+}
 const aliasKey = (id: string): DataKey => ({ type: 'alias', id });
 const operationKey = (id: string): DataKey => ({ type: 'delivery', id });
 function safeError(error: unknown): DeliveryJournalError {
@@ -118,7 +123,11 @@ class TableDeliveryJournal implements DeliveryJournalPort {
         if (result.kind !== 'committed') throw new DeliveryJournalError('unavailable');
         await this.kernel.close(); this.lifecycle = 'closed';
       } else this.lifecycle = 'ready';
-    } catch (error) { await this.retire(); throw safeError(error); }
+    } catch (error) {
+      await this.retire();
+      if (!initialize && error instanceof TableError && error.code === 'incomplete') throw new TableDeliveryStartupFailure();
+      throw safeError(error);
+    }
   }
   begin(request: Readonly<DeliveryRequest>): Promise<BeginDeliveryResult> {
     // Deliberately not async: no suspended frame or queued closure retains request.

@@ -6,7 +6,7 @@ unchanged synchronous library APIs. This guide covers runtime selection; see
 [Table storage](table-storage.md) and [inbox semantics](table-inbox.md) for the
 persisted formats, bounds and failure rules.
 
-Runtime selection is not provisioning, migration, recovery or HA. The separate
+Runtime selection is not provisioning, migration or HA. Explicit operator reclaim is a separate, audited command; `serve` never takes over an occupied owner. The separate
 [ACA operator guide](aca-deployment.md) and [live report](live-validation.md)
 record the evaluated identity/init/serve/personal-chat path without expanding those guarantees.
 The physical Azure primary account/table and authorized UAMI access must already
@@ -33,6 +33,8 @@ or secret manager, not argv, committed files or logs.
 | `TABLE_AUDIT_MAX_DURATION_MS` | Required positive integer: admission-relative monotonic inbox audit budget, including queue wait. Ceiling: 2,147,483,647 ms. |
 | `TABLE_AUDIT_MAX_TRACKING_BYTES` | Required positive integer: inbox audit cursor/hash/row tracking capacity, including growth overlap. Ceiling: 268,435,456 bytes (256 MiB). |
 | `TABLE_MAX_INDEX_BYTES` | Required positive integer: inbox domain index budget. Ceiling: 1,073,741,824 bytes (1 GiB). |
+| `TABLE_RECOVERY_EXPECTED_OWNER`, `TABLE_RECOVERY_EXPECTED_EPOCH` | Recovery commands only: the exact occupied owner UUID and positive epoch independently observed by the operator. Never guess or reuse values from an earlier attempt. |
+| `TABLE_RECOVERY_ATTESTATION_DIGEST` | Recovery commands only: lowercase SHA-256 digest of an operator-held, private termination attestation. The attestation itself is never sent to Table or logged. |
 
 All commands require the complete existing scope: `TEAMS_APP_ID`,
 `TEAMS_TENANT_ID`, `ORKA_BASE_URL` (full HTTPS base including installation path),
@@ -47,7 +49,11 @@ The budget values have **no default full-history profile**. An accepted numeric
 configuration may still be too small to open retained history. For example,
 tracking has an initial 80,926-byte reservation before growth. Separate M point
 bodies, native buffers and SDK work are not included in collection body bytes;
-index/tracking budgets are not heap/RSS measurements. See the exact
+index/tracking budgets are not heap/RSS measurements. `recover-ingress` retains
+bounded disposition data while rebuilding an independent proof, so it reserves
+60 KiB from the second index budget; even an empty inbox needs at least
+4,255,744 `TABLE_MAX_INDEX_BYTES` to recover. A smaller budget fails closed
+without writing. See the exact
 [audit meanings](table-storage.md#explicit-owned-streaming-audit) and
 [inbox index accounting](table-inbox.md). Delivery keeps its existing complete
 `scan()` limits (10,000 pages / 64 MiB by default and its existing caller deadline);
@@ -65,6 +71,8 @@ the selected backend; mixed SQLite/Table serving is not supported.
 | `node dist/ingress/main.js init` | Inbox ID and all five inbox audit/index values | Initialize only the empty inbox partition, then drain/close. |
 | `node dist/ingress/main.js init-delivery` | Delivery ID | Initialize only the empty delivery partition, then drain/close. |
 | `node dist/ingress/main.js serve` | Inbox ID/budgets, existing receiver/routing/bot credentials and Orka ingress bearer; enabled outbound additionally requires delivery ID and distinct outbound bearer/listener settings | Open/audit existing stores only; both audits complete before either listener. |
+| `node dist/ingress/main.js recover-ingress` | Inbox ID, full scope, storage identity, audit/index budgets and three `TABLE_RECOVERY_*` values | Independently audit and conditionally reclaim **only** the occupied inbox. Does not listen or initialize. |
+| `node dist/ingress/main.js recover-delivery` | Delivery ID, full scope, storage identity, audit/index budgets and three `TABLE_RECOVERY_*` values | Independently audit and conditionally reclaim **only** the occupied delivery store. Does not listen or initialize. |
 
 Inbox initialization requires and validates all five audit/index values, but its
 existing genesis audit uses the kernel's **30,000 ms** duration, not
@@ -82,10 +90,49 @@ For ingress-only `serve`, omit delivery ID and all outbound settings; set
 replacing `DELIVERY_DB` with `TABLE_DELIVERY_STORE_ID`.
 
 Serve refuses missing, occupied, unsupported or incompletely initialized stores.
-Existing M **or orphan data** causes init refusal, not adoption/reset. Interrupted
-or refused initialization may already have committed: nonzero exit is not proof
-of noncommit. Do not automatically retry, delete or roll back storage to get past
-that failure. There is no repair/recovery command.
+An occupied V2 owner reports `store-owned-requires-operator-recovery: occupied`
+with a fixed ingress/delivery label; it does **not** claim that owner is alive,
+wait for a lease, or retry automatically. `store-open-failed` reports a fixed
+`missing`, `corrupt`, `incomplete`, `unresolved` or `unavailable` reason;
+`listener-failed: ingress/outbound` identifies listener binding without
+printing raw exceptions. `startup-cleanup-failed` means closure was not proven;
+inspect persisted state rather than assuming ownership was released. Existing M
+**or orphan data** causes init refusal, not adoption/reset. Interrupted or
+refused initialization may already have committed: nonzero exit is not proof of
+noncommit. Do not automatically retry, delete or roll back storage to get past
+that failure.
+
+### Manual owner reclaim
+
+There is no lease in this release. To recover a stranded V2 owner, first stop
+all old processes and prevent the old revision/Job from restarting; independently
+verify physical termination. Record a private attestation and derive its
+lowercase SHA-256 digest offline. Observe the **exact current** owner and epoch
+using approved read-only Table inspection; set the three `TABLE_RECOVERY_*`
+values privately (no shell tracing, raw attestation text, tokens or connection
+strings in command arguments, output or checked-in files). Run one recovery
+command for each blocked logical partition, only after confirming that the
+same process cannot still own either store. A process still running can have a
+provider request in flight, even though its later Table writes are ETag-fenced.
+
+The command does a complete domain audit, then atomically replaces occupied
+metadata with an owner-empty `recover` exit at the **same** epoch and creates a
+separate, append-only audit row in that partition. It refuses a changed ETag,
+owner, epoch, corrupt/incomplete audit, already empty owner, or unavailable
+storage. An ambiguous response is **not** permission to rerun the command: use
+read-only inspection to determine whether M and its audit row committed. The
+command reports fixed `operator-recovery-failed` reasons: `already-unowned`,
+`owner-or-epoch-mismatch`, `cancelled`, `audit-or-storage-failed`, or
+`outcome-uncertain`. `already-unowned` on repeat adds no audit row; an
+`outcome-uncertain` result requires inspection before any next action. The
+next ordinary `serve` claim advances the epoch by one, verifies the recovery
+receipt and domain disposition, then proceeds to listeners only after both
+stores have passed their audits. Earlier-epoch delivery `sending` remains
+logically unknown and is never resent; an uncertain ingress forwarding arm is
+sealed/blocked, not requeued. A normal clean close does not require an operator
+receipt. Reclaim cannot prove physical termination and cannot atomically cancel
+an already submitted Teams/Orka call. Manual Table edits, re-init and changing
+store IDs to bypass a blocked owner are unsupported.
 
 SIGINT/SIGTERM are registered for asynchronous initialization and serve. Serving
 shutdown inhibits intake, drains SDK/bot/provider/relay work and domain settlement,
@@ -160,12 +207,12 @@ or default-credential support is implied.
 
 ## Operational and verification boundary
 
-Support **one writer with controlled clean handover**: confirm the old CLI process
-has cleanly stopped/released before starting its successor. Occupied ownership,
-crashes, failed audits and unclean release remain blocked and visible. Replica
+Support **one writer with controlled clean handover** or explicit, audited
+operator reclaim after verified termination. Occupied ownership, crashes,
+failed audits and unclean releases do not trigger automatic takeover. Replica
 count or ACA single-revision mode is not fencing; rolling revisions can overlap.
-No scale-out, rolling-handover fence, crash recovery, force/reset or migration is
-provided. The checked-in Kubernetes package remains SQLite/client-secret; this
+No scale-out, rolling-handover automation, lease, autonomous crash recovery,
+force/reset or migration is provided. The checked-in Kubernetes package remains SQLite/client-secret; this
 feature does not deploy or provision ACA or alter Kubernetes assets. The separate
 [ACA profile renderer](aca-deployment.md) prepares operator-owned templates only.
 

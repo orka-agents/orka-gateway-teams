@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { FixtureHooks } from './ingress-https.js';
 import type { EventEnvelope } from '../../src/protocol/types.js';
+import { createTableKernelV2 } from '../../src/storage/table/index.js';
 import { activity, authFixture, post, recipientId, scope, serviceUrl } from './ingress-auth.js';
 import { httpsFixture } from './ingress-https.js';
 import { runtimeIdentity, runtimeTableService, storageClientId } from './table-runtime.js';
@@ -231,7 +232,7 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
     await until(() => run.child.exitCode !== null || run.child.signalCode !== null, 'CLI exited without forced fixture cleanup');
     const result = await run.done;
     assert.equal(result.code, code, 'CLI exit code'); assert.equal(result.signal, null, 'natural CLI exit');
-    assert.equal(result.stdout.length, 0); assert.equal(result.stderr.includes(`teams-ingress: ${event}\n`), true, 'fixed CLI lifecycle');
+    assert.equal(result.stdout.length, 0); assert.equal(result.stderr.includes(`teams-ingress: ${event}`), true, 'fixed CLI lifecycle');
     const privateValues = [acaHeader, syntheticToken, finalToken, receipt, orkaReceipt, incomingToken, finalDelivery.text,
       serving.ORKA_BEARER_TOKEN, serving.ORKA_OUTBOUND_BEARER_TOKEN, common.IDENTITY_ENDPOINT, common.MSI_ENDPOINT, legacySecret];
     assert.equal(privateValues.some(value => result.stderr.includes(value)), false, 'private values absent from CLI output');
@@ -273,10 +274,39 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
   const initializedInbox = JSON.stringify([...tables.inbox.rows]);
   await finished(launch('init-delivery', common), 0, 'initialized');
   assert.equal(JSON.stringify([...tables.inbox.rows]) === initializedInbox, true, 'delivery init does not rewrite ingress');
+  const recoveryEnv = { ...common, TABLE_RECOVERY_EXPECTED_OWNER: '22222222-2222-4222-8222-222222222222',
+    TABLE_RECOVERY_EXPECTED_EPOCH: '1', TABLE_RECOVERY_ATTESTATION_DIGEST: 'a'.repeat(64) };
+  const beforeRecovery = JSON.stringify([...tables.delivery.rows]);
+  await finished(launch('recover-delivery', recoveryEnv), 1, 'operator-recovery-failed: already-unowned');
+  assert.equal(JSON.stringify([...tables.delivery.rows]), beforeRecovery, 'already-unowned command makes no audit row');
   for (const mode of ['init', 'init-delivery']) {
     const before = JSON.stringify([[...tables.inbox.rows], [...tables.delivery.rows]]);
     await finished(launch(mode, common), 1, 'startup-failed');
     assert.equal(JSON.stringify([[...tables.inbox.rows], [...tables.delivery.rows]]) === before, true, 'existing data not adopted/reset');
+  }
+  assert.equal(identity.calls.bot, 0); assert.equal(effects.entra, 0);
+  for (const kind of ['ingress', 'delivery'] as const) {
+    const rows = kind === 'ingress' ? tables.inbox.rows : tables.delivery.rows;
+    const binding = kind === 'ingress' ? { kind, account: common.TABLE_ACCOUNT, table: common.TABLE_NAME,
+      storeId: common.TABLE_INGRESS_STORE_ID, scope } : { kind, account: common.TABLE_ACCOUNT, table: common.TABLE_NAME,
+      storeId: common.TABLE_DELIVERY_STORE_ID, scope: { appId: scope.appId, tenantId: scope.tenantId } };
+    const previous = createTableKernelV2(binding, { token: async () => syntheticToken, request: tables.request });
+    await previous.acquire();
+    const before = rows.get('M')!;
+    assert.notEqual(before.Owner, '', 'public owner handle acquired the initialized store');
+    const auditCount = [...rows.keys()].filter(key => key.startsWith('control_')).length;
+    await finished(launch(`recover-${kind}`, { ...recoveryEnv,
+      TABLE_RECOVERY_EXPECTED_OWNER: String(before.Owner), TABLE_RECOVERY_EXPECTED_EPOCH: String(before.Epoch) }), 0, `reclaimed (${kind})`);
+    const recovered = rows.get('M')!;
+    const exit = JSON.parse(Buffer.from(String(recovered.Exit), 'base64').toString());
+    assert.equal(recovered.Owner, ''); assert.equal(recovered.Operation, 'recover');
+    assert.equal(recovered.Epoch, before.Epoch); assert.equal(exit.kind, 'operator-recovery');
+    assert.equal(exit.oldOwner, before.Owner); assert.equal(exit.originalMDigest, before.Digest);
+    assert.equal(exit.operatorAttestationDigest, recoveryEnv.TABLE_RECOVERY_ATTESTATION_DIGEST);
+    const audit = rows.get(`control_${Buffer.from(`control_recovery:${exit.auditId}`).toString('base64url')}`)!;
+    assert.ok(audit); assert.equal(exit.auditDigest, audit.Digest);
+    assert.equal([...rows.keys()].filter(key => key.startsWith('control_')).length, auditCount + 1);
+    await assert.rejects(previous.close(), 'superseded owner cannot release the recovered store');
   }
   assert.equal(identity.calls.bot, 0); assert.equal(effects.entra, 0);
   // Strict verification accepts the real signature, but the default SDK fetches
@@ -286,7 +316,7 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
   assert.equal(payloads(tables.inbox.rows, 'event').length, 0); await stop(denied); sdkWrongKey = false;
 
   const running = await start(); assert.equal(identity.calls.bot, 0);
-  const occupied = launch('serve', serving); await finished(occupied, 1, 'startup-failed');
+  const occupied = launch('serve', serving); await finished(occupied, 1, 'store-owned-requires-operator-recovery (ingress): occupied');
   assert.equal(occupied.output().includes('teams-ingress: listening'), false, 'occupied writer cannot listen');
   assert.equal((await post(ingressPort, auth.token({ aud: 'wrong-audience' }))).status, 401);
   assert.equal((await post(ingressPort, incomingToken)).status, 200);

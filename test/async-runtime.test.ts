@@ -57,7 +57,7 @@ for (const boundary of ['inbox', 'journal'] as const) test(`startup abort waits 
     await Promise.race([entered.promise, starting]); assert.equal(opens, boundary === 'inbox' ? 1 : 2, 'trusted async opening must be awaited');
     abort.abort(); await turn(); assert.equal(finished, false); assert.equal(closes, 0); assert.equal(listens, 0);
     gate.resolve(); await turn(); assert.equal(finished, false, 'startup unwind must await actual closes');
-    closeGate.resolve(); await assert.rejects(starting, { message: 'Ingress startup failed' });
+    closeGate.resolve(); await assert.rejects(starting, { message: 'startup-failed: cancelled' });
     assert.equal(closes, boundary === 'inbox' ? 1 : 2); assert.equal(listens, 0);
     const reopened = openIngressStore(f.config.dbPath, scope); reopened.close();
     const journal = openDeliveryJournal(f.config.outbound!.dbPath, journalScope); journal.close();
@@ -74,7 +74,7 @@ test('second-store opening failure waits first-store async close and reports fix
   }).then((value) => { runtime = value; return value; }).finally(() => { finished = true; }); void starting.catch(() => {});
   try {
     await Promise.race([closing.promise, starting]); await turn(); assert.equal(finished, false);
-    closeGate.resolve(); await assert.rejects(starting, { message: 'Ingress startup failed' });
+    closeGate.resolve(); await assert.rejects(starting, { message: 'store-open-failed: unavailable', cleanupFailed: true });
     const store = openIngressStore(f.config.dbPath, scope); store.close();
   } finally { closeGate.resolve(); await starting.catch(() => {}); await runtime?.stop(); }
 });
@@ -99,7 +99,7 @@ for (const failure of ['abort', 'initialize'] as const) test(`${failure} during 
     await entered.promise; if (failure === 'abort') abort.abort(); await turn(); assert.equal(closes, 0); assert.equal(finished, false);
     gate.resolve(); await Promise.race([closing.promise, starting.catch(() => {})]); await turn();
     assert.equal(listens, 0); assert.equal(finished, false); assert.equal(closes, 2, 'one close failure must not skip the other');
-    closeGate.resolve(); await assert.rejects(starting, { message: 'Ingress startup failed' });
+    closeGate.resolve(); await assert.rejects(starting, { message: failure === 'abort' ? 'startup-failed: cancelled' : 'listener-failed: ingress', cleanupFailed: true });
   } finally { gate.resolve(); closeGate.resolve(); await starting.catch(() => {}); await runtime?.stop(); }
 });
 

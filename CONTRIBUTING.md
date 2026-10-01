@@ -41,8 +41,8 @@ See [Table storage boundaries](docs/table-storage.md). The kernel lives entirely
 `src/storage/table/`; the [V2 inbox](docs/table-inbox.md) lives under
 `src/ingress/table-*.ts`. The compiled CLI selects the V2 inbox/delivery runtime
 through `src/ingress/runtime-config.ts`; SQLite remains the default. See the
-[Table runtime guide](docs/table-runtime.md). Operator recovery execution remains
-separate work; low-level kernels and foreign inspection remain library APIs.
+[Table runtime guide](docs/table-runtime.md). Operator recovery uses a separate audited Table V2 command; low-level kernels
+and foreign inspection remain library APIs.
 Focused check: `node --import tsx --test test/table-*.test.ts`.
 Tests exercise real public SDK/native HTTPS against an independently implemented
 local service; they use no Azure resources or real credentials. Preserve raw

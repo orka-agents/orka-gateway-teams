@@ -4,14 +4,20 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { ConfigurationError, tlsVerificationEnabled, validateOutboundConfig, validateReceiverConfig } from './config.js';
-import { parseRuntimeConfig, snapshotTableInitConfig, snapshotTableServeConfig } from './runtime-config.js';
-import type { RuntimeServeConfig, TableInitConfig } from './runtime-config.js';
+import { parseRuntimeConfig, parseTableRecoveryConfig, snapshotTableInitConfig, snapshotTableServeConfig } from './runtime-config.js';
+import type { RuntimeServeConfig, TableInitConfig, TableRecoveryConfig } from './runtime-config.js';
 import { prepareStorageIdentity } from '../auth/storage-identity.js';
 import type { StorageIdentityDependencies, StorageTokenProvider } from '../auth/storage-identity.js';
 import type { TableDependencies } from '../storage/table/types.js';
 import { createTableIngressStore } from './table-store.js';
-import { createTableDeliveryJournalV2 } from '../delivery/table-journal.js';
-import { auditFields } from '../storage/table/audit.js';
+import { reclaimTableIngress } from './table-recovery.js';
+import { reclaimTableDeliveryOperatorV2 } from '../delivery/table-recovery.js';
+import { createTableKernelV2 } from '../storage/table/owner.js';
+import { TableRecoveryUncertainError } from '../storage/table/recovery.js';
+import { hex, integer, uuid } from '../storage/table/codec.js';
+import type { ForeignOwnerFenceV2, TableBinding } from '../storage/table/types.js';
+import { createTableDeliveryJournalV2, TableDeliveryStartupFailure } from '../delivery/table-journal.js';
+import { auditConfig, auditFields } from '../storage/table/audit.js';
 import type { ServeConfig } from './config.js';
 import { logIngress } from './logger.js';
 import { createOrkaClient } from './client.js';
@@ -22,11 +28,32 @@ import { prepareReceiver } from './server.js';
 import { assertCredentialSeparation } from '../auth/certificate.js';
 import type { Receiver, ReceiverDependencies } from './server.js';
 import { initializeDeliveryJournal, openDeliveryJournal } from '../delivery/journal.js';
+import { DeliveryJournalError } from '../delivery/types.js';
 import type { DeliveryJournalPort, JournalScope } from '../delivery/types.js';
+import { TableError } from '../storage/table/types.js';
 import { startOutboundServer } from '../outbound/server.js';
 import type { OutboundServer } from '../outbound/server.js';
 
 export interface IngressRuntime { port: number; done: Promise<void>; stop(): Promise<void>; outboundPort?: number }
+export type RecoveryReason = 'owner-or-epoch-mismatch' | 'already-unowned' | 'audit-or-storage-failed' | 'outcome-uncertain' | 'cancelled';
+export class RecoveryFailure extends Error {
+  constructor(readonly reason: RecoveryReason) { super(`operator-recovery-failed: ${reason}`); }
+}
+export type StartupCategory = 'store-open-failed' | 'store-owned-requires-operator-recovery' | 'listener-failed' | 'startup-failed' | 'startup-cleanup-failed';
+export type StartupReason = 'missing' | 'occupied' | 'corrupt' | 'incomplete' | 'unresolved' | 'unavailable' | 'cancelled' | 'ingress' | 'outbound';
+export class StartupFailure extends Error {
+  cleanupFailed = false;
+  constructor(readonly category: StartupCategory, readonly reason: StartupReason, readonly store?: 'ingress' | 'delivery') {
+    super(`${category}: ${reason}`);
+  }
+}
+function openFailure(error: unknown, store: 'ingress' | 'delivery', table: boolean): StartupFailure {
+  const code = error instanceof TableError || error instanceof DeliveryJournalError ? error.code : undefined;
+  if (table && code === 'busy') return new StartupFailure('store-owned-requires-operator-recovery', 'occupied', store);
+  const reason = error instanceof TableDeliveryStartupFailure ? error.startupReason :
+    code === 'missing' || code === 'corrupt' || code === 'incomplete' || code === 'unresolved' ? code : 'unavailable';
+  return new StartupFailure('store-open-failed', reason, store);
+}
 /** Trusted native seams; legacy opening hooks remain SQLite-only. */
 export interface IngressRuntimeDependencies extends ReceiverDependencies {
   openIngressStore?: (path: string, scope: Readonly<IngressScope>, options: StoreOptions) => IngressPort | Promise<IngressPort>;
@@ -46,7 +73,7 @@ export async function startIngressRuntime(config: RuntimeServeConfig, dependenci
     const databases = sqlite === undefined ? [] : [sqlite.dbPath, ...(sqliteOutbound ? [sqliteOutbound.dbPath, `${sqliteOutbound.dbPath}.owner.sqlite`] : [])];
     assertCredentialSeparation(receiverConfig, databases.flatMap((path) => [path, `${path}-journal`, `${path}-wal`, `${path}-shm`]));
   } catch { throw new ConfigurationError(); }
-  if (signal?.aborted) throw new Error('Ingress startup failed');
+  if (signal?.aborted) throw new StartupFailure('startup-failed', 'cancelled');
   // Snapshot before any opening await; credentials and CA are prepared before
   // ownership, so neither can be reread through a live SQLite inode.
   const dbPath = sqlite?.dbPath; const scope = { ...selected.scope }; const policy = { ...selected.policy };
@@ -71,6 +98,7 @@ export async function startIngressRuntime(config: RuntimeServeConfig, dependenci
     const provider = await Promise.allSettled([Promise.resolve().then(() => storageProvider?.close())]);
     return [...stores, ...provider];
   };
+  let phase: 'ingress-store' | 'delivery-store' | 'ingress-listener' | 'outbound-listener' | 'startup' = 'startup';
   try {
     assertStarting();
     if (table) {
@@ -83,30 +111,42 @@ export async function startIngressRuntime(config: RuntimeServeConfig, dependenci
       const delivery = outbound === undefined ? undefined : createTableDeliveryJournalV2({ kind: 'delivery', account: storage.account,
         table: storage.table, storeId: storage.deliveryStoreId!, scope: { appId: scope.appId, tenantId: scope.tenantId } }, native);
       journal = delivery;
-      await inbox.open(); assertStarting();
-      if (delivery) await delivery.open();
+      phase = 'ingress-store'; await inbox.open(); phase = 'startup'; assertStarting();
+      if (delivery) { phase = 'delivery-store'; await delivery.open(); phase = 'startup'; }
     } else {
+      phase = 'ingress-store';
       store = await (deps.openIngressStore ?? ((path, target, options) => createIngressPort(openIngressStore(path, target, options))))(dbPath!, scope, { policy });
-      assertStarting();
-      if (sqliteOutbound) journal = await (deps.openDeliveryJournal ?? openDeliveryJournal)(sqliteOutbound.dbPath,
-        { appId: store.scope.appId, tenantId: store.scope.tenantId });
+      phase = 'startup'; assertStarting();
+      if (sqliteOutbound) {
+        phase = 'delivery-store'; journal = await (deps.openDeliveryJournal ?? openDeliveryJournal)(sqliteOutbound.dbPath,
+          { appId: store.scope.appId, tenantId: store.scope.tenantId }); phase = 'startup';
+      }
     }
     const ownedStore = store;
     const journalScope = { appId: ownedStore.scope.appId, tenantId: ownedStore.scope.tenantId };
     // Both complete domain audits precede either listener. Never reopen the inbox for routes.
     assertStarting();
+    phase = 'ingress-listener';
     receiver = await prepared.start({ scope: ownedStore.scope,
       admit: (event, route) => ready ? ownedStore.admit(event, route) : { kind: 'full' } },
       journal === undefined ? undefined : { journal, getRoute: (key) => ownedStore.getRoute(key) }, abort.signal);
-    assertStarting();
-    if (outbound) api = await startOutboundServer(outbound, receiver.outbound!, journalScope, () => ready);
-    assertStarting(); ready = true;
-  } catch {
+    phase = 'startup'; assertStarting();
+    if (outbound) { phase = 'outbound-listener'; api = await startOutboundServer(outbound, receiver.outbound!, journalScope, () => ready); }
+    phase = 'startup'; assertStarting(); ready = true;
+  } catch (error) {
+    const storeFailure = phase === 'ingress-store' || phase === 'delivery-store' ?
+      openFailure(error, phase === 'ingress-store' ? 'ingress' : 'delivery', table !== undefined) : undefined;
+    const failure = storeFailure && ['corrupt', 'unresolved', 'incomplete'].includes(storeFailure.reason) ? storeFailure :
+      signal?.aborted ? new StartupFailure('startup-failed', 'cancelled') : storeFailure ??
+      (phase === 'ingress-listener' || phase === 'outbound-listener' ?
+        new StartupFailure('listener-failed', phase === 'ingress-listener' ? 'ingress' : 'outbound') :
+        new StartupFailure('startup-failed', 'unavailable'));
     ready = false; abort.abort();
     // Late open/initialize work reaches here only after it actually completes.
-    await Promise.allSettled([api?.stop(), receiver?.stop()]);
-    await closeStores(); signal?.removeEventListener('abort', cancel);
-    throw new Error('Ingress startup failed');
+    const listeners = await Promise.allSettled([api?.stop(), receiver?.stop()]);
+    const stores = await closeStores(); signal?.removeEventListener('abort', cancel);
+    failure.cleanupFailed = [...listeners, ...stores].some(result => result.status === 'rejected');
+    throw failure;
   }
   const ownedReceiver = receiver; const ownedStore = store;
   let resolveDone!: () => void; let rejectDone!: (error: Error) => void;
@@ -172,6 +212,54 @@ export async function initializeTableStore(config: TableInitConfig,
   if (failed || signal?.aborted || [...closed, ...drained].some(result => result.status === 'rejected')) throw new Error('Table initialization failed');
 }
 
+/** One explicit, bounded Table V2 operator action; never starts listeners or acquires an ordinary owner. */
+export async function reclaimTableStore(config: TableRecoveryConfig,
+  dependencies: Pick<IngressRuntimeDependencies, 'tableRequest' | 'storageIdentity'> = {}, signal?: AbortSignal): Promise<void> {
+  const selected = snapshotTableInitConfig(config.target);
+  let expectedOwner: string; let expectedEpoch: number; let attestation: string; let budget: TableRecoveryConfig['audit'];
+  try {
+    expectedOwner = uuid(config.expectedOwner); expectedEpoch = integer(config.expectedEpoch, 1, Number.MAX_SAFE_INTEGER);
+    attestation = hex(config.attestationDigest);
+    const validated = auditConfig<2>({ passes: 2, record() {}, endPass() {}, finalize() {} }, config.audit);
+    budget = { maxPages: validated.maxPages, maxPageBytes: validated.maxPageBytes,
+      maxDurationMs: validated.maxDurationMs, maxTrackingBytes: validated.maxTrackingBytes };
+  } catch { throw new ConfigurationError(); }
+  if (signal?.aborted) throw new RecoveryFailure('cancelled');
+  const storage = selected.storage;
+  const binding: TableBinding = selected.kind === 'ingress' ? { kind: 'ingress', account: storage.account, table: storage.table,
+    storeId: storage.storeId, scope: selected.scope } : { kind: 'delivery', account: storage.account, table: storage.table,
+    storeId: storage.storeId, scope: { appId: selected.scope.appId, tenantId: selected.scope.tenantId } };
+  let deps: Pick<IngressRuntimeDependencies, 'tableRequest' | 'storageIdentity'>;
+  let provider: StorageTokenProvider;
+  try {
+    deps = auditFields(dependencies, ['tableRequest', 'storageIdentity']);
+    provider = prepareTableProvider(storage.identity, deps);
+  } catch { throw new ConfigurationError(); }
+  const native: TableDependencies = { token: provider.token, ...(deps.tableRequest === undefined ? {} : { request: deps.tableRequest }) };
+  const reader = createTableKernelV2(binding, native);
+  let failure: unknown;
+  try {
+    const record = await reader.read('M', { ...(signal ? { signal } : {}) });
+    if (!record || record.value.kind !== 'metadata') throw new RecoveryFailure('audit-or-storage-failed');
+    const m = record.value;
+    if (m.owner === '') throw new RecoveryFailure('already-unowned');
+    if (m.owner !== expectedOwner || m.epoch !== expectedEpoch) throw new RecoveryFailure('owner-or-epoch-mismatch');
+    const fence: ForeignOwnerFenceV2 = { initId: m.initId, initDigest: m.initDigest, owner: m.owner,
+      epoch: m.epoch, mDigest: m.digest, etag: record.etag };
+    await reader.close();
+    if (selected.kind === 'ingress') await reclaimTableIngress(binding, native, fence, budget,
+      selected.maxIndexBytes, attestation, signal ? { signal } : undefined);
+    else await reclaimTableDeliveryOperatorV2(binding, native, fence, budget, attestation, signal ? { signal } : undefined);
+  } catch (error) {
+    failure = error instanceof RecoveryFailure ? error : new RecoveryFailure(error instanceof TableRecoveryUncertainError ?
+      'outcome-uncertain' : signal?.aborted ? 'cancelled' : error instanceof TableError && error.code === 'busy' ?
+        'already-unowned' : 'audit-or-storage-failed');
+  }
+  const drained = await Promise.allSettled([reader.close(), provider.close()]);
+  if (drained.some(result => result.status === 'rejected')) throw new RecoveryFailure('outcome-uncertain');
+  if (failure) throw failure;
+}
+
 function prepareTableProvider(identity: TableInitConfig['storage']['identity'], dependencies: Pick<IngressRuntimeDependencies, 'tableRequest' | 'storageIdentity'>): StorageTokenProvider {
   try {
     if (dependencies.tableRequest !== undefined && typeof dependencies.tableRequest !== 'function') throw new ConfigurationError();
@@ -198,7 +286,13 @@ async function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
   let runtime: IngressRuntime | undefined; const abort = new AbortController();
   const shutdown = () => { abort.abort(); if (runtime) void runtime.stop().catch(() => {}); };
   try {
-    if (args.length !== 1 || (args[0] !== 'init' && args[0] !== 'init-delivery' && args[0] !== 'serve')) throw new ConfigurationError();
+    if (args.length !== 1 || !['init', 'init-delivery', 'serve', 'recover-ingress', 'recover-delivery'].includes(args[0]!)) throw new ConfigurationError();
+    if (args[0] === 'recover-ingress' || args[0] === 'recover-delivery') {
+      const config = parseTableRecoveryConfig(env, args[0] === 'recover-ingress' ? 'ingress' : 'delivery');
+      process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
+      await reclaimTableStore(config, {}, abort.signal);
+      logIngress('reclaimed', undefined, config.target.kind); return 0;
+    }
     if (args[0] === 'init' || args[0] === 'init-delivery') {
       const config = parseRuntimeConfig(env, args[0]);
       if ('storage' in config) {
@@ -215,7 +309,14 @@ async function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
     if (!abort.signal.aborted) logIngress('listening'); else shutdown();
     await runtime.done; logIngress('stopped'); return 0;
   } catch (error) {
-    logIngress(error instanceof ConfigurationError ? 'configuration-failed' : runtime ? 'storage-failed' : 'startup-failed');
+    if (error instanceof RecoveryFailure) logIngress('operator-recovery-failed', error.reason);
+    else if (error instanceof StartupFailure) {
+      logIngress(error.category, error.reason, error.store);
+      if (error.cleanupFailed) logIngress('startup-cleanup-failed', 'unavailable');
+    }
+    else if (error instanceof ConfigurationError) logIngress('configuration-failed', 'invalid-configuration');
+    else if (runtime) logIngress('storage-failed', 'runtime-failure');
+    else logIngress('startup-failed', 'unavailable');
     return 1;
   } finally {
     process.off('SIGINT', shutdown); process.off('SIGTERM', shutdown);

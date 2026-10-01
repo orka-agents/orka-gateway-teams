@@ -27,7 +27,8 @@ export function parseConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'init-deliver
 
 export const TABLE_ENV_KEYS = Object.freeze(['TABLE_ACCOUNT', 'TABLE_NAME', 'TABLE_INGRESS_STORE_ID', 'TABLE_DELIVERY_STORE_ID',
   'TABLE_MANAGED_IDENTITY_CLIENT_ID', 'TABLE_MANAGED_IDENTITY_HOST', 'TABLE_AUDIT_MAX_PAGES', 'TABLE_AUDIT_MAX_BYTES',
-  'TABLE_AUDIT_MAX_DURATION_MS', 'TABLE_AUDIT_MAX_TRACKING_BYTES', 'TABLE_MAX_INDEX_BYTES']);
+  'TABLE_AUDIT_MAX_DURATION_MS', 'TABLE_AUDIT_MAX_TRACKING_BYTES', 'TABLE_MAX_INDEX_BYTES',
+  'TABLE_RECOVERY_EXPECTED_OWNER', 'TABLE_RECOVERY_EXPECTED_EPOCH', 'TABLE_RECOVERY_ATTESTATION_DIGEST']);
 
 /** Shared selector boundary; capture before validation so a later read cannot change backend. */
 export function parseStorageBackend(env: NodeJS.ProcessEnv): 'sqlite' | 'table-v2' {

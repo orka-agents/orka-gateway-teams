@@ -9,8 +9,9 @@ initialization executions, private capture locations and successful shutdowns.
 
 **Do not apply these examples over a running gateway.** Table ownership is
 non-expiring. One replica and Single revision mode do not fence an old process.
-An unclean/occupied store blocks reopening; there is no reset/adoption/takeover
-command in this workflow.
+An unclean/occupied store blocks reopening until verified termination and an
+explicit audited operator reclaim; there is no automatic takeover, reset or
+adoption command.
 
 ## 1. Resolve installation and infrastructure first
 
@@ -554,11 +555,60 @@ human confirm both cards arrived in the same chat and the follow-up used context
 | Gateway or Binding is not Ready | Distinct Secret references and metadata, exact main HTTPS origin, trusted CA, approved Orka egress IP, Agent and sender policy | Point V1 at the Teams-only proxy, disable TLS/SSRF/auth checks, or rotate tokens speculatively |
 | No Task appears | Normal runtime active rather than setup; approved tenant/sender/chat and supported nonempty personal text | Repeatedly send new messages before diagnosing admission; they can create new Tasks |
 | Task fails or no reply arrives | Authorized Task phase, provider readiness/login, gateway readiness and safe delivery state | Treat an uncertain send as permission to retry or resend |
-| Store opening/initialization is blocked | Recorded initialization execution, exact immutable scope/IDs and actual previous-owner shutdown evidence | Rerun init, reset stores, change store IDs, or redeploy over an active owner |
+| Store opening/initialization is blocked | The fixed `store-owned-requires-operator-recovery` versus `store-open-failed` category, exact immutable scope/IDs and actual previous-owner termination evidence | Rerun init, reset stores, change store IDs, or redeploy over an active owner |
 
 See [identity setup](managed-identity-auth.md), [Table lifecycle](table-runtime.md)
 and [gateway operations][orka-gateways] for deeper diagnosis. Keep error evidence
 bounded and private; do not gather raw request-bearing logs for convenience.
+
+### Preserve the first failure and recover an occupied store
+
+Configure durable log collection **before** an outage. In the Azure portal, open
+the existing **Container Apps environment → Monitoring → Logging options** and
+select a reviewed Log Analytics workspace, or select Azure Monitor and create
+an environment-level **Monitoring → Diagnostic settings** route for
+`ContainerAppConsoleLogs` and `ContainerAppSystemLogs` to a workspace. `Don't save
+logs` and the live log stream do not preserve the first crash message; expect
+several minutes of ingestion delay. In the selected **Log Analytics workspace →
+Settings → Usage and estimated costs → Data Retention**, set a reviewed retention
+period covering the incident/investigation window. For per-table overrides use
+**Tables → [console/system table] → Manage table → Data retention settings**;
+verify the actual table names in that workspace, including any older `_CL`
+tables. Retention and ingestion have cost and access-policy implications; obtain
+approval and confirm collection with a harmless synthetic startup event. These
+are operator setup steps, not commands this repository executes. See Microsoft's
+[Container Apps logging options](https://learn.microsoft.com/en-us/azure/container-apps/log-options)
+and [Log Analytics retention settings](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/data-retention-configure).
+
+`store-owned-requires-operator-recovery (ingress): occupied` (or `(delivery)`)
+identifies a blocked V2 partition, **not** proof its former owner is dead or
+that a lease will expire. `store-open-failed (ingress): missing` (or a delivery
+store with `corrupt`/`unavailable`) and `listener-failed: ingress` (or
+`listener-failed: outbound`) require separate diagnosis.
+`startup-cleanup-failed` says a failed close did not prove release. Preserve the first log and confirm account, table, scope, store IDs and
+init history; do not rotate identities or initialize over an occupied row.
+
+For an approved reclaim, stop intake and prevent both the old revision and any
+replacement/Job from running. Independently verify physical termination of the
+old gateway process and any in-flight provider effects; an ACA scale-to-zero,
+restart count or stop acknowledgement alone is insufficient. Inspect each
+occupied logical partition read-only and privately record its **exact current**
+owner and epoch. Prepare a private attestation and calculate its SHA-256 digest
+without exposing attestation text in argv, shell history or logs. Supply the
+exact `TABLE_RECOVERY_EXPECTED_OWNER`, `TABLE_RECOVERY_EXPECTED_EPOCH` and
+`TABLE_RECOVERY_ATTESTATION_DIGEST` as private job environment values alongside
+the ordinary Table resource/identity/full scope/audit budgets. Run
+`node dist/ingress/main.js recover-ingress` and, separately, `recover-delivery`
+only for the partitions that are occupied. Use a reviewed, isolated manual ACA
+Job with the regular gateway image and authorized storage identity; do not
+invoke init or use a different store ID. An ambiguous result is not permission
+to rerun: read M and the audit row before deciding what happened. A repeat with
+the original owner/epoch must refuse an already-empty owner without adding a row.
+Start exactly one successor after both stores are in an eligible state. It audits
+and increments the epoch before either listener; old physical delivery sends
+are uncertain and are **not** safe to resend. The audit row is durable in Table,
+not a substitute for protected operator incident records. Manual Table entity
+edits are unsupported.
 
 ### Conformance and shutdown are separate operations
 
@@ -592,7 +642,9 @@ npm run test:app-package   # optional packaging gate; Python 3 required
 
 The ACA tests cover renderer/profile contracts and supervisor lifecycle using
 synthetic inputs; the existing container gate still tests the ordinary runtime.
-No test uploads a Teams app, provisions Azure, or proves crash recovery/HA.
+No test uploads a Teams app or provisions Azure. Native fixtures exercise the
+operator reclaim path, but do not prove live termination, remote exactly-once
+provider effects or automatic crash recovery/HA.
 
 [orka-gateways]: https://github.com/orka-agents/orka/blob/main/website/docs/operations/gateways.md
 [upload]: https://learn.microsoft.com/en-us/microsoftteams/platform/concepts/deploy-and-publish/apps-upload

@@ -114,7 +114,7 @@ test('both real Table handles are retained before the first open await and close
   try {
     await Promise.race([entered.promise, starting]); abort.abort(); await turn();
     assert.equal(finished, false); assert.equal(f.observed.listens, 0); assert.equal(f.observed.inboxCloses.length, 0);
-    gate.resolve(); await assert.rejects(starting, { message: 'Ingress startup failed' });
+    gate.resolve(); await assert.rejects(starting, { message: 'startup-failed: cancelled' });
     assert.equal(f.observed.inboxCloses.length, 1); assert.deepEqual(f.observed.deliveryCloses, ['new']);
     assert.equal(f.observed.deliveryOpens, 0); assert.equal(f.observed.listens, 0); await f.drained();
     assert.equal(f.tables.inbox.rows.get('M')?.Owner, '');
@@ -139,7 +139,7 @@ for (const target of ['inbox', 'delivery'] as const) test(`no listener binds bef
 
 test('a rejected first opener still closes its retained handle and the constructed unopened second handle', async (t) => {
   const f = await fixture(t, 'neither');
-  await assert.rejects(f.start(), { message: 'Ingress startup failed' });
+  await assert.rejects(f.start(), { message: 'store-open-failed: missing', store: 'ingress' });
   assert.equal(f.observed.inboxCloses.length, 1); assert.deepEqual(f.observed.deliveryCloses, ['new']);
   assert.equal(f.observed.deliveryOpens, 0); assert.equal(f.observed.listens, 0);
   assert.equal(f.tables.inbox.rows.size + f.tables.delivery.rows.size, 0); await f.drained();
@@ -158,7 +158,8 @@ for (const failure of ['missing', 'occupied', 'audit'] as const) test(`failed ${
     event.reply();
   };
   const before = f.tables.delivery.rows.get('M'); const closes = f.observed.deliveryCloses.length;
-  await assert.rejects(f.start(), { message: 'Ingress startup failed' });
+  await assert.rejects(f.start(), { message: failure === 'missing' ? 'store-open-failed: missing' :
+    failure === 'occupied' ? 'store-owned-requires-operator-recovery: occupied' : 'store-open-failed: unavailable', store: 'delivery' });
   assert.equal(f.observed.inboxCloses.length, 1); assert.equal(f.observed.deliveryCloses.length, closes + 1);
   assert.equal(f.observed.listens, 0); assert.equal(f.tables.inbox.rows.get('M')?.Owner, '');
   if (failure !== 'audit') assert.equal(f.tables.delivery.rows.get('M') === before, true);
