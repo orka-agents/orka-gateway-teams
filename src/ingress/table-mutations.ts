@@ -6,6 +6,7 @@ import type { TableKernelV2 } from '../storage/table/index.js';
 import { digest as bodyDigest, encode, fingerprint } from './codec.js';
 import type { IngressPolicy, IngressScope, AdmissionResult } from './types.js';
 import { readCommand } from './table-input.js';
+import { routeFields } from './table-index-slots.js';
 import type { Command } from './table-input.js';
 import { advanceClock, projectEvent, sealKey } from './table-state.js';
 import { encodeResult, stateDigest } from './table-result.js';
@@ -161,7 +162,10 @@ export function checkRow(index: InboxIndex, bound: BoundTable, key: DataKey, row
     if (lengths.payloadBytes !== payload.length || lengths.bodyEncodingBytes !== (body === null ? 0 : encode(body).length)) corrupt();
   } else if (key.type === 'route') {
     const route = decodeRoute(key, payload); const expected = index.routeByTarget(key.id)!;
+    const fields = routeFields(route.route);
     if (route.externalEventId !== expected.externalEventId || route.routeDigest !== expected.routeDigest ||
+        route.route.bot.id !== expected.botId || route.route.conversation.id !== expected.conversationId ||
+        fields.conversationType !== expected.conversationType || fields.threadId !== expected.threadId || fields.requesterId !== expected.requesterId ||
         payload.length !== expected.payloadBytes || encode(route.route).length !== expected.routeEncodingBytes) corrupt();
   } else decodeSeal(key, payload);
 }
@@ -209,7 +213,7 @@ export async function mutate(owner: MutationOwner, keys: DataKey[], input: Buffe
           } else if (key.type === 'route') {
             const r = decodeRoute(key, payload);
             proposed.route = { replyTarget: key.id, externalEventId: r.externalEventId, routeDigest: r.routeDigest,
-              botId: r.route.bot.id, conversationId: r.route.conversation.id, routeEncodingBytes: encode(r.route).length, payloadBytes: payload.length };
+              botId: r.route.bot.id, conversationId: r.route.conversation.id, ...routeFields(r.route), routeEncodingBytes: encode(r.route).length, payloadBytes: payload.length };
           } else proposed.seal = { seal: decodeSeal(key, payload), payloadBytes: payload.length };
         }
         proposed.manifest = changed.map(c => ({ key: c.key, digest: c.digest }));

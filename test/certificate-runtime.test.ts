@@ -60,14 +60,26 @@ test('invalid private material is rejected before Orka client/SQLite reads or se
   await assert.rejects(startSetupCapture({ ...settings, ...f.config.receiver })); assert.equal(opens, 0);
 });
 
-for (const suffix of ['', '-journal', '-wal', '-shm', '.owner.sqlite', '.owner.sqlite-journal', '.owner.sqlite-wal', '.owner.sqlite-shm']) {
-  test(`credential inode alias to delivery${suffix} is rejected metadata-only`, async (t) => {
-    const f = storage(t); const path = f.config.outbound!.dbPath + suffix;
+for (const target of ['delivery', 'correlation'] as const) for (const suffix of ['', '-journal', '-wal', '-shm', '.owner.sqlite', '.owner.sqlite-journal', '.owner.sqlite-wal', '.owner.sqlite-shm']) {
+  test(`credential inode alias to ${target}${suffix} is rejected metadata-only`, async (t) => {
+    const f = storage(t);
+    const base = target === 'delivery' ? f.config.outbound!.dbPath : join(f.config.dbPath, '..', 'correlation.sqlite');
+    if (target === 'correlation') f.config.outbound!.correlationDbPath = base;
+    const path = base + suffix;
     fs.linkSync(f.config.receiver.privateKeyFile!, path);
     const open = t.mock.method(fs, 'openSync', () => { throw new Error('ordinary open forbidden'); });
     await assert.rejects(startIngressRuntime(f.config)); assert.equal(open.mock.callCount(), 0);
   });
 }
+
+test('correlation path cannot reuse credential files before any ordinary descriptor or live owner', async (t) => {
+  const f = storage(t);
+  const open = t.mock.method(fs, 'openSync', () => { throw new Error('ordinary open forbidden'); });
+  for (const correlationDbPath of [f.config.receiver.privateKeyFile!, f.config.receiver.certificateFile!]) {
+    await assert.rejects(startIngressRuntime({ ...f.config, outbound: { ...f.config.outbound!, correlationDbPath } }));
+  }
+  assert.equal(open.mock.callCount(), 0);
+});
 
 test('certificate setup validates real pair, uses deny-only SDK callback and keeps dual JWT/six-field capture', async (t) => {
   const f = certificateFiles(t); const files = setupFiles(t); const auth = await authFixture(t);

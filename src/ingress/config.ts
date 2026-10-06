@@ -14,7 +14,17 @@ export class ConfigurationError extends Error { constructor() { super('Invalid i
 // SDK auth flags do not override Node's process-wide TLS trust bypass.
 export function tlsVerificationEnabled(): boolean { return process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '0'; }
 export interface InitConfig { dbPath: string; scope: Readonly<IngressScope> }
-export interface OutboundConfig { dbPath: string; bearerToken: string; host: string; port: number }
+export interface OutboundConfig { dbPath: string; correlationDbPath?: string; bearerToken: string; host: string; port: number }
+/** Correlation provisioning needs no credentials, Orka endpoint or live store. */
+export function parseCorrelationConfig(env: NodeJS.ProcessEnv): { dbPath: string; scope: { appId: string; tenantId: string } } {
+  try {
+    if (parseStorageBackend(env) !== 'sqlite') fail();
+    const dbPath = absolutePath(env.CORRELATION_DB);
+    const ingressPath = env.INGRESS_DB; const deliveryPath = env.DELIVERY_DB;
+    validateStoragePaths(ingressPath, deliveryPath, dbPath);
+    return { dbPath, scope: { appId: guid(env.TEAMS_APP_ID), tenantId: guid(env.TEAMS_TENANT_ID) } };
+  } catch { throw new ConfigurationError(); }
+}
 export interface ServeConfig extends InitConfig { receiver: ReceiverConfig; bearerToken: string; caFile?: string; policy: IngressPolicy; outbound?: OutboundConfig }
 export function parseConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'init-delivery'): InitConfig;
 export function parseConfig(env: NodeJS.ProcessEnv, mode: 'serve'): ServeConfig;
@@ -34,7 +44,7 @@ export const TABLE_ENV_KEYS = Object.freeze(['TABLE_ACCOUNT', 'TABLE_NAME', 'TAB
 export function parseStorageBackend(env: NodeJS.ProcessEnv): 'sqlite' | 'table-v2' {
   const backend = env.GATEWAY_STORAGE_BACKEND;
   if (backend === 'table-v2') {
-    if (env.INGRESS_DB !== undefined || env.DELIVERY_DB !== undefined) fail();
+    if (env.INGRESS_DB !== undefined || env.DELIVERY_DB !== undefined || env.CORRELATION_DB !== undefined) fail();
     return backend;
   }
   if ((backend !== undefined && backend !== 'sqlite') || TABLE_ENV_KEYS.some(key => env[key] !== undefined)) fail();
@@ -61,9 +71,11 @@ export function parseSqliteConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'init-d
       return init;
     }
     const { outbound: http, ...settings } = parseServeSettings(env, scope);
-    const outbound = http === undefined ? undefined : validateOutboundConfig({ ...http, dbPath: absolutePath(env.DELIVERY_DB) },
+    const correlationDb = env.CORRELATION_DB;
+    const outbound = http === undefined ? undefined : validateOutboundConfig({ ...http, dbPath: absolutePath(env.DELIVERY_DB),
+      ...(correlationDb === undefined ? {} : { correlationDbPath: absolutePath(correlationDb) }) },
       init.dbPath, settings.bearerToken, settings.receiver);
-    if (http === undefined && env.DELIVERY_DB !== undefined) fail();
+    if (http === undefined && (env.DELIVERY_DB !== undefined || correlationDb !== undefined)) fail();
     return { ...init, ...settings, ...(outbound === undefined ? {} : { outbound }) };
   } catch { throw new ConfigurationError(); }
 }
@@ -106,8 +118,10 @@ export function validateReceiverConfig(input: ReceiverConfig): ReceiverConfig {
 export function validateOutboundConfig(input: OutboundConfig, ingressPath: string, ingressToken: string, receiver: ReceiverConfig): OutboundConfig {
   try {
     const http = validateOutboundServerConfig(input, ingressToken, receiver);
-    const dbPath = absolutePath(input.dbPath); validateStoragePaths(ingressPath, dbPath);
-    return Object.freeze({ dbPath, ...http });
+    const dbPath = absolutePath(input.dbPath);
+    const correlationDbPath = input.correlationDbPath === undefined ? undefined : absolutePath(input.correlationDbPath);
+    validateStoragePaths(absolutePath(ingressPath), dbPath, correlationDbPath);
+    return Object.freeze({ dbPath, ...http, ...(correlationDbPath === undefined ? {} : { correlationDbPath }) });
   } catch { throw new ConfigurationError(); }
 }
 
@@ -121,14 +135,31 @@ export function validateOutboundServerConfig(input: OutboundServerConfig, ingres
   } catch { throw new ConfigurationError(); }
 }
 
+/** CA reads must not open/close a configured SQLite inode, even if another runtime already owns it. */
+export function assertCaSeparation(caFile: string | undefined, paths: readonly string[]): void {
+  if (caFile === undefined || paths.length === 0) return;
+  try {
+    const caName = realpathSync(caFile); const caStamp = statSync(caFile);
+    for (const path of paths) {
+      const stamp = statSync(path, { throwIfNoEntry: false });
+      const name = stamp ? realpathSync(path) : join(realpathSync(dirname(path)), basename(path));
+      if (name === caName || (stamp !== undefined && stamp.dev === caStamp.dev && stamp.ino === caStamp.ino)) fail();
+    }
+  } catch { throw new ConfigurationError(); }
+}
+
 /** Metadata-only preflight: never open/close an ordinary fd on a live SQLite inode. */
-function validateStoragePaths(ingressPath: string, deliveryPath: string): void {
+function validateStoragePaths(ingressPath: string | undefined, deliveryPath: string | undefined, correlationPath?: string): void {
   try {
     const canonical = (input: string) => {
       const path = absolutePath(input); return join(realpathSync(dirname(path)), basename(path));
     };
-    const ingress = canonical(ingressPath); const delivery = canonical(deliveryPath);
-    const paths = [ingress, delivery, `${delivery}.owner.sqlite`].flatMap((path) =>
+    const ingress = ingressPath === undefined ? undefined : canonical(ingressPath);
+    const delivery = deliveryPath === undefined ? undefined : canonical(deliveryPath);
+    const correlation = correlationPath === undefined ? undefined : canonical(correlationPath);
+    const paths = [...(ingress === undefined ? [] : [ingress]),
+      ...(delivery === undefined ? [] : [delivery, `${delivery}.owner.sqlite`]),
+      ...(correlation === undefined ? [] : [correlation, `${correlation}.owner.sqlite`])].flatMap((path) =>
       [path, `${path}-journal`, `${path}-wal`, `${path}-shm`]);
     const names = new Set<string>(); const inodes = new Set<string>();
     for (const path of paths) {

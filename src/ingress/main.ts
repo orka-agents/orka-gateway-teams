@@ -1,9 +1,9 @@
-import { readFileSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
 import { X509Certificate } from 'node:crypto';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { ConfigurationError, tlsVerificationEnabled, validateOutboundConfig, validateReceiverConfig } from './config.js';
+import { assertCaSeparation, ConfigurationError, parseCorrelationConfig, tlsVerificationEnabled, validateOutboundConfig, validateReceiverConfig } from './config.js';
 import { parseRuntimeConfig, parseTableRecoveryConfig, snapshotTableInitConfig, snapshotTableServeConfig } from './runtime-config.js';
 import type { RuntimeServeConfig, TableInitConfig, TableRecoveryConfig } from './runtime-config.js';
 import { prepareStorageIdentity } from '../auth/storage-identity.js';
@@ -28,6 +28,9 @@ import { prepareReceiver } from './server.js';
 import { assertCredentialSeparation } from '../auth/certificate.js';
 import type { Receiver, ReceiverDependencies } from './server.js';
 import { initializeDeliveryJournal, openDeliveryJournal } from '../delivery/journal.js';
+import { initializeSessionCorrelation, openSessionCorrelation } from '../delivery/sqlite-session-correlation.js';
+import type { SQLiteSessionCorrelation } from '../delivery/sqlite-session-correlation.js';
+import type { SessionCorrelationPort } from '../delivery/session-correlation.js';
 import { DeliveryJournalError } from '../delivery/types.js';
 import type { DeliveryJournalPort, JournalScope } from '../delivery/types.js';
 import { TableError } from '../storage/table/types.js';
@@ -43,14 +46,14 @@ export type StartupCategory = 'store-open-failed' | 'store-owned-requires-operat
 export type StartupReason = 'missing' | 'occupied' | 'corrupt' | 'incomplete' | 'unresolved' | 'unavailable' | 'cancelled' | 'ingress' | 'outbound';
 export class StartupFailure extends Error {
   cleanupFailed = false;
-  constructor(readonly category: StartupCategory, readonly reason: StartupReason, readonly store?: 'ingress' | 'delivery') {
+  constructor(readonly category: StartupCategory, readonly reason: StartupReason, readonly store?: 'ingress' | 'delivery' | 'correlation') {
     super(`${category}: ${reason}`);
   }
 }
-function openFailure(error: unknown, store: 'ingress' | 'delivery', table: boolean): StartupFailure {
+function openFailure(error: unknown, store: 'ingress' | 'delivery' | 'correlation', table: boolean): StartupFailure {
   const code = error instanceof TableError || error instanceof DeliveryJournalError ? error.code : undefined;
   if (table && code === 'busy') return new StartupFailure('store-owned-requires-operator-recovery', 'occupied', store);
-  const reason = error instanceof TableDeliveryStartupFailure ? error.startupReason :
+  const reason = store === 'correlation' && code === 'busy' ? 'occupied' : error instanceof TableDeliveryStartupFailure ? error.startupReason :
     code === 'missing' || code === 'corrupt' || code === 'incomplete' || code === 'unresolved' ? code : 'unavailable';
   return new StartupFailure('store-open-failed', reason, store);
 }
@@ -69,9 +72,15 @@ export async function startIngressRuntime(config: RuntimeServeConfig, dependenci
   const receiverConfig = table?.receiver ?? validateReceiverConfig(selected.receiver);
   const sqliteOutbound = sqlite?.outbound === undefined ? undefined : validateOutboundConfig(sqlite.outbound, sqlite.dbPath, sqlite.bearerToken, receiverConfig);
   const outbound = table?.outbound ?? sqliteOutbound;
+  const caFile = selected.caFile;
   try {
-    const databases = sqlite === undefined ? [] : [sqlite.dbPath, ...(sqliteOutbound ? [sqliteOutbound.dbPath, `${sqliteOutbound.dbPath}.owner.sqlite`] : [])];
-    assertCredentialSeparation(receiverConfig, databases.flatMap((path) => [path, `${path}-journal`, `${path}-wal`, `${path}-shm`]));
+    const correlationPaths = sqliteOutbound?.correlationDbPath === undefined ? [] :
+      [sqliteOutbound.correlationDbPath, `${sqliteOutbound.correlationDbPath}.owner.sqlite`];
+    const databases = sqlite === undefined ? [] : [sqlite.dbPath,
+      ...(sqliteOutbound ? [sqliteOutbound.dbPath, `${sqliteOutbound.dbPath}.owner.sqlite`] : []), ...correlationPaths];
+    const paths = databases.flatMap((path) => [path, `${path}-journal`, `${path}-wal`, `${path}-shm`]);
+    assertCaSeparation(caFile, paths);
+    assertCredentialSeparation(receiverConfig, paths);
   } catch { throw new ConfigurationError(); }
   if (signal?.aborted) throw new StartupFailure('startup-failed', 'cancelled');
   // Snapshot before any opening await; credentials and CA are prepared before
@@ -81,7 +90,7 @@ export async function startIngressRuntime(config: RuntimeServeConfig, dependenci
   if (table && (deps.openIngressStore !== undefined || deps.openDeliveryJournal !== undefined)) throw new ConfigurationError();
   const prepared = prepareReceiver(receiverConfig, deps);
   const client = createOrkaClient(scope, { bearerToken: selected.bearerToken,
-    ...(selected.caFile === undefined ? {} : { ca: readCaBundle(selected.caFile) }) });
+    ...(caFile === undefined ? {} : { ca: readCaBundle(caFile) }) });
   const storageProvider = table === undefined ? undefined : prepareTableProvider(table.storage.identity, deps);
   const abort = new AbortController(); let fatal = false; let closing: Promise<void> | undefined;
   let ready = false; let stopRuntime: (() => Promise<void>) | undefined;
@@ -89,16 +98,18 @@ export async function startIngressRuntime(config: RuntimeServeConfig, dependenci
   signal?.addEventListener('abort', cancel, { once: true });
   const assertStarting = () => { if (signal?.aborted || abort.signal.aborted) throw new Error('Ingress startup failed'); };
   let store: IngressPort | undefined; let journal: DeliveryJournalPort | undefined;
+  let correlation: SessionCorrelationPort | undefined; let sidecar: SQLiteSessionCorrelation | undefined;
   let receiver: Receiver | undefined; let api: OutboundServer | undefined;
   const closeStores = async () => {
     const stores = await Promise.allSettled([
+      Promise.resolve().then(() => sidecar?.close()),
       Promise.resolve().then(() => journal?.close()), Promise.resolve().then(() => store?.close()),
     ]);
     // Release/reconciliation may need a fresh token even after either store fails.
     const provider = await Promise.allSettled([Promise.resolve().then(() => storageProvider?.close())]);
     return [...stores, ...provider];
   };
-  let phase: 'ingress-store' | 'delivery-store' | 'ingress-listener' | 'outbound-listener' | 'startup' = 'startup';
+  let phase: 'correlation-store' | 'ingress-store' | 'delivery-store' | 'ingress-listener' | 'outbound-listener' | 'startup' = 'startup';
   try {
     assertStarting();
     if (table) {
@@ -110,10 +121,21 @@ export async function startIngressRuntime(config: RuntimeServeConfig, dependenci
       // Retain each actual handle immediately. BOTH constructions precede ANY open await.
       const delivery = outbound === undefined ? undefined : createTableDeliveryJournalV2({ kind: 'delivery', account: storage.account,
         table: storage.table, storeId: storage.deliveryStoreId!, scope: { appId: scope.appId, tenantId: scope.tenantId } }, native);
-      journal = delivery;
+      journal = delivery; correlation = delivery;
       phase = 'ingress-store'; await inbox.open(); phase = 'startup'; assertStarting();
       if (delivery) { phase = 'delivery-store'; await delivery.open(); phase = 'startup'; }
     } else {
+      // Only absence of the configured main file is no evidence. If it exists,
+      // missing ownership/schema, corruption, foreign scope or busy is fatal.
+      // Metadata-only preflight/open precedes any inbox/journal ownership.
+      if (sqliteOutbound?.correlationDbPath !== undefined) {
+        phase = 'correlation-store';
+        if (lstatSync(sqliteOutbound.correlationDbPath, { throwIfNoEntry: false })) {
+          sidecar = openSessionCorrelation(sqliteOutbound.correlationDbPath, { appId: scope.appId, tenantId: scope.tenantId });
+          correlation = sidecar;
+        }
+        phase = 'startup'; assertStarting();
+      }
       phase = 'ingress-store';
       store = await (deps.openIngressStore ?? ((path, target, options) => createIngressPort(openIngressStore(path, target, options))))(dbPath!, scope, { policy });
       phase = 'startup'; assertStarting();
@@ -129,13 +151,14 @@ export async function startIngressRuntime(config: RuntimeServeConfig, dependenci
     phase = 'ingress-listener';
     receiver = await prepared.start({ scope: ownedStore.scope,
       admit: (event, route) => ready ? ownedStore.admit(event, route) : { kind: 'full' } },
-      journal === undefined ? undefined : { journal, getRoute: (key) => ownedStore.getRoute(key) }, abort.signal);
+      journal === undefined ? undefined : { journal, getRoute: (key) => ownedStore.getRoute(key),
+        ...(correlation === undefined ? {} : { correlation }) }, abort.signal);
     phase = 'startup'; assertStarting();
     if (outbound) { phase = 'outbound-listener'; api = await startOutboundServer(outbound, receiver.outbound!, journalScope, () => ready); }
     phase = 'startup'; assertStarting(); ready = true;
   } catch (error) {
-    const storeFailure = phase === 'ingress-store' || phase === 'delivery-store' ?
-      openFailure(error, phase === 'ingress-store' ? 'ingress' : 'delivery', table !== undefined) : undefined;
+    const storeFailure = phase === 'ingress-store' || phase === 'delivery-store' || phase === 'correlation-store' ?
+      openFailure(error, phase === 'ingress-store' ? 'ingress' : phase === 'delivery-store' ? 'delivery' : 'correlation', table !== undefined) : undefined;
     const failure = storeFailure && ['corrupt', 'unresolved', 'incomplete'].includes(storeFailure.reason) ? storeFailure :
       signal?.aborted ? new StartupFailure('startup-failed', 'cancelled') : storeFailure ??
       (phase === 'ingress-listener' || phase === 'outbound-listener' ?
@@ -286,7 +309,11 @@ async function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
   let runtime: IngressRuntime | undefined; const abort = new AbortController();
   const shutdown = () => { abort.abort(); if (runtime) void runtime.stop().catch(() => {}); };
   try {
-    if (args.length !== 1 || !['init', 'init-delivery', 'serve', 'recover-ingress', 'recover-delivery'].includes(args[0]!)) throw new ConfigurationError();
+    if (args.length !== 1 || !['init', 'init-delivery', 'init-correlation', 'serve', 'recover-ingress', 'recover-delivery'].includes(args[0]!)) throw new ConfigurationError();
+    if (args[0] === 'init-correlation') {
+      const config = parseCorrelationConfig(env);
+      initializeSessionCorrelation(config.dbPath, config.scope); logIngress('initialized'); return 0;
+    }
     if (args[0] === 'recover-ingress' || args[0] === 'recover-delivery') {
       const config = parseTableRecoveryConfig(env, args[0] === 'recover-ingress' ? 'ingress' : 'delivery');
       process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);

@@ -4,6 +4,8 @@ import { identity, validateClaim, validateOutcome } from './identity.js';
 import type { RequestIdentity } from './identity.js';
 import { DeliveryJournalError } from './types.js';
 import type { BeginDeliveryResult, DeliveryClaim, DeliveryOutcome, SettlementResult } from './types.js';
+import { MAX_SESSION_CORRELATIONS, sessionCorrelationLimit, validateSessionObservation } from './session-correlation.js';
+import type { SessionObservation, SessionObservationResult } from './session-correlation.js';
 
 type DomainRecord = StoredRecord | StoredRecordV2;
 export interface Operation {
@@ -13,7 +15,30 @@ export interface Operation {
 export interface Alias { schema: 1; idempotencyId: string }
 export type Result = { schema: 1; operation: 'initialize' } |
   { schema: 1; operation: 'begin'; identity: RequestIdentity; result: BeginDeliveryResult } |
-  { schema: 1; operation: 'settle'; claim: DeliveryClaim; outcome: DeliveryOutcome; result: SettlementResult };
+  { schema: 1; operation: 'settle'; claim: DeliveryClaim; outcome: DeliveryOutcome; result: SettlementResult } |
+  { schema: 1; operation: 'observe-session'; observation: SessionObservation; result: SessionObservationResult;
+    created: boolean; maxSessions: number; sessionCount: number };
+export interface SessionControl { schema: 1; kind: 'session-observation'; sessionDigest: string; firstOriginDigest: string }
+export const sessionControlId = (sessionDigest: string): string => `control_session:${sessionDigest}`;
+export function decodeSessionControl(record: DomainRecord): SessionControl {
+  return stored(() => {
+    if (record.value.kind !== 'data' || record.value.type !== 'control') corrupt();
+    const value = shape(rawJSON(record.value.payload), ['schema', 'kind', 'sessionDigest', 'firstOriginDigest']);
+    version(value.schema);
+    if (value.kind !== 'session-observation') corrupt();
+    const sessionDigest = hex(value.sessionDigest); const firstOriginDigest = hex(value.firstOriginDigest);
+    if (record.value.id !== sessionControlId(sessionDigest)) corrupt();
+    return { schema: 1, kind: 'session-observation', sessionDigest, firstOriginDigest };
+  });
+}
+/** Used only after the complete domain audit has validated every row. */
+export function countSessionControls(records: readonly DomainRecord[], maxSessions = MAX_SESSION_CORRELATIONS): number {
+  let count = 0;
+  for (const record of records) if (record.value.kind === 'data' && record.value.type === 'control' && record.value.id.startsWith('control_session:')) {
+    decodeSessionControl(record); if (++count > maxSessions) corrupt();
+  }
+  return count;
+}
 export const marker = () => encode({ journal: 'teams-delivery', schema: 1, fingerprint: 1 });
 export function encode(value: unknown): Buffer { return Buffer.from(JSON.stringify(value)); }
 export function corrupt(): never { throw new DeliveryJournalError('corrupt'); }
@@ -88,6 +113,22 @@ export function decodeResult(bytes: Uint8Array): Result {
       }
       return { schema: 1, operation: 'begin', identity: request, result: decoded };
     }
+    if (raw.operation === 'observe-session') {
+      shape(raw, ['schema', 'operation', 'observation', 'result', 'created', 'maxSessions', 'sessionCount']);
+      const observation = validateSessionObservation(raw.observation);
+      const maxSessions = sessionCorrelationLimit(raw.maxSessions);
+      if (typeof raw.created !== 'boolean' || typeof raw.sessionCount !== 'number' ||
+          !Number.isSafeInteger(raw.sessionCount) || raw.sessionCount < 0 || raw.sessionCount > maxSessions) corrupt();
+      const result = object(raw.result); let decoded: SessionObservationResult;
+      if (result.kind === 'full') {
+        shape(result, ['kind']); if (raw.created || raw.sessionCount !== maxSessions) corrupt(); decoded = { kind: 'full' };
+      } else {
+        shape(result, ['kind', 'continuation']); if (result.kind !== 'observed' || typeof result.continuation !== 'boolean' ||
+          raw.sessionCount < 1 || (raw.created && result.continuation)) corrupt();
+        decoded = { kind: 'observed', continuation: result.continuation };
+      }
+      return { schema: 1, operation: 'observe-session', observation, result: decoded, created: raw.created, maxSessions, sessionCount: raw.sessionCount };
+    }
     if (raw.operation === 'settle') {
       shape(raw, ['schema', 'operation', 'claim', 'outcome', 'result']);
       const claim = validateClaim(raw.claim); const outcome = validateOutcome(raw.outcome);
@@ -159,6 +200,7 @@ function auditGraph(records: readonly DomainRecord[], metadata: Metadata | Metad
   }
   validateMarker(metadata.state); const result = decodeResult(metadata.result);
   const operations = new Map<string, Operation>(); const aliases = new Map<string, string>();
+  const sessions = new Map<string, SessionControl>();
   const exit = 'exit' in metadata ? metadata.exit : undefined;
   let matchingAudit = 0;
   for (const record of records) {
@@ -168,6 +210,10 @@ function auditGraph(records: readonly DomainRecord[], metadata: Metadata | Metad
       if (operations.has(id)) corrupt(); operations.set(id, decodeOperation(record, metadata.epoch));
     } else if (record.value.type === 'alias') {
       if (aliases.has(id)) corrupt(); aliases.set(id, decodeAlias(record).idempotencyId);
+    } else if (record.value.type === 'control' && id.startsWith('control_session:')) {
+      const session = decodeSessionControl(record);
+      if (sessions.has(session.sessionDigest) || sessions.size >= MAX_SESSION_CORRELATIONS) corrupt();
+      sessions.set(session.sessionDigest, session);
     } else if (record.value.type === 'control' && binding) {
       // Closed operator audit rows never masquerade as operations or aliases.
       let auditRow: ReturnType<typeof decodeRecoveryAudit>;
@@ -186,14 +232,25 @@ function auditGraph(records: readonly DomainRecord[], metadata: Metadata | Metad
   if (exit?.kind === 'operator-recovery' && (exit.auditId || exit.auditDigest) && matchingAudit !== 1) corrupt();
   for (const id of operations.keys()) if (aliases.get(id) !== id) corrupt();
   for (const id of aliases.values()) if (!operations.has(id)) corrupt();
-  auditResult(result, operations, aliases, metadata.epoch);
+  auditResult(result, operations, aliases, sessions, metadata.epoch);
   return metadata.epoch;
 }
 /** Cross-check only evidence retained by the latest result, not a global history
  * proof. Acquisition/release/barriers preserve it without changing domain rows. */
-function auditResult(saved: Result, operations: ReadonlyMap<string, Operation>, aliases: ReadonlyMap<string, string>, epoch: number): void {
+function auditResult(saved: Result, operations: ReadonlyMap<string, Operation>, aliases: ReadonlyMap<string, string>, sessions: ReadonlyMap<string, SessionControl>, epoch: number): void {
   if (saved.operation === 'initialize') {
-    if (operations.size || aliases.size) corrupt(); return;
+    if (operations.size || aliases.size || sessions.size) corrupt(); return;
+  }
+  if (saved.operation === 'observe-session') {
+    if (saved.sessionCount !== sessions.size || sessions.size > saved.maxSessions) corrupt();
+    const session = sessions.get(saved.observation.sessionDigest);
+    if (saved.result.kind === 'full') {
+      if (session || saved.created || sessions.size !== saved.maxSessions) corrupt();
+    } else {
+      if (!session || saved.result.continuation !== (session.firstOriginDigest !== saved.observation.originDigest) ||
+          (saved.created && session.firstOriginDigest !== saved.observation.originDigest)) corrupt();
+    }
+    return;
   }
   if (saved.operation === 'begin') {
     const { identity: key, result } = saved; const operation = operations.get(key.idempotencyId);

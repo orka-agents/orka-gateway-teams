@@ -72,7 +72,7 @@ for (const key of tableKeys) test(`SQLite selection rejects stray ${key}, even e
   }
   assert.throws(() => parseRuntimeConfig(env, 'serve'), ConfigurationError); assert.throws(() => parseConfig(env, 'serve'), ConfigurationError);
 });
-for (const key of ['INGRESS_DB', 'DELIVERY_DB']) test(`Table rejects contradictory ${key} on every command`, () => {
+for (const key of ['INGRESS_DB', 'DELIVERY_DB', 'CORRELATION_DB']) test(`Table rejects contradictory ${key} on every command`, () => {
   const env = { ...environment(), [key]: '' };
   for (const mode of ['init', 'init-delivery'] as const) assert.throws(() => parseRuntimeConfig(env, mode), ConfigurationError);
   assert.throws(() => parseRuntimeConfig(env, 'serve'), ConfigurationError);
@@ -124,6 +124,7 @@ test('direct Table shape refuses SQLite paths, duplicate bindings, scope mismatc
   for (const invalid of [
     { ...value, dbPath: '/tmp/unwanted.sqlite' },
     { ...value, outbound: { ...value.outbound!, dbPath: '/tmp/unwanted.sqlite' } },
+    { ...value, outbound: { ...value.outbound!, correlationDbPath: '/tmp/unwanted.sqlite' } },
     { ...value, storage: { ...value.storage, scope: value.scope } },
     { ...value, receiver: { ...value.receiver, appId: '99999999-9999-4999-8999-999999999999' } },
     { ...value, storage: { ...value.storage, deliveryStoreId: undefined } },

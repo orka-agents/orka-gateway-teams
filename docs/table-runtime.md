@@ -57,10 +57,15 @@ without writing. See the exact
 [audit meanings](table-storage.md#explicit-owned-streaming-audit) and
 [inbox index accounting](table-inbox.md). Delivery keeps its existing complete
 `scan()` limits (10,000 pages / 64 MiB by default and its existing caller deadline);
-the inbox environment budgets do not enlarge them. Retention/caps are unchanged.
+the inbox environment budgets do not enlarge them. Shared-room correlation uses
+CREATE-only digest controls in the existing delivery partition/FIFO, not another
+store or token provider. Its 100000-Session ceiling does not enlarge the physical
+audit budgets. Retained observations are GET-only; see [evidence retention and
+mixed-store rollback constraints](shared-rooms.md).
 
 **Contradictions fail closed:** omit `INGRESS_DB` and `DELIVERY_DB` entirely in
-Table mode, not empty strings or dummy paths. Conversely, all recognized
+Table mode, not empty strings or dummy paths. `CORRELATION_DB` is SQLite-only
+and also refused in Table mode; `init-correlation` is not a Table command. Conversely, all recognized
 `TABLE_*` inputs above are refused in SQLite mode. Enabled directions always use
 the selected backend; mixed SQLite/Table serving is not supported.
 

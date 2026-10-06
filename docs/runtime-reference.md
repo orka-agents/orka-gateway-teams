@@ -11,6 +11,7 @@ Run the commands below from the repository root.
 - [Inbox retention and operational limits](#inbox-retention-and-operational-limits)
 - [Request/reply configuration](#enable-the-full-requestreply-runtime)
 - [Authenticated V1 API and delivery behavior](#authenticated-v1-api)
+- [Shared rooms, correlation and rollback](shared-rooms.md)
 
 ## Run durable ingress
 
@@ -150,8 +151,10 @@ merely because the client-facing deadline has elapsed.
 
 The original body must identify the configured recipient, tenant and service URL
 before conversion. JWT `appid`/`tid` are not body identity. The converter remains
-the authoritative supported-personal-message filter; exact `from.id` remains
-Orka's sender-allowlist candidate, not proof of humanity. Unsupported authenticated
+the authoritative message filter: personal `from.id` and shared
+`from.aadObjectId` are Orka sender-allowlist candidates, not proof of humanity.
+Shared group/channel messages require a validated mention of the configured bot;
+see [exact mapping and invocation](shared-rooms.md#identity-and-thread-mapping). Unsupported authenticated
 activities explicitly return 200 ignored without storage. Invalid/wrong-scope
 input gets 4xx. New event + minimal reply route commit atomically before 200;
 duplicates reuse the saved original envelope/key, conflicts return 409, and
@@ -167,7 +170,8 @@ still have a committed admission: retry the same original provider activity.
   live SQLite file through ordinary filesystem APIs in the owning process.
 - Pending, forwarding and quarantined records contain **normalized text**, sender
   identity/optional label and the original envelope. Minimal private routes retain
-  service URL, bot ID and personal conversation/tenant. Full raw activities,
+  service URL, bot ID, exact conversation/tenant and, for shared rooms, the winning
+  requester ID/optional label and channel root. Full raw activities,
   headers, tokens and credentials are never persisted. Protect the DB as private
   user content; don't put secrets into IDs or messages.
 - A validated Orka 202 receipt is durable admission, **not Task completion**. Its
@@ -210,6 +214,7 @@ Add these variables to the existing serve configuration and use the same `npm st
 |---|---|
 | `OUTBOUND_ENABLED` | Exactly `true` to enable; absent or `false` means ingress-only |
 | `DELIVERY_DB` | Absolute, separately provisioned journal path |
+| `CORRELATION_DB` | Optional SQLite-only separate evidence path; explicit `init-correlation`, never initialized by serve. Omitted/missing main means no continuation label; existing corrupt/busy/foreign-scope storage fails startup |
 | `ORKA_OUTBOUND_BEARER_TOKEN` | Required Orka-to-adapter bearer, **different** from `ORKA_BEARER_TOKEN` |
 | `OUTBOUND_HOST` | `127.0.0.1`; explicit IPv4/IPv6 bind address |
 | `OUTBOUND_PORT` | `3979`; integer 1–65535 |
@@ -220,7 +225,12 @@ ownership/SQLite sidecars) fail closed, not silently fall back to ingress-only.
 Bearers are nonempty RFC6750-shaped values bounded at 8192 characters; do not log
 or put them on command lines. Both stores open before either listener binds. A
 second-store/listener failure attempts to close both stores without deleting records
-or starting the relay. Table ownership may remain occupied after an incomplete
+or starting the relay. Optional correlation opens/audits before live SQLite
+inbox/journal ownership; all configured paths/sidecars and credential files must
+be separate. To provision it using only app/tenant/path configuration, run
+`node dist/ingress/main.js init-correlation`. Retain/mount its main and permanent
+ownership sidecar; see [shared evidence and capacity](shared-rooms.md#optional-sqlite-evidence-store).
+Table ownership may remain occupied after an incomplete
 startup audit; cleanup is not release evidence. Ingress `.port` and `/api/messages`
 remain unchanged.
 
@@ -244,7 +254,7 @@ access. Do not publish either loopback HTTP listener directly to the Internet.
   "capabilities": {
     "inboundText": true,
     "outboundText": true,
-    "threads": false,
+    "threads": true,
     "senderIdentity": true,
     "explicitSessions": false,
     "idempotentDelivery": true
@@ -270,8 +280,9 @@ work gets HTTP 200 `retryableError` **before claiming**, not a provider attempt.
 
 The dispatcher first commits a claim or replays durable history, then resolves the
 saved opaque reply key through the already-owned inbox. Fresh sends must match
-current service/recipient allowlists, tenant/account, personal conversation/context
-and nonthread policy. Metadata/references never select a destination. Confirmed
+current service/recipient allowlists, tenant/account and exact saved
+conversation/context. Channels require the exact saved root as request `threadId`
+and measured activity `replyToId`; group/personal routes reject nonempty threads. Metadata/references never select a destination. Confirmed
 receipts replay even after routing policy changes; changed immutable input is a
 conflict. There is no production `conformance` routing shortcut. Orka's checker
 supports `--delivery-fixture` with an explicitly authorized retained route; its
@@ -298,7 +309,7 @@ partitions and [controlled clean handover](table-runtime.md#operational-and-veri
 not a writable SQLite path or crash takeover.
 
 Runtime orchestration awaits storage opening, admission, claims, route lookup,
-settlement and closing. SQLite remains the default and its public store APIs
+session observation, settlement and closing. SQLite remains the default and its public store APIs
 remain synchronous; explicit Table V2 uses asynchronous stores without SQLite
 paths. An inbox claim acknowledgement is not forwarding permission: the owned
 store rechecks the exact attempt, replay deadline and quarantine
@@ -307,7 +318,8 @@ late opening/initialization without publishing readiness or starting the relay.
 
 SIGINT/SIGTERM or either storage poison stops both directions: mark unready, stop
 intake, abort API/provider/relay work, drain SDK callbacks, token acquisition and
-all settlement, then close **both** stores and, in Table mode, the storage-token
+all observations/settlement, then close the optional SQLite correlation sidecar
+and **both** stores and, in Table mode, the storage-token
 provider last. Fatal storage signals follow the fixed
 HTTP response flush/disconnect. Public SDK bot-token acquisition cannot be
 cancelled: at most one acquisition is outstanding, late completion cannot POST,

@@ -1,7 +1,14 @@
 import type { EventEnvelope } from '../protocol/types.js';
 
 export interface IngressScope { appId: string; tenantId: string; orkaBaseUrl: string; gatewayNamespace: string; gatewayName: string }
-export interface ReplyRoute { serviceUrl: string; channelId: 'msteams'; bot: { id: string; role: 'bot' }; conversation: { id: string; conversationType: 'personal'; tenantId: string } }
+interface RouteBase { serviceUrl: string; channelId: 'msteams'; bot: { id: string; role: 'bot' } }
+interface Conversation { id: string; tenantId: string }
+/** Personal persisted bytes stay unchanged; shared routes retain the winning requester. */
+export type ReplyRoute = RouteBase & (
+  { conversation: Conversation & { conversationType: 'personal' }; requester?: never; threadId?: never } |
+  { conversation: Conversation & { conversationType: 'groupChat' }; requester: { id: string; displayName?: string }; threadId?: never } |
+  { conversation: Conversation & { conversationType: 'channel' }; requester: { id: string; displayName?: string }; threadId: string }
+);
 export interface IngressPolicy { maxPending: number; maxRecords: number; replayWindowMs: number }
 export interface IngressReceipt { status: 'accepted' | 'duplicate' | 'rejected' | 'deadLettered'; eventId: string; state: string }
 export interface IngressClaim { externalEventId: string; attemptId: string; attempt: number; event: EventEnvelope }

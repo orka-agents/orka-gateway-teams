@@ -1,8 +1,12 @@
-# Deploy the personal Teams gateway
+# Deploy the Teams gateway
 
 For the evaluated ACA/Table profile, use the separate [ACA runbook](aca-deployment.md)
 and [live evidence/closeout report](live-validation.md). This page describes the
 existing SQLite/Kubernetes packaging; the ACA additions do not alter it.
+The checked-in package/binding defaults remain personal-only. For explicitly
+allowlisted group/channel installation, shared-session privacy and optional
+SQLite evidence provisioning/mounts, follow [shared rooms](shared-rooms.md).
+Do not silently broaden the default binding, initializer Job or app permissions.
 
 This is **deployment packaging, not a first-time live bootstrap or live demo**.
 The supplied single-replica runtime uses the existing image CLI and persistent
@@ -25,7 +29,7 @@ Task, reply, automatic allowlist update or tenant action; live capture is not cl
 by synthetic tests.
 
 Do not infer `28:<clientId>`, borrow IDs from another bot/environment, treat an AAD
-object ID as `from.id`, use a proactive global URL as an inbound guarantee, capture
+object ID as personal `from.id` (shared rooms deliberately use `from.aadObjectId`), use a proactive global URL as an inbound guarantee, capture
 raw activities, enable auth bypass/first-request learning, or invent production
 routes. The [identifiers guide][identifiers] says the
 channel account address comes from the incoming activity's recipient field;
@@ -446,7 +450,11 @@ k -n orka-system scale deployment/teams --replicas=0
 ```
 
 Wait for all owners to stop; retain `teams-state`, both databases, the permanent
-`delivery.sqlite.owner.sqlite` and all SQLite sidecars together. Keep UID/GID1000,
+`delivery.sqlite.owner.sqlite` and all SQLite sidecars together. If configured,
+retain the separately provisioned correlation main/owner/SQLite sidecars too.
+Read [mixed-store rollback constraints](shared-rooms.md#rollout-and-rollback)
+before replacing the binary; never delete shared routes/session controls or
+reset receipts to downgrade. Keep UID/GID1000,
 private modes, the Gateway **UID**, target Orka backend, retained reply routes and
 Orka dedup ledger stable. Retention/reconciliation must cover late/manual replays.
 Do not copy/open/close live SQLite inodes through ordinary filesystem APIs in the

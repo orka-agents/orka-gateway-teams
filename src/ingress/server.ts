@@ -8,6 +8,7 @@ import { prepareCertificate } from '../auth/certificate.js';
 import { prepareManagedIdentity } from '../auth/managed-identity.js';
 import type { ManagedIdentityDependencies } from '../auth/managed-identity.js';
 import { assertSelectedTokenCredentials, denyBotToken } from '../auth/credentials.js';
+import type { SessionCorrelationPort } from '../delivery/session-correlation.js';
 import type { DeliveryJournalPort } from '../delivery/types.js';
 import { createDeliveryDispatcher } from '../outbound/dispatcher.js';
 import { createProviderSender } from '../outbound/sender.js';
@@ -26,7 +27,7 @@ export interface ReceiverDependencies { sdkCloud?: CloudEnvironment; fetchKeys?:
   botToken?: Token; providerPost?: ProviderPost; certificateNetwork?: INetworkModule; managedIdentity?: ManagedIdentityDependencies }
 export interface AdmissionSink { readonly scope: IngressStore['scope'];
   admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>): AdmissionResult | Promise<AdmissionResult> }
-export interface ReceiverOutbound { journal: DeliveryJournalPort; getRoute: (key: string) => ReplyRoute | undefined | Promise<ReplyRoute | undefined> }
+export interface ReceiverOutbound { journal: DeliveryJournalPort; correlation?: SessionCorrelationPort; getRoute: (key: string) => ReplyRoute | undefined | Promise<ReplyRoute | undefined> }
 export interface Receiver { port: number; stop(): Promise<void>; failed: Promise<never>; outbound?: DeliveryDispatcher }
 export interface PreparedReceiver { start(sink: AdmissionSink, outbound?: ReceiverOutbound, signal?: AbortSignal): Promise<Receiver> }
 
@@ -101,9 +102,13 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
     if (converted.kind === 'invalid') return { status: 400 };
     if (converted.kind === 'ignored') return { status: 200, body: { status: 'ignored' } };
     try {
-      const result = await sink.admit(converted.event, { serviceUrl: input.serviceUrl, channelId: 'msteams',
-        bot: { id: input.recipient.id, role: 'bot' }, conversation: { id: converted.event.contextId,
-          conversationType: 'personal', tenantId: config.tenantId } });
+      const base = { serviceUrl: input.serviceUrl, channelId: 'msteams' as const, bot: { id: input.recipient.id, role: 'bot' as const } };
+      const id = converted.event.contextId; const tenantId = config.tenantId;
+      const kind = input.conversation.conversationType;
+      const route: ReplyRoute = kind === 'personal' ? { ...base, conversation: { id, conversationType: 'personal', tenantId } } :
+        kind === 'groupChat' ? { ...base, conversation: { id, conversationType: 'groupChat', tenantId }, requester: { ...converted.event.sender } } :
+          { ...base, conversation: { id, conversationType: 'channel', tenantId }, requester: { ...converted.event.sender }, threadId: converted.event.threadId! };
+      const result = await sink.admit(converted.event, route);
       if (result.kind === 'full') return { status: 503 };
       if (result.kind === 'conflict') return { status: 409 };
       return { status: 200, body: { status: result.kind } };
@@ -135,6 +140,7 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
         } catch { return undefined; }
       }, dependencies.providerPost === undefined ? {} : { post: dependencies.providerPost });
       dispatcher = createDeliveryDispatcher({ journal: outbound.journal, getRoute: outbound.getRoute,
+        ...(outbound.correlation === undefined ? {} : { correlation: outbound.correlation }),
         scope: { appId: config.appId, tenantId: config.tenantId }, serviceUrls: config.serviceUrls, recipientIds: config.recipientIds, sender });
     }
     await app.initialize();

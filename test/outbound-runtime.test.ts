@@ -10,6 +10,7 @@ import type { TestContext } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Client } from '@microsoft/teams.common/http';
 import type { Token } from '@microsoft/teams.common/http';
+import { initializeSessionCorrelation, openSessionCorrelation } from '../src/delivery/sqlite-session-correlation.js';
 import { initializeDeliveryJournal, openDeliveryJournal } from '../src/delivery/journal.js';
 import { createTableDeliveryJournalV2 } from '../src/delivery/table-journal.js';
 import { startIngressRuntime } from '../src/ingress/main.js';
@@ -25,7 +26,7 @@ import type { ProviderPost } from '../src/outbound/sender.js';
 import type { EventEnvelope } from '../src/protocol/types.js';
 import { finalDelivery, finalMessage } from './fixtures/outgoing.js';
 import { expectedEvent } from './fixtures/incoming.js';
-import { authFixture, deferred, post, receiverConfig, scope, serviceUrl } from './support/ingress-auth.js';
+import { activity, authFixture, deferred, post, receiverConfig, scope, serviceUrl } from './support/ingress-auth.js';
 import { httpsFixture } from './support/ingress-https.js';
 import { auditBudget, indexBudget } from './support/table-ingress-audit.js';
 import { payload, rowKey } from './support/table-ingress-store.js';
@@ -220,6 +221,101 @@ test('real Table-backed registered SDK runtime persists input/reply and replays 
   await duplicates(); await stopAndClose(); assertHistory(); assertDrained();
   // Same services, maps, bindings and initialized data; only runtime/handle instances change.
   runtime = await start(); await duplicates(); await stopAndClose(); assertHistory(); assertDrained();
+});
+
+for (const conversationType of ['groupChat', 'channel'] as const) test(`registered SDK ${conversationType}: saved requester, bounded root reply, continuation and aliases survive runtime restart`, { timeout: 12000 }, async (t) => {
+  const auth = await authFixture(t); const events: EventEnvelope[] = []; const messages: Record<string, any>[] = [];
+  const upstream = await httpsFixture(t, async (req, res) => {
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    events.push(JSON.parse(Buffer.concat(chunks).toString())); res.writeHead(202); res.end(JSON.stringify({ status: 'accepted', eventId: `origin-${events.length}`, state: 'Queued' }));
+  });
+  const f = storage(t, upstream.baseUrl, upstream.ca); const correlationDbPath = join(f.config.dbPath, '..', 'correlation.sqlite');
+  f.config.outbound!.correlationDbPath = correlationDbPath; initializeSessionCorrelation(correlationDbPath, journalScope);
+  const contextId = conversationType === 'channel' ? '19:shared;messageid=root' : '19:shared';
+  const provider = await httpsFixture(t, async (req, res) => {
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const bytes = Buffer.concat(chunks); assert.ok(bytes.length > 20000 && bytes.length <= 20480);
+    assert.equal(req.url, `/v3/conversations/${encodeURIComponent(contextId)}/activities`);
+    const message = JSON.parse(bytes.toString()); assert.equal(message.replyToId, conversationType === 'channel' ? 'root' : undefined);
+    messages.push(message); res.writeHead(201); res.end('{"id":"shared-receipt"}');
+  });
+  const token = randomUUID(); const client = new Client({ logger: safeSdkLogger }); const agent = new Agent({ ca: provider.ca }); t.after(() => agent.destroy());
+  const dependencies = { ...auth.dependencies, botToken: () => token, providerPost: (url: string, body: Buffer, config: Parameters<ProviderPost>[2]) => {
+    assert.equal(url, `${serviceUrl}v3/conversations/${encodeURIComponent(contextId)}/activities`);
+    return client.post(`${provider.baseUrl}v3/conversations/${encodeURIComponent(contextId)}/activities`, body, { ...config, httpsAgent: agent });
+  } };
+  let runtime = f.own(await startIngressRuntime(f.config, dependencies));
+  for (const [n, name] of [[1, '[Alice]*'], [2, 'Bob']] as const) {
+    const input = activity(); input.id = `shared-${n}`; input.conversation = { id: contextId, conversationType, tenantId: scope.tenantId, isGroup: true };
+    input.from.aadObjectId = `synthetic-aad-${n}`; input.from.name = name;
+    input.text = '<at>Orka</at> shared question'; input.entities = [{ type: 'mention', mentioned: { id: receiverConfig.recipientIds[0] }, text: '<at>Orka</at>' }];
+    if (conversationType === 'channel') input.replyToId = 'root';
+    assert.equal((await post(runtime.port, auth.token(), input)).status, 200); await until(() => events.length === n);
+    const body = { ...finalDelivery, contextId, ...(conversationType === 'channel' ? { threadId: 'root' } : {}), replyTarget: events[n - 1]!.replyTarget!,
+      originatingEventId: `origin-${n}`, idempotencyId: `shared-op-${n}`, deliveryId: `shared-delivery-${n}`, text: 'x'.repeat(65000) };
+    const response = await deliver(runtime, f.config, body); assert.equal((await response.json() as { status: string }).status, 'delivered');
+    const card = JSON.stringify(messages[n - 1]); assert.ok(card.includes(n === 1 ? 'Asked by \\\\[Alice\\\\]\\\\*' : 'Asked by Bob'));
+    assert.equal(card.includes("Continuing the room's conversation"), n === 2); assert.ok(!card.includes('synthetic-aad'));
+    await runtime.stop(); runtime = f.own(await startIngressRuntime(f.config, dependencies));
+    assert.equal((await (await deliver(runtime, f.config, { ...body, deliveryId: `restart-alias-${n}` })).json() as { status: string }).status, 'delivered');
+    assert.equal(messages.length, n);
+  }
+  await runtime.stop(); const sidecar = openSessionCorrelation(correlationDbPath, journalScope); sidecar.close();
+});
+
+test('missing configured sidecar operates without continuation wording and never initializes; corrupt/busy sidecars fail before either live store opens', async (t) => {
+  const f = storage(t); const correlationDbPath = join(f.config.dbPath, '..', 'correlation.sqlite'); f.config.outbound!.correlationDbPath = correlationDbPath;
+  const input: EventEnvelope = { ...expectedEvent, sender: { id: 'synthetic-aad', displayName: 'Alice' } };
+  const sharedRoute = { ...route, conversation: { ...route.conversation, conversationType: 'groupChat' as const }, requester: input.sender };
+  const inbox = openIngressStore(f.config.dbPath, f.config.scope); inbox.admit(input, sharedRoute); inbox.close();
+  let body = ''; const runtime = f.own(await startIngressRuntime(f.config, { botToken: () => randomUUID(), providerPost: async (_url, bytes) => {
+    body = bytes.toString(); return { status: 201, data: Buffer.from('{"id":"missing-sidecar-receipt"}') };
+  } }));
+  assert.equal((await (await deliver(runtime, f.config)).json() as { status: string }).status, 'delivered');
+  assert.ok(body.includes('Asked by Alice')); assert.ok(!body.includes('Continuing')); await runtime.stop();
+  assert.equal(existsSync(correlationDbPath), false); assert.equal(existsSync(`${correlationDbPath}.owner.sqlite`), false);
+  initializeSessionCorrelation(correlationDbPath, journalScope); const owner = openSessionCorrelation(correlationDbPath, journalScope);
+  let opens = 0; const deps = { openIngressStore: () => { opens++; throw new Error('must not open'); } };
+  try { await assert.rejects(startIngressRuntime(f.config, deps), { store: 'correlation', reason: 'occupied' }); assert.equal(opens, 0); }
+  finally { owner.close(); }
+  writeFileSync(correlationDbPath, 'synthetic corrupt content');
+  await assert.rejects(startIngressRuntime(f.config, deps), { store: 'correlation', reason: 'corrupt' }); assert.equal(opens, 0); f.reopen().close();
+});
+
+test('shared runtime shutdown drains token and retains correlation ownership until observations/settlement complete', { timeout: 7000 }, async (t) => {
+  const f = storage(t); const correlationDbPath = join(f.config.dbPath, '..', 'correlation.sqlite'); f.config.outbound!.correlationDbPath = correlationDbPath;
+  initializeSessionCorrelation(correlationDbPath, journalScope);
+  const inbox = openIngressStore(f.config.dbPath, f.config.scope);
+  inbox.admit({ ...expectedEvent, sender: { id: 'synthetic-aad' } }, { ...route,
+    conversation: { ...route.conversation, conversationType: 'groupChat' }, requester: { id: 'synthetic-aad' } }); inbox.close();
+  const token = deferred<string>(); const acquired = deferred<void>(); let sends = 0;
+  const runtime = f.own(await startIngressRuntime(f.config, { botToken: () => { acquired.resolve(); return token.promise; }, providerPost: async () => { sends++; throw new Error('no late send'); } }));
+  const pending = deliver(runtime, f.config).catch(() => undefined); await acquired.promise;
+  let stopped = false; const stopping = runtime.stop().then(() => { stopped = true; });
+  await until(() => refused(runtime.outboundPort!)); assert.equal(stopped, false);
+  assert.throws(() => openSessionCorrelation(correlationDbPath, journalScope), { code: 'busy' });
+  token.resolve(randomUUID()); await stopping; await pending; assert.equal(sends, 0);
+  const sidecar = openSessionCorrelation(correlationDbPath, journalScope); sidecar.close(); f.reopen().close();
+});
+
+test('failed later journal open releases the already-audited correlation handle without initialization or relay', async (t) => {
+  const f = storage(t); const correlationDbPath = join(f.config.dbPath, '..', 'correlation.sqlite');
+  initializeSessionCorrelation(correlationDbPath, journalScope);
+  const missing = join(f.config.dbPath, '..', 'missing-journal.sqlite');
+  await assert.rejects(startIngressRuntime({ ...f.config, outbound: { ...f.config.outbound!, correlationDbPath, dbPath: missing } }), { store: 'delivery' });
+  assert.equal(existsSync(missing), false); assert.equal(existsSync(`${missing}.owner.sqlite`), false);
+  const sidecar = openSessionCorrelation(correlationDbPath, journalScope); sidecar.close(); f.reopen().close();
+});
+
+test('configured sidecar path/inode aliases and foreign scope fail before store ownership', async (t) => {
+  const f = storage(t); let opens = 0;
+  const deps = { openIngressStore: () => { opens++; throw new Error('must not own'); } };
+  const paths = [f.config.dbPath, f.config.outbound!.dbPath, `${f.config.outbound!.dbPath}.owner.sqlite`, `${f.config.dbPath}-wal`];
+  for (const correlationDbPath of paths) await assert.rejects(startIngressRuntime({ ...f.config, outbound: { ...f.config.outbound!, correlationDbPath } }, deps), ConfigurationError);
+  const correlationDbPath = join(f.config.dbPath, '..', 'wrong-scope.sqlite');
+  initializeSessionCorrelation(correlationDbPath, { ...journalScope, appId: 'other-app' });
+  await assert.rejects(startIngressRuntime({ ...f.config, outbound: { ...f.config.outbound!, correlationDbPath } }, deps), { store: 'correlation' });
+  assert.equal(opens, 0); f.reopen().close();
 });
 
 test('same App public token closure supports string, StringLike and factory; invalid acquisitions never send', async (t) => {

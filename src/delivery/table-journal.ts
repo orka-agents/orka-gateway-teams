@@ -6,16 +6,20 @@ import type { BoundTable, DataAction, DataKey, Plan, PlannerView, PlannerViewV2,
 import type { DeliveryRequest } from '../protocol/types.js';
 import { requestIdentity, validateClaim, validateOutcome, validateScope } from './identity.js';
 import type { RequestIdentity } from './identity.js';
-import { audit, auditV2Startup, corrupt, decodeAlias, decodeOperation, decodeResult, effectiveState, encode, marker, validateMarker } from './table-codec.js';
+import { audit, auditV2Startup, corrupt, countSessionControls, decodeAlias, decodeOperation, decodeResult, decodeSessionControl, effectiveState, encode, marker, sessionControlId, validateMarker } from './table-codec.js';
 import type { Operation, Result } from './table-codec.js';
 import { DeliveryJournalError } from './types.js';
 import type { BeginDeliveryResult, DeliveryClaim, DeliveryJournalPort, DeliveryOutcome, JournalScope, SettlementResult } from './types.js';
+import { sessionCorrelationLimit, validateSessionObservation } from './session-correlation.js';
+import type { SessionCorrelationPort, SessionObservation, SessionObservationResult } from './session-correlation.js';
 
 /** Journal budget includes active and queued identity-only snapshots. Kernel limits
  * independently bound each physical operation; no request body is retained here. */
-export interface TableDeliveryJournalLimits { maxPending?: number; maxPendingBytes?: number; kernel?: Partial<TableLimits> }
-type Snapshot = { operation: 'begin'; identity: RequestIdentity } | { operation: 'settle'; claim: DeliveryClaim; outcome: DeliveryOutcome };
-type Job = { snapshot: Snapshot; bytes: number; resolve: (value: BeginDeliveryResult | SettlementResult) => void; reject: (error: DeliveryJournalError) => void };
+export interface TableDeliveryJournalLimits { maxPending?: number; maxPendingBytes?: number; maxSessions?: number; kernel?: Partial<TableLimits> }
+type Snapshot = { operation: 'begin'; identity: RequestIdentity } | { operation: 'settle'; claim: DeliveryClaim; outcome: DeliveryOutcome } |
+  { operation: 'observe-session'; observation: SessionObservation };
+type JobResult = BeginDeliveryResult | SettlementResult | SessionObservationResult;
+type Job = { snapshot: Snapshot; bytes: number; resolve: (value: JobResult) => void; reject: (error: DeliveryJournalError) => void };
 type Lifecycle = 'new' | 'initializing' | 'opening' | 'ready' | 'failed' | 'closing' | 'closed';
 /** Startup-only safe diagnostic; the public journal error code remains unavailable. */
 export class TableDeliveryStartupFailure extends DeliveryJournalError {
@@ -65,12 +69,14 @@ export function createTableDeliveryJournalV2(binding: TableBinding, dependencies
 }
 type Storage = { format: 1; kernel: ReturnType<typeof createTableKernel> } | { format: 2; kernel: ReturnType<typeof createTableKernelV2> };
 type DomainPlanner = (view: PlannerView | PlannerViewV2) => Plan;
-class TableDeliveryJournal implements DeliveryJournalPort {
+class TableDeliveryJournal implements DeliveryJournalPort, SessionCorrelationPort {
   private readonly storage: Storage;
   private get kernel() { return this.storage.kernel; }
   private readonly scope: JournalScope;
   private readonly maxPending: number;
   private readonly maxPendingBytes: number;
+  private readonly maxSessions: number;
+  private sessionCount = 0;
   private lifecycle: Lifecycle = 'new';
   private epoch = 0;
   private pending = 0;
@@ -82,7 +88,8 @@ class TableDeliveryJournal implements DeliveryJournalPort {
   private closing?: Promise<void>;
   private drained?: () => void;
   constructor(binding: Extract<TableBinding, { kind: 'delivery' }>, dependencies: TableDependencies, limits: TableDeliveryJournalLimits, format: 1 | 2, private readonly bound: BoundTable) {
-    object(limits, ['maxPending', 'maxPendingBytes', 'kernel']);
+    object(limits, ['maxPending', 'maxPendingBytes', 'maxSessions', 'kernel']);
+    this.maxSessions = sessionCorrelationLimit(limits.maxSessions);
     this.maxPending = integer(limits.maxPending ?? DEFAULT_LIMITS.maxPending, 1, 1024);
     this.maxPendingBytes = integer(limits.maxPendingBytes ?? DEFAULT_LIMITS.maxPendingBytes, 1, 256 * 1024 * 1024);
     this.scope = validateScope(binding.scope);
@@ -108,9 +115,11 @@ class TableDeliveryJournal implements DeliveryJournalPort {
       if (this.storage.format === 2) {
         const records = await this.storage.kernel.scan();
         this.epoch = this.domain(() => auditV2Startup(this.bound, records, initialize));
+        this.sessionCount = this.domain(() => countSessionControls(records, this.maxSessions));
       } else {
         const records = await this.storage.kernel.scan();
         this.epoch = this.domain(() => audit(records, initialize));
+        this.sessionCount = this.domain(() => countSessionControls(records, this.maxSessions));
       }
       if (this.closing || this.startupProof === 'invalidated') throw new DeliveryJournalError('closed');
       // No await between validation, lifecycle recheck and discharge. Same-handle
@@ -138,11 +147,15 @@ class TableDeliveryJournal implements DeliveryJournalPort {
     this.check(); const claim = validateClaim(inputClaim); const outcome = validateOutcome(inputOutcome);
     return this.enqueue({ operation: 'settle', claim, outcome }) as Promise<SettlementResult>;
   }
+  observeSession(input: Readonly<SessionObservation>): Promise<SessionObservationResult> {
+    this.check(); const observation = validateSessionObservation(input);
+    return this.enqueue({ operation: 'observe-session', observation }) as Promise<SessionObservationResult>;
+  }
   private check(): void {
     if (this.closing || this.lifecycle === 'closed') throw new DeliveryJournalError('closed');
     if (this.lifecycle !== 'ready') throw new DeliveryJournalError('unavailable');
   }
-  private enqueue(snapshot: Snapshot): Promise<BeginDeliveryResult | SettlementResult> {
+  private enqueue(snapshot: Snapshot): Promise<JobResult> {
     const bytes = encode(snapshot).length;
     if (this.pending >= this.maxPending || this.pendingBytes + bytes > this.maxPendingBytes) return Promise.reject(new DeliveryJournalError('busy'));
     return new Promise((resolve, reject) => {
@@ -154,7 +167,7 @@ class TableDeliveryJournal implements DeliveryJournalPort {
     const job = this.queue.shift(); if (!job) return; this.active = true;
     void this.run(job.snapshot).then(result => this.finish(job, { result }), error => this.finish(job, { error: safeError(error) }));
   }
-  private finish(job: Job, outcome: { result: BeginDeliveryResult | SettlementResult } | { error: DeliveryJournalError }): void {
+  private finish(job: Job, outcome: { result: JobResult } | { error: DeliveryJournalError }): void {
     this.active = false; this.pending--; this.pendingBytes -= job.bytes;
     if ('error' in outcome) job.reject(outcome.error); else job.resolve(outcome.result);
     this.drained?.(); this.pump();
@@ -194,9 +207,10 @@ class TableDeliveryJournal implements DeliveryJournalPort {
       this.kernel.invalidate(); throw error;
     }
   }
-  private async run(snapshot: Snapshot): Promise<BeginDeliveryResult | SettlementResult> {
+  private async run(snapshot: Snapshot): Promise<JobResult> {
     try {
-      const result = snapshot.operation === 'begin' ? await this.beginIdentity(snapshot.identity) : await this.settleSnapshot(snapshot.claim, snapshot.outcome);
+      const result = snapshot.operation === 'begin' ? await this.beginIdentity(snapshot.identity) :
+        snapshot.operation === 'settle' ? await this.settleSnapshot(snapshot.claim, snapshot.outcome) : await this.observeSnapshot(snapshot.observation);
       this.check(); return result;
     } catch (error) { await this.retire(); throw safeError(error); }
   }
@@ -254,6 +268,37 @@ class TableDeliveryJournal implements DeliveryJournalPort {
       return { state: marker(), result: encode({ schema: 1, operation: 'begin', identity: key, result }), actions };
     });
     if (saved.operation !== 'begin') return this.domain(corrupt); return saved.result;
+  }
+  private async observeSnapshot(observation: SessionObservation): Promise<SessionObservationResult> {
+    const key: DataKey = { type: 'control', id: sessionControlId(observation.sessionDigest) };
+    const beforeCount = this.sessionCount;
+    // Retained observations and capacity rejection are GET-only. Kernel read
+    // fences owned authority before/after lookup; the same FIFO keeps count and
+    // immutable first-origin evidence stable without manufacturing an M write.
+    const retained = await this.kernel.read(key);
+    if (retained) return this.domain(() => {
+      const existing = decodeSessionControl(retained);
+      if (existing.sessionDigest !== observation.sessionDigest || beforeCount < 1) corrupt();
+      return { kind: 'observed', continuation: existing.firstOriginDigest !== observation.originDigest };
+    });
+    if (beforeCount === this.maxSessions) return { kind: 'full' };
+    const saved = await this.mutate([key], { operation: 'observe-session', observation }, view => {
+      validateMarker(view.state); const record = view.records[0];
+      // Absence cannot change between the fenced read and this owned FIFO plan.
+      if (record || beforeCount >= this.maxSessions) corrupt();
+      const created = true;
+      const result: SessionObservationResult = { kind: 'observed', continuation: false };
+      const actions: DataAction[] = [{ kind: 'create', key, payload: encode({ schema: 1, kind: 'session-observation',
+        sessionDigest: observation.sessionDigest, firstOriginDigest: observation.originDigest }) }];
+      return { state: marker(), result: encode({ schema: 1, operation: 'observe-session', observation, result, created,
+        maxSessions: this.maxSessions, sessionCount: beforeCount + Number(created) }), actions };
+    });
+    if (saved.operation !== 'observe-session' || saved.observation.sessionDigest !== observation.sessionDigest ||
+        saved.observation.originDigest !== observation.originDigest || saved.maxSessions !== this.maxSessions ||
+        saved.sessionCount !== beforeCount + Number(saved.created)) return this.domain(corrupt);
+    // The kernel's exact-M committed/reconciled result, never the SDK ACK, publishes capacity.
+    this.sessionCount = saved.sessionCount;
+    return saved.result;
   }
   private async settleSnapshot(claim: DeliveryClaim, outcome: DeliveryOutcome): Promise<SettlementResult> {
     const saved = await this.mutate([operationKey(claim.idempotencyId), aliasKey(claim.idempotencyId)], { operation: 'settle', claim, outcome }, view => {

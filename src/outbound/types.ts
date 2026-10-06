@@ -1,5 +1,6 @@
 import type { DeliveryRequest } from '../protocol/types.js';
 import type { DeliveryJournalPort, JournalScope } from '../delivery/types.js';
+import type { SessionCorrelationPort } from '../delivery/session-correlation.js';
 import type { ReplyRoute } from '../ingress/types.js';
 import type { OutgoingTeamsMessage } from '../teams/format.js';
 
@@ -16,6 +17,7 @@ export interface ProviderSender {
 }
 export interface DispatcherOptions {
   journal: DeliveryJournalPort;
+  correlation?: SessionCorrelationPort;
   scope: Readonly<JournalScope>;
   getRoute: (replyTarget: string) => ReplyRoute | undefined | Promise<ReplyRoute | undefined>;
   serviceUrls: readonly string[];

@@ -16,7 +16,7 @@ const DEADLINE_MS = 10000;
 const retryable: DeliveryResponse = Object.freeze({ status: 'retryableError', message: 'Delivery is temporarily unavailable.' });
 const rejected: DeliveryResponse = Object.freeze({ status: 'nonRetryableError', message: 'Delivery cannot be completed safely.' });
 const capabilities = { protocolVersion: 'orka.gateway.v1', adapterName: 'orka-gateway-teams', adapterVersion: '0.0.0',
-  capabilities: { inboundText: true, outboundText: true, threads: false, senderIdentity: true, explicitSessions: false, idempotentDelivery: true } };
+  capabilities: { inboundText: true, outboundText: true, threads: true, senderIdentity: true, explicitSessions: false, idempotentDelivery: true } };
 class HttpFailure extends Error { constructor(readonly status: number) { super('Request rejected'); } }
 
 /** Separate bearer boundary; never registers a route on the Teams SDK listener. */

@@ -1,7 +1,8 @@
 # Orka gateway for Microsoft Teams
 
 Send requests to [Orka](https://github.com/orka-agents/orka) from a Microsoft Teams
-personal chat and receive the result in the same conversation.
+personal chat or an explicitly invoked shared room and receive the result in the
+same conversation/thread.
 
 The gateway connects a Teams bot to an existing Orka installation. It verifies
 incoming messages, stores them durably, and forwards them to Orka. Orka runs the
@@ -10,9 +11,11 @@ Card. Follow-up messages can share an Orka Session through the configured Bindin
 
 ## Supported behavior
 
-- **Personal text conversations.** The operator configures an Orka Binding for the
-  approved sender and chat. Messages with attachments contribute only their text;
-  attachments are not processed.
+- **Personal and opt-in shared text conversations.** The operator configures an
+  exact Orka Binding and explicit sender allowlist. Shared group/channel requests
+  require a bot mention; channels reply to the saved root. See
+  [shared-room setup, identity and rollback](docs/shared-rooms.md). Attachments
+  contribute only their text; attachments are not processed.
 - **Final replies and errors.** Replies use a single text card. Long answers are
   shortened with a visible notice rather than split into multiple messages.
 - **Durable admission and receipt replay.** The inbox retains accepted messages
@@ -21,11 +24,11 @@ Card. Follow-up messages can share an Orka Session through the configured Bindin
 - **Two storage options.** Local SQLite is the default. Azure Table V2 is selected
   explicitly for the Azure Container Apps deployment profile.
 
-The runtime does **not** support group chats, channels, threaded replies, files,
-streaming or interim messages, or approval buttons. An optional
-[shared-room app package](docs/aca-deployment.md#opt-in-shared-room-package-packaging-only)
-is available for installation testing; it does not enable shared-room runtime
-support. Setup capture is also personal-chat only.
+The runtime does **not** support files, streaming or interim messages, or approval
+buttons. Shared rooms require reviewed app installation and separate allowlisted
+bindings; packaging alone does not authorize a room. Setup capture remains
+personal-chat only. Existing recorded live validation is personal-chat evidence,
+not shared-room qualification.
 
 ## Getting started
 
@@ -77,6 +80,10 @@ files or command-line arguments, for credentials.
 - **Ingress-only is the default.** Full request/reply requires
   `OUTBOUND_ENABLED=true`, separately initialized delivery storage, and distinct
   adapter-to-Orka and Orka-to-adapter bearer tokens.
+- **Shared continuation labels need local evidence.** SQLite optionally uses an
+  explicitly provisioned `CORRELATION_DB`; omission/missing storage leaves rooms
+  operational without continuation wording. Table uses its existing delivery
+  partition. See [evidence and provisioning](docs/shared-rooms.md#optional-sqlite-evidence-store).
 - **SQLite is the default storage backend.** Table deployments explicitly select
   `GATEWAY_STORAGE_BACKEND=table-v2` and provide the Table identities and budgets
   instead of SQLite paths.
@@ -141,6 +148,7 @@ focused tests, and the optional container, Kubernetes, and app-packaging checks.
 | --- | --- |
 | Deploy and operate | [Azure Container Apps](docs/aca-deployment.md) · [Kubernetes](docs/deployment.md) |
 | Configure the runtime and HTTP API | [Runtime reference](docs/runtime-reference.md) · [Table runtime](docs/table-runtime.md) |
+| Enable shared group/channel conversations | [Shared rooms](docs/shared-rooms.md) |
 | Establish trusted chat identities | [Authenticated setup capture](docs/setup-capture.md) |
 | Authenticate the bot | [Certificates](docs/certificate-auth.md) · [Managed-identity federation](docs/managed-identity-auth.md) |
 | Understand storage internals | [Table kernel and delivery journal](docs/table-storage.md) · [Table inbox](docs/table-inbox.md) |
