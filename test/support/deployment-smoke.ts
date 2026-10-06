@@ -462,7 +462,7 @@ async function smoke(): Promise<void> {
     assert.equal((JSON.parse(health.body) as Resource).status, 'ok');
     const capabilities = await https(privatePort, ca, '/v1/capabilities', outbound); assert.equal(capabilities.status, 200);
     assert.deepEqual((JSON.parse(capabilities.body) as Resource).capabilities, {
-      inboundText: true, outboundText: true, threads: false, senderIdentity: true, explicitSessions: false, idempotentDelivery: true,
+      inboundText: true, outboundText: true, threads: true, senderIdentity: true, explicitSessions: false, idempotentDelivery: true,
     });
     stage = 'negative TLS/auth/public V1 boundaries';
     for (const path of ['/v1/health', '/v1/capabilities']) {

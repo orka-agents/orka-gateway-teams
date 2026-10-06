@@ -1,3 +1,4 @@
+import { createSessionObservation } from '../delivery/session-correlation.js';
 import { validateOutcome, validateScope } from '../delivery/identity.js';
 import type { BeginDeliveryResult, DeliveryClaim, DeliveryOutcome } from '../delivery/types.js';
 import { validateRoute } from '../ingress/codec.js';
@@ -12,7 +13,7 @@ const retryable: DeliveryResponse = Object.freeze({ status: 'retryableError', me
 const nonRetryable: DeliveryResponse = Object.freeze({ status: 'nonRetryableError', message: 'Delivery cannot be completed safely.' });
 
 export function createDeliveryDispatcher(options: DispatcherOptions): DeliveryDispatcher {
-  const { journal, sender, getRoute } = options;
+  const { journal, sender, getRoute, correlation } = options;
   const scope = validateScope(options.scope);
   const services = new Set(options.serviceUrls); const recipients = new Set(options.recipientIds);
   const work = new Set<Promise<DeliveryResponse>>(); const controllers = new Set<AbortController>();
@@ -51,14 +52,35 @@ export function createDeliveryDispatcher(options: DispatcherOptions): DeliveryDi
     try { saved = await getRoute(request.replyTarget); }
     catch { poison(); return finish({ kind: 'retryable' }); }
     if (!active()) return finish({ kind: 'retryable' });
-    let route: ReplyRoute; let message: OutgoingTeamsMessage;
+    let route: ReplyRoute;
     try {
       route = validateRoute(saved);
       if (!services.has(route.serviceUrl) || !recipients.has(route.bot.id) || route.conversation.tenantId !== scope.tenantId ||
-          request.accountId !== scope.tenantId || request.contextId !== route.conversation.id || request.threadId) {
+          request.accountId !== scope.tenantId || request.contextId !== route.conversation.id ||
+          (route.conversation.conversationType === 'channel' ? request.threadId !== route.threadId : !!request.threadId)) {
         return finish({ kind: 'rejected' });
       }
-      message = formatDelivery(request);
+    } catch { return finish({ kind: 'rejected' }); }
+    const shared = route.conversation.conversationType !== 'personal';
+    let continuation = false;
+    if (shared && correlation) {
+      try {
+        const observation = createSessionObservation(scope, request);
+        if (observation) {
+          const result = await correlation.observeSession(observation);
+          if (!active()) return finish({ kind: 'retryable' });
+          if (result.kind === 'full') return finish({ kind: 'retryable' });
+          continuation = result.continuation;
+        }
+      } catch { poison(); return finish({ kind: 'retryable' }); }
+    }
+    let message: OutgoingTeamsMessage;
+    try {
+      message = formatDelivery(request, shared ? {
+        ...(route.requester?.displayName === undefined ? {} : { requesterDisplayName: route.requester.displayName }),
+        continuation,
+        ...(route.conversation.conversationType === 'channel' ? { replyToId: route.threadId } : {}),
+      } : undefined);
     } catch { return finish({ kind: 'rejected' }); }
     // The budget starts before snapshot/SQLite/formatting. Do not rely solely
     // on a timer getting a turn after potentially blocking synchronous work.

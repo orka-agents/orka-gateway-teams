@@ -1,6 +1,8 @@
 import { etag, integer, object } from '../storage/table/codec.js';
 import { TableError } from '../storage/table/types.js';
 import { identity, MAX_REPLAY_WINDOW_MS, validateReceipt } from './codec.js';
+import type { RouteEvidence } from './codec.js';
+import type { ReplyRoute } from './types.js';
 import { MAX_EVENT_PAYLOAD_BYTES, MAX_INBOX_RECORDS, MAX_INBOX_TIME, MAX_ROUTE_PAYLOAD_BYTES, MAX_SEAL_PAYLOAD_BYTES } from './table-types.js';
 import type { EventSummary, SealPayload } from './table-types.js';
 
@@ -9,24 +11,30 @@ export interface IndexEventInput { event: Readonly<EventSummary>; bodyEncodingBy
 export interface IndexRouteInput {
   replyTarget: string; externalEventId: string; botId: string; conversationId: string;
   routeDigest: string; routeEncodingBytes: number; payloadBytes: number;
+  /** Omitted kind is the legacy personal summary; no profile or service is retained. */
+  conversationType?: 'personal' | 'groupChat' | 'channel'; threadId?: string; requesterId?: string;
 }
 export interface IndexSealInput { seal: Readonly<SealPayload>; payloadBytes: number }
 export type EventIndexRow = IndexEventInput & { version: Readonly<IndexVersion> };
 export type RouteIndexRow = IndexRouteInput & { version: Readonly<IndexVersion> };
 export type SealIndexRow = IndexSealInput & { version: Readonly<IndexVersion> };
 
-// Exact 2123-byte content ledger, reserved inside each 4096-byte event slot.
+// Exact 2640-byte content ledger, reserved inside each unchanged 4096-byte event slot.
+// Historical offsets 0..2122 are untouched. Shared extension: kind1 + thread256
+// + requester256 + two uint16 lengths = 517 bytes; never labels, URLs or bodies.
 // All offsets are bytes. Arenas/slots are 8-byte aligned. Buffer accessors handle
 // the final unaligned uint32 lengths; no typed-array alias escapes this module.
 export const E = Object.freeze({ ids: 0, etags: 1280, hashes: 1792, timestamps: 1952, uuid: 2008,
   numbers: 2024, unusedSealRef: 2080, lengths: 2084, state: 2100, reason: 2101,
   receiptStatus: 2102, receiptState: 2103, presence: 2104, eventPass: 2105, routePass: 2106,
-  bodyLength: 2107, routeLength: 2111, payloadLength: 2115, routePayloadLength: 2119 });
+  bodyLength: 2107, routeLength: 2111, payloadLength: 2115, routePayloadLength: 2119,
+  conversationType: 2123, thread: 2124, requester: 2380, threadLength: 2636, requesterLength: 2638 });
 // Exact 375-byte content ledger in a 512-byte seal slot. Numbers at316 are
 // deliberately unaligned; read/writeDoubleLE preserves validated safe integers.
 export const S = Object.freeze({ etag: 0, hash: 256, timestamp: 288, numbers: 316,
   unusedRefs: 356, etagLength: 364, timestampLength: 366, reason: 367,
   observation: 368, pass: 369, unusedRange: 370, payloadLength: 371 });
+const conversationTypes = ['personal', 'groupChat', 'channel'] as const;
 const states = ['pending', 'forwarding', 'blocked', 'terminal'] as const;
 const reasons = [null, 'conflict', 'invalid-event', 'redirect'] as const;
 const statuses = ['accepted', 'duplicate', 'rejected', 'deadLettered'] as const;
@@ -65,6 +73,27 @@ export function validateEventInput(input: IndexEventInput): void {
 export function validateRouteInput(input: IndexRouteInput): void {
   identity(input.replyTarget); identity(input.externalEventId); identity(input.botId); identity(input.conversationId); hex(input.routeDigest);
   integer(input.payloadBytes, 1, MAX_ROUTE_PAYLOAD_BYTES); integer(input.routeEncodingBytes, 1, input.payloadBytes);
+  const kind = input.conversationType === undefined ? 'personal' : input.conversationType;
+  if (!conversationTypes.includes(kind)) bad();
+  if (kind === 'personal') { if (input.threadId !== undefined || input.requesterId !== undefined) bad(); }
+  else {
+    identity(input.requesterId);
+    if (kind === 'channel') identity(input.threadId);
+    else if (input.threadId !== undefined) bad();
+  }
+}
+/** Shared identity-only evidence is identical in audit, planner and packed slots. */
+export function routeFields(route: Readonly<ReplyRoute>): Pick<IndexRouteInput, 'conversationType' | 'threadId' | 'requesterId'> {
+  const kind = route.conversation.conversationType;
+  if (kind === 'personal') return {};
+  return { conversationType: kind, requesterId: route.requester!.id,
+    ...(kind === 'channel' ? { threadId: route.threadId! } : {}) };
+}
+export function routeEvidence(route: Readonly<IndexRouteInput>, tenantId: string): RouteEvidence {
+  return { bot: { id: route.botId, role: 'bot' },
+    conversation: { id: route.conversationId, conversationType: route.conversationType ?? 'personal', tenantId },
+    ...(route.requesterId === undefined ? {} : { requester: { id: route.requesterId } }),
+    ...(route.threadId === undefined ? {} : { threadId: route.threadId }) };
 }
 export function validateSealSummary(s: Readonly<SealPayload>): void {
   if (s.schema !== 1 || s.kind !== 'generation-seal') bad();
@@ -102,6 +131,9 @@ export function writeEvent(b: Buffer, input: IndexEventInput): void {
 export function writeRoute(b: Buffer, input: IndexRouteInput): void {
   putId(b, 2, input.botId); putId(b, 3, input.conversationId); hash(b, E.hashes + 128, input.routeDigest);
   b.writeUInt32LE(input.routeEncodingBytes, E.routeLength); b.writeUInt32LE(input.payloadBytes, E.routePayloadLength);
+  b[E.conversationType] = conversationTypes.indexOf(input.conversationType ?? 'personal');
+  b.writeUInt16LE(text(b, E.thread, 256, input.threadId ?? ''), E.threadLength);
+  b.writeUInt16LE(text(b, E.requester, 256, input.requesterId ?? ''), E.requesterLength);
 }
 export function writeSeal(b: Buffer, input: IndexSealInput): void {
   for (let n = 0; n < sealNumbers.length; n++) b.writeDoubleLE(input.seal[sealNumbers[n]!] ?? 0, S.numbers + n * 8);
@@ -136,9 +168,18 @@ export function readEvent(b: Buffer, base: number): EventSummary {
     reason: reasons[b[base + E.reason]!]! };
 }
 export function readRoute(b: Buffer, base: number): IndexRouteInput {
+  const kind = conversationTypes[b[base + E.conversationType]!]; if (kind === undefined) bad();
+  const read = (offset: number, lengthOffset: number): string | undefined => {
+    const length = b.readUInt16LE(base + lengthOffset); if (length > 256) bad();
+    return length ? identity(b.toString('utf8', base + offset, base + offset + length)) : undefined;
+  };
+  const threadId = read(E.thread, E.threadLength); const requesterId = read(E.requester, E.requesterLength);
+  if (kind === 'personal' ? threadId !== undefined || requesterId !== undefined :
+    requesterId === undefined || (kind === 'channel' ? threadId === undefined : threadId !== undefined)) bad();
   return { externalEventId: getId(b, base, 0), replyTarget: getId(b, base, 1), botId: getId(b, base, 2), conversationId: getId(b, base, 3),
     routeDigest: b.toString('hex', base + E.hashes + 128, base + E.hashes + 160),
-    routeEncodingBytes: b.readUInt32LE(base + E.routeLength), payloadBytes: b.readUInt32LE(base + E.routePayloadLength) };
+    routeEncodingBytes: b.readUInt32LE(base + E.routeLength), payloadBytes: b.readUInt32LE(base + E.routePayloadLength),
+    ...(kind === 'personal' ? {} : { conversationType: kind, requesterId: requesterId! }), ...(threadId === undefined ? {} : { threadId }) };
 }
 export function readSeal(b: Buffer, base: number): SealPayload {
   const n = (index: number) => b.readDoubleLE(base + S.numbers + index * 8);

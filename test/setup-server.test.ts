@@ -71,6 +71,22 @@ for (const variant of ['unendorsed', 'other endorsement', 'wrong signature', 'no
   });
 }
 
+for (const conversationType of ['groupChat', 'channel'] as const) {
+  test(`setup remains personal-only for a valid mentioned ${conversationType} challenge`, async t => {
+    const { config, directory, capture, auth, body } = await fixture(t);
+    const shared = structuredClone(body); shared.conversation.conversationType = conversationType;
+    shared.conversation.isGroup = true; shared.from.aadObjectId = 'aad-shared';
+    // Exact raw challenge, verified mention and nonempty normalized remainder.
+    // Converter eligibility must not silently widen the setup capture boundary.
+    shared.entities = [{ type: 'mention', text: body.text.slice(0, 8), mentioned: { id: shared.recipient.id } }];
+    const response = await post(capture.port, auth.token(), shared);
+    assert.equal(response.status, 200); assert.deepEqual(await response.json(), { status: 'ignored' }); absent(config, directory);
+    assert.equal((await post(capture.port, auth.token(), body)).status, 200); await capture.done;
+    const saved = JSON.parse(fs.readFileSync(config.captureFile, 'utf8'));
+    assert.equal(saved.senderId, body.from.id);
+  });
+}
+
 for (const variant of ['wrong code', 'old code', 'case', 'leading whitespace', 'newline', 'mention', 'bot', 'skill', 'self', 'bot type', 'group', 'channel chat', 'edit', 'invoke', 'event marker', 'empty'] as const) {
   test(`authenticated ${variant} is ignored without private write, then exact fresh personal code captures`, async (t) => {
     const { config, directory, capture, auth, body, challenge } = await fixture(t);
@@ -98,7 +114,7 @@ for (const variant of ['wrong code', 'old code', 'case', 'leading whitespace', '
   });
 }
 
-for (const variant of ['tenant', 'conflicting tenant', 'missing tenant', 'malformed tenant', 'channel', 'recipient', 'sender', 'conversation', 'label', 'role', 'text', 'unicode', 'URL http', 'URL canonical', 'URL port', 'URL query', 'URL userinfo', 'URL long'] as const) {
+for (const variant of ['tenant', 'conflicting tenant', 'missing tenant', 'malformed tenant', 'channel', 'recipient', 'sender', 'conversation', 'missing conversation type', 'malformed conversation type', 'label', 'role', 'text', 'unicode', 'URL http', 'URL canonical', 'URL port', 'URL query', 'URL userinfo', 'URL long'] as const) {
   test(`setup rejects original body ${variant} before publication`, async (t) => {
     const { config, directory, capture, auth, body } = await fixture(t);
     if (variant === 'tenant') { body.conversation.tenantId = 'other'; body.channelData.tenant.id = 'other'; }
@@ -109,6 +125,8 @@ for (const variant of ['tenant', 'conflicting tenant', 'missing tenant', 'malfor
     if (variant === 'recipient') delete body.recipient.id;
     if (variant === 'sender') body.from.id = 'x'.repeat(257);
     if (variant === 'conversation') body.conversation.id = ' bad';
+    if (variant === 'missing conversation type') delete body.conversation.conversationType;
+    if (variant === 'malformed conversation type') body.conversation.conversationType = null;
     if (variant === 'label') body.from.name = 'x'.repeat(257);
     if (variant === 'role') body.from.role = 'unknown';
     if (variant === 'text') body.text = 'x'.repeat(65537);

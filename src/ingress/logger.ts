@@ -12,6 +12,6 @@ export type IngressLogEvent = 'listening' | 'stopped' | 'initialized' | 'configu
 export type IngressLogReason = 'invalid-configuration' | 'runtime-failure' | 'missing' | 'occupied' | 'corrupt' | 'incomplete' |
   'unresolved' | 'unavailable' | 'cancelled' | 'ingress' | 'outbound' | 'owner-or-epoch-mismatch' | 'already-unowned' |
   'audit-or-storage-failed' | 'outcome-uncertain';
-export function logIngress(event: IngressLogEvent, reason?: IngressLogReason, store?: 'ingress' | 'delivery'): void {
+export function logIngress(event: IngressLogEvent, reason?: IngressLogReason, store?: 'ingress' | 'delivery' | 'correlation'): void {
   process.stderr.write(`teams-ingress: ${event}${store ? ` (${store})` : ''}${reason ? `: ${reason}` : ''}\n`);
 }

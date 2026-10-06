@@ -1,6 +1,6 @@
 # Contributing to the Teams gateway
 
-This is the runnable personal-message request/reply runtime for
+This is the runnable personal and explicitly invoked shared-room request/reply runtime for
 [#549](https://github.com/orka-agents/orka/issues/549), with ingress-only mode still
 available. `convertActivity` ([#550](https://github.com/orka-agents/orka/issues/550)),
 `formatDelivery` ([#551](https://github.com/orka-agents/orka/issues/551)), the separate
@@ -139,8 +139,8 @@ pinned JavaScript validators; no runtime dependencies are added. Keep PNG/ZIP,
 legal metadata and live configuration out of source. The default package profile
 and `manifest.template.json` remain personal-only. The explicit `--profile
 shared-rooms` option requires exactly personal/groupChat/team scopes and uses the
-separate shared-room template; it grants no RSC permissions and does not enable
-runtime support. Preserve default-profile rejection of shared-room manifests,
+separate shared-room template; it grants no RSC permissions and alone does not
+authorize shared intake. See [shared-room runtime and rollout](docs/shared-rooms.md). Preserve default-profile rejection of shared-room manifests,
 byte-for-byte packaging, fixed error diagnostics, and all existing capability and
 output-ownership checks when extending the optional packaging tests.
 
@@ -375,7 +375,7 @@ export interface ConversionContext {
 
 export type ConversionResult =
   | { kind: 'accepted'; event: EventEnvelope }
-  | { kind: 'ignored'; reason: 'unsupported-activity' | 'unsupported-conversation' | 'bot-message' | 'empty-text' }
+  | { kind: 'ignored'; reason: 'unsupported-activity' | 'unsupported-conversation' | 'bot-message' | 'empty-text' | 'unmentioned' }
   | { kind: 'invalid'; reason: 'missing-identity' | 'tenant-mismatch' | 'invalid-field' | 'field-too-large' };
 
 export type ConvertActivity = (
@@ -401,7 +401,15 @@ export type OutgoingTeamsMessage = IMessageActivityInput & {
   }];
 };
 
-export type FormatDelivery = (delivery: Readonly<DeliveryRequest>) => OutgoingTeamsMessage;
+export interface DeliveryPresentation {
+  requesterDisplayName?: string;
+  continuation?: boolean;
+  replyToId?: string;
+}
+export type FormatDelivery = (
+  delivery: Readonly<DeliveryRequest>,
+  presentation?: Readonly<DeliveryPresentation>,
+) => OutgoingTeamsMessage;
 ```
 
 The converter exports `convertActivity: ConvertActivity`; see the
@@ -425,7 +433,7 @@ fixtures do, and retain the narrowed `OutgoingTeamsMessage` contract.
 | Layer | Owns | Does not own |
 |---|---|---|
 | #550 converter | supported-type checks, tenant/field validation, stable normalized event | auth, inbox, reply-target creation, network |
-| #551 formatter | final/error/empty text, wrapping, Unicode-safe truncation and 20 KiB message budget | destination, auth, send, retry, persistence |
+| #551 formatter | final/error/empty text, adapter-local room labels, measured replyToId, wrapping, Unicode-safe truncation and 20 KiB message budget | destination authorization, auth, send, retry, persistence |
 | Delivery journal | durable local claims, immutable identity/alias checks, fenced settlement and receipt replay | auth, routing, provider calls, retries, endpoints |
 | Ingress receiver/inbox/relay | request verification, app/tenant/recipient enforcement, durable original event + route, Orka admission | sender authorization, provider sends, outbound capabilities |
 | Outbound listener/dispatcher/sender | separate bearer boundary, bounded V1 requests, journal-backed send/receipt replay | changing original ingress replay keys, recovering lost provider receipts |
@@ -435,9 +443,12 @@ fixtures do, and retain the narrowed `OutgoingTeamsMessage` contract.
 Authenticate the provider request and enforce the intended app and tenant before
 conversion. SDK types and transport verification do not validate all activity fields.
 The converter requires exact `type: 'message'`, `channelId: 'msteams'` and
-`conversation.conversationType: 'personal'`. A supplied `isGroup` must be boolean;
-`true` excludes even a contradictory personal conversation. Notifications, joins,
-edits/deletes/undeletes and nonpersonal conversations are ignored. Any supplied
+`conversation.conversationType: 'personal' | 'groupChat' | 'channel'`. A supplied
+`isGroup` must be boolean; `true` excludes a contradictory personal conversation.
+Notifications, joins, edits/deletes/undeletes and other conversation types are ignored.
+Shared group/channel messages require a validated bot mention; only its exact
+mention text is removed. Missing mention yields `ignored/unmentioned`, malformed
+or ambiguous consumed evidence is invalid. Personal text/mention behavior is unchanged. Any supplied
 nonempty `channelData.eventType` marks an unsupported event, not a new message;
 malformed discriminators return `invalid`. Personal `replyToId` is neither an edit
 marker nor an output `threadId`.
@@ -447,8 +458,10 @@ missing `conversation.tenantId`. An otherwise valid role-less message is an elig
 **candidate**, not an attested human message. Explicit `bot`/`skill` roles,
 `from.type: 'bot'`, and matching `from.id`/`recipient.id` are excluded. Unknown or
 malformed supplied roles are invalid. No display-name, AAD-ID or ID-prefix heuristic
-establishes identity or humanity. `sender.id` is exactly `from.id`; Orka's stable-ID
-allowlist owns sender authorization. Recipient identity, if supplied, is validated
+establishes identity or humanity. Personal `sender.id` is exactly `from.id`;
+shared `sender.id` is exactly validated `from.aadObjectId`. Orka's stable-ID
+allowlist owns sender authorization. Existing personal bindings remain unchanged;
+shared pilots use explicit AAD allowlists, never `senderPolicy: all`. Recipient identity, if supplied, is validated
 and compared exactly for self detection. Missing recipient identity is allowed and
 is not affirmative human proof; unused recipient metadata is not validated.
 
@@ -480,7 +493,11 @@ Only `activity.text` is consumed, even with attachments. Attachment-only message
 are ignored; attachment contents and unrelated metadata are never inspected,
 extracted or downloaded. Accepted envelopes contain only the fixed protocol/event
 discriminators, stable event ID, account/context/sender, text and reply-target key.
-They omit timestamps, metadata, thread IDs, service URLs and conversation references.
+They omit timestamps, metadata, service URLs and conversation references.
+Personal/group events omit thread IDs. Channels map a terminal `;messageid=` root,
+matching supplied `replyToId`, or otherwise `replyToId`/root `activity.id`, preserving
+exact `conversation.id` as `contextId`. Contradictory or malformed roots are refused;
+never substitute a channel-wide context. See [shared mapping](docs/shared-rooms.md#identity-and-thread-mapping).
 
 The wire discriminator is exactly `orka.gateway.v1`; unknown wire fields are not
 forward-compatible extensions. Bounds in `src/protocol/types.ts` are UTF-8 limits:
@@ -569,7 +586,14 @@ Markdown and code text display, and shortening can leave an open Markdown fence.
 `test/format.test.ts` exercises these behaviors, exact/just-over message boundaries,
 long lines, paragraphs, lists, code, Unicode, JSON escapes, giant graphemes,
 independently bounded fallback, deterministic output, and frozen inputs. The
-formatter does not copy routing, task/session references, or metadata into cards.
+formatter does not copy task/session references or metadata into cards.
+An optional validated adapter-local `DeliveryPresentation` marks a shared card:
+saved requester label is Markdown-escaped, missing name uses `an allowed participant`,
+and `continuation: true` adds exactly `Continuing the room's conversation`.
+Only the correlation backend's observation of a different prior origin for the
+same scoped `sessionRef` permits that wording; no sender/context/count inference.
+Channel `replyToId` is constructed and measured inside the formatter, never appended
+after budgeting. One-argument output and all historical personal fixtures remain exact.
 
 For real formatter card JSON from synthetic deliveries, run:
 
@@ -690,13 +714,39 @@ maps them to the Telegram-compatible response/capability baseline. The journal
 blocks ambiguous redrive but cannot recover a lost Teams receipt or atomically
 commit SQLite and a remote send.
 
+## Session correlation contract
+
+`src/delivery/session-correlation.ts` exports the separate `SessionCorrelationPort`
+with async-compatible `observeSession(Readonly<SessionObservation>)`, returning
+`{kind:'observed', continuation:boolean}` or `{kind:'full'}`. Its closed inputs are
+only `sessionDigest` and `originDigest` (64-character lowercase SHA256 hex).
+`createSessionObservation(scope, validatedRequest)` consumes safe app/tenant/account,
+exact context, normalized thread, Session namespace/name and originating-event ID;
+it does not retain text, labels, metadata, task refs, raw requests or credentials.
+Absent `sessionRef` gives no observation. There is one immutable first-origin record
+per scoped Session, retained indefinitely with a hard 100000 ceiling (libraries
+may lower it for tests). Same first origin is always false, different origin true;
+full new keys backpressure before send, existing keys and receipt replay remain usable.
+This is local observation, not authoritative incarnation/turn/history/display evidence.
+
+SQLite's separate branded sidecar exports explicit `initializeSessionCorrelation`
+and `openSessionCorrelation`; normal open never initializes/repairs. Runtime omission
+or an absent main file is approved no-evidence operation, not a guessed false
+observation. Existing invalid/busy/foreign storage is fatal. Table's returned journal
+implements the separate port on its existing FIFO/kernel/partition; the original
+`DeliveryJournalPort`, Operation/Alias/marker/receipt shapes are unchanged. Session
+controls are CREATE-only; retained observations and capacity rejection use
+owned-authority-fenced GETs without M or row writes. New CREATE results still use
+exact-M reconciliation and closed startup/foreign/recovery audits. See
+[provisioning and rollback](docs/shared-rooms.md); old Table readers reject new controls.
+
 ## Full-runtime boundaries and tests
 
 See [full-mode configuration, API and limits](docs/runtime-reference.md#enable-the-full-requestreply-runtime).
 Keep these ownership boundaries intact:
 
 - `startReceiver(config, sink, dependencies?, outbound?)` preserves the SDK-only
-  ingress route. Optional `outbound` is `{ journal, getRoute }`; optional returned
+  ingress route. Optional `outbound` is `{ journal, getRoute, correlation? }`; optional returned
   `receiver.outbound` is the journal-backed `DeliveryDispatcher`, never a raw sender
   or token. `receiver.stop()` is idempotent and drains intake and the dispatcher.
 - The receiver privately resolves the SAME App's PUBLIC `app.api.http.token` as a
@@ -716,7 +766,8 @@ Keep these ownership boundaries intact:
   32-handler preclaim backpressure. Auth precedes body/readiness. Safe responses
   reconstruct only V1 fields, never SDK errors, text, references or headers.
 - Full `startIngressRuntime` keeps `.port`, `.stop()` and `.done`, adding optional
-  `.outboundPort`. It validates config/TLS/CA/path aliases, opens BOTH stores before
+  `.outboundPort`. It validates config/TLS/CA/path aliases, opens/audits optional SQLite correlation
+  before inbox/journal ownership and opens BOTH main stores before
   binding either listener, passes the owned inbox's `getRoute`, binds receiver then
   API, marks ready, then starts the unchanged serial relay. Never reopen the live
   exclusive inbox for routes. Failed second-store/bind startup drains and releases
@@ -737,7 +788,11 @@ Keep these ownership boundaries intact:
 - `snapshotDelivery` / `decodeDelivery` enforce external shape and Unicode/bounds
   without changing journal fingerprints. Claims and saved terminal outcomes precede
   current-route checks. New sends validate current allowlists, tenant/account,
-  conversation/context, personal/nonthread scope; metadata is not routing.
+  exact conversation/context and saved channel root; group/personal reject nonempty
+  threads. Metadata is not routing. Only new claimed, authorized shared routes
+  observe correlation before provider work; full is healthy retryable, backend
+  error poisons/retries without provider effect. Recheck active after observation
+  await and before send; cancellation/token failure can leave local evidence.
 - `createProviderSender` uses a fresh public SDK HTTP Client with the safe logger,
   explicit resolved token, exact formatter bytes (whole message <=20 KiB), saved
   HTTPS conversation URL and one POST. Preserve redirect=0, proxy=false, verified
@@ -781,11 +836,12 @@ use `--reference-fixtures` or fabricate a production route. Synthetic wire fixtu
 remain distinct from live delivery, network-filesystem or power-cut validation.
 
 Keep tenant/account, conversation/context, thread, and sender identities separate.
-Sender authorization uses Teams `from.id`, not email, display name, or another user
-ID system. `context-sender` is personal deployment policy, not converter code.
-Shared `context`/`thread` sessions need later invocation, audience, history, and
-membership design. Buzz is an experience reference only: it implies no CLI,
-group-chat work, dependency, or existing integration here.
+Personal sender authorization uses Teams `from.id`; shared authorization uses
+validated `from.aadObjectId`, never email or display name. `context-sender` remains
+personal policy; shared groups use `context`, channels `thread`, with explicit
+pilot allowlists and bot invocation. Audience/history/membership remain operator
+and Orka policy, not implied by local correlation. See [shared-room examples and
+limits](docs/shared-rooms.md).
 
 ## Frozen protocol references
 

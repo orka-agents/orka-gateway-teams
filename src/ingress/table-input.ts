@@ -11,17 +11,19 @@ export type Settlement = { operation: 'complete'; claim: InboxResultClaim; recei
 export type Command = { operation: 'admit'; event: EventEnvelope & { replyTarget: string }; route: ReplyRoute } |
   { operation: 'claim' } | { operation: 'route'; target: string } | Settlement;
 export const FRAME_BYTES = 8192;
-const eventKeys = ['protocolVersion', 'externalEventId', 'eventType', 'accountId', 'contextId', 'sender', 'text', 'replyTarget', 'occurredAt'];
+const eventKeys = ['protocolVersion', 'externalEventId', 'eventType', 'accountId', 'contextId', 'sender', 'text', 'replyTarget', 'occurredAt', 'threadId'];
 
 /** No encoded/string snapshot is allocated before the domain queue reservation.
  * This bounded character scan gives an upper bound, not an extra retained input. */
 export interface AdmissionSources { event: Record<string, unknown>; route: Record<string, unknown> }
 export function admissionSources(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>): AdmissionSources {
   const e = snapshot(event, eventKeys); e.sender = snapshot(e.sender, ['id', 'displayName']);
-  const r = snapshot(route, ['serviceUrl', 'channelId', 'bot', 'conversation']);
+  const r = snapshot(route, ['serviceUrl', 'channelId', 'bot', 'conversation', 'requester', 'threadId']);
   r.bot = snapshot(r.bot, ['id', 'role']); r.conversation = snapshot(r.conversation, ['id', 'conversationType', 'tenantId']);
+  if ('requester' in r) r.requester = snapshot(r.requester, ['id', 'displayName']);
   stringFields(e, ['sender']); stringFields(e.sender as Record<string, unknown>);
-  stringFields(r, ['bot', 'conversation']); stringFields(r.bot as Record<string, unknown>); stringFields(r.conversation as Record<string, unknown>);
+  stringFields(r, ['bot', 'conversation', 'requester']); stringFields(r.bot as Record<string, unknown>); stringFields(r.conversation as Record<string, unknown>);
+  if ('requester' in r) stringFields(r.requester as Record<string, unknown>);
   return { event: e, route: r };
 }
 function stringFields(value: Record<string, unknown>, nested: readonly string[] = []): void {

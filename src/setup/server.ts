@@ -80,6 +80,10 @@ export async function startSetupCapture(input: SetupConfig, dependencies: SetupA
         tenants.push(raw.channelData.tenant.id);
       }
       if (!tenants.length || tenants.some((value) => value !== config.tenantId)) return { status: 403 };
+      // Setup captures personal identities only, even when runtime conversion supports rooms.
+      if (raw.conversation.conversationType === 'groupChat' || raw.conversation.conversationType === 'channel') {
+        return { status: 200, body: { status: 'ignored' } };
+      }
       // Converter-only placeholder: never persisted, exposed, or usable as a reply route.
       const converted = convertActivity(raw as unknown as Activity, { tenantId: config.tenantId, replyTarget: 'setup-candidate-only' });
       if (converted.kind === 'invalid') return { status: 400 };

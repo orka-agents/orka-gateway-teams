@@ -10,7 +10,7 @@ export interface ConversionContext {
 
 export type ConversionResult =
   | { kind: 'accepted'; event: EventEnvelope }
-  | { kind: 'ignored'; reason: 'unsupported-activity' | 'unsupported-conversation' | 'bot-message' | 'empty-text' }
+  | { kind: 'ignored'; reason: 'unsupported-activity' | 'unsupported-conversation' | 'bot-message' | 'empty-text' | 'unmentioned' }
   | { kind: 'invalid'; reason: 'missing-identity' | 'tenant-mismatch' | 'invalid-field' | 'field-too-large' };
 
 /**
@@ -43,7 +43,8 @@ export const convertActivity: ConvertActivity = (activity, context) => {
   const conversationType = field(conversation.conversationType, 'discriminator');
   if (typeof conversationType !== 'string') return conversationType;
   if (conversation.isGroup !== undefined && typeof conversation.isGroup !== 'boolean') return invalid();
-  if (conversationType !== 'personal' || conversation.isGroup === true) {
+  const shared = conversationType === 'groupChat' || conversationType === 'channel';
+  if ((!shared && conversationType !== 'personal') || (conversationType === 'personal' && conversation.isGroup === true)) {
     return { kind: 'ignored', reason: 'unsupported-conversation' };
   }
   if (channelData !== undefined && !isRecord(channelData)) return invalid();
@@ -75,16 +76,21 @@ export const convertActivity: ConvertActivity = (activity, context) => {
   if (typeof activityId !== 'string') return activityId;
   const conversationId = field(conversation.id);
   if (typeof conversationId !== 'string') return conversationId;
-  const senderId = field(from.id);
-  if (typeof senderId !== 'string') return senderId;
+  const teamsSenderId = field(from.id);
+  if (typeof teamsSenderId !== 'string') return teamsSenderId;
+  let recipientId: string | undefined;
   if (input.recipient !== undefined) {
     if (!isRecord(input.recipient)) return invalid();
     if (input.recipient.id !== undefined) {
-      const recipientId = field(input.recipient.id);
-      if (typeof recipientId !== 'string') return recipientId;
-      if (recipientId === senderId) return { kind: 'ignored', reason: 'bot-message' };
+      const id = field(input.recipient.id);
+      if (typeof id !== 'string') return id;
+      recipientId = id;
+      if (recipientId === teamsSenderId) return { kind: 'ignored', reason: 'bot-message' };
     }
   }
+  if (shared && recipientId === undefined) return invalid('missing-identity');
+  const senderId = shared ? field(from.aadObjectId) : teamsSenderId;
+  if (typeof senderId !== 'string') return senderId;
 
   const claims: unknown[] = [];
   if (channelData?.tenant !== undefined) {
@@ -99,9 +105,17 @@ export const convertActivity: ConvertActivity = (activity, context) => {
     if (tenant !== tenantId) return invalid('tenant-mismatch');
   }
 
+  const threadId = conversationType === 'channel' ? channelRoot(conversationId, activityId, input.replyToId) : undefined;
+  if (threadId !== undefined && typeof threadId !== 'string') return threadId;
+
   if (input.text === undefined) return { kind: 'ignored', reason: 'empty-text' };
-  const text = field(input.text, 'text');
+  let text = field(input.text, 'text');
   if (typeof text !== 'string') return text;
+  if (shared && recipientId !== undefined) {
+    const stripped = stripBotMentions(text, input.entities, recipientId);
+    if (typeof stripped !== 'string') return stripped;
+    text = stripped;
+  }
   if (/^\p{White_Space}*$/u.test(text)) return { kind: 'ignored', reason: 'empty-text' };
   const displayName = from.name === undefined ? '' : field(from.name, 'label');
   if (typeof displayName !== 'string') return displayName;
@@ -113,6 +127,7 @@ export const convertActivity: ConvertActivity = (activity, context) => {
       eventType: 'text',
       accountId: tenantId,
       contextId: conversationId,
+      ...(threadId === undefined ? {} : { threadId }),
       sender: { id: senderId, ...(displayName === '' ? {} : { displayName }) },
       text,
       replyTarget,
@@ -121,6 +136,92 @@ export const convertActivity: ConvertActivity = (activity, context) => {
 };
 
 type InvalidResult = Extract<ConversionResult, { kind: 'invalid' }>;
+
+function channelRoot(conversationId: string, activityId: string, replyToId: unknown): string | InvalidResult {
+  const replyRoot = replyToId === undefined ? undefined : field(replyToId);
+  if (replyRoot !== undefined && typeof replyRoot !== 'string') return replyRoot;
+  // Teams channel conversations may carry the root as a terminal ;messageid= suffix.
+  // Preserve the full conversation as context; never use channelData.channel.id as a root.
+  // https://learn.microsoft.com/en-us/microsoftteams/platform/bots/how-to/conversations/channel-and-group-conversations
+  const marker = ';messageid=';
+  const markerIndex = conversationId.indexOf(';messageid');
+  if (markerIndex === -1) return replyRoot ?? activityId;
+  if (markerIndex === 0 || !conversationId.startsWith(marker, markerIndex)) return invalid();
+  const suffix = conversationId.slice(markerIndex + marker.length);
+  if (suffix.includes(';')) return invalid();
+  const suffixRoot = field(suffix);
+  if (typeof suffixRoot !== 'string') return suffixRoot;
+  if (replyRoot !== undefined && replyRoot !== suffixRoot) return invalid();
+  return suffixRoot;
+}
+
+// Separate count, scan and occurrence limits bound synchronous external-data work.
+// These are conservative admission limits, not a claim about provider maxima.
+const MAX_MENTION_ENTITIES = 256;
+const MAX_MENTION_TOKENS = 64;
+const MAX_MENTION_WORK = 2 * 1024 * 1024;
+const MAX_MENTION_OCCURRENCES = 4096;
+
+function stripBotMentions(text: string, entities: unknown, recipientId: string): string | Exclude<ConversionResult, { kind: 'accepted' }> {
+  if (entities === undefined) return { kind: 'ignored', reason: 'unmentioned' };
+  if (!Array.isArray(entities) || entities.length > MAX_MENTION_ENTITIES) return invalid();
+  const botTexts = new Set<string>();
+  const otherTexts = new Set<string>();
+  for (const entity of entities) {
+    if (!isRecord(entity)) return invalid();
+    const type = field(entity.type, 'discriminator');
+    if (typeof type !== 'string') return type;
+    if (type !== 'mention') continue;
+    if (entity.mentioned === undefined) return invalid('missing-identity');
+    if (!isRecord(entity.mentioned)) return invalid();
+    const target = field(entity.mentioned.id);
+    if (typeof target !== 'string') return target;
+    const mentionText = field(entity.text);
+    if (typeof mentionText !== 'string') return mentionText;
+    if (target === recipientId) {
+      botTexts.add(mentionText);
+    } else {
+      otherTexts.add(mentionText);
+    }
+  }
+  if (botTexts.size === 0) return { kind: 'ignored', reason: 'unmentioned' };
+
+  // Reserve aggregate scanning work before searching ANY token. Counting both
+  // sets is conservative even when a token belongs to both (ambiguous) targets.
+  if (botTexts.size + otherTexts.size > MAX_MENTION_TOKENS) return invalid();
+  let work = 0;
+  for (const tokens of [botTexts, otherTexts]) for (const token of tokens) work += text.length + token.length;
+  if (work > MAX_MENTION_WORK) return invalid();
+  let occurrences = 0;
+  const consume = (length: number) => ++occurrences <= MAX_MENTION_OCCURRENCES && (work += length) <= MAX_MENTION_WORK;
+
+  // Work against original positions so removing one token cannot create another.
+  // Both masks are text-length bounded; prefix counts make overlap checks O(1)
+  // instead of scanning/allocating a subarray for every repeated occurrence.
+  const removed = new Uint8Array(text.length);
+  for (const token of botTexts) {
+    const first = text.indexOf(token); if (first === -1) return invalid();
+    for (let start = first; start !== -1; start = text.indexOf(token, start + 1)) {
+      if (!consume(token.length)) return invalid();
+      removed.fill(1, start, start + token.length);
+    }
+  }
+  const prefix = new Uint32Array(text.length + 1);
+  for (let n = 0; n < text.length; n++) prefix[n + 1] = prefix[n]! + removed[n]!;
+  for (const token of otherTexts) {
+    for (let start = text.indexOf(token); start !== -1; start = text.indexOf(token, start + 1)) {
+      if (!consume(token.length) || prefix[start + token.length]! !== prefix[start]!) return invalid();
+    }
+  }
+  let stripped = '';
+  let keptStart = 0;
+  for (let index = 0; index < text.length; index++) {
+    if (removed[index] === 0) continue;
+    stripped += text.slice(keptStart, index);
+    keptStart = index + 1;
+  }
+  return (stripped + text.slice(keptStart)).replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
+}
 
 function invalid(reason: InvalidResult['reason'] = 'invalid-field'): InvalidResult {
   return { kind: 'invalid', reason };

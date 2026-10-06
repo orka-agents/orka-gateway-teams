@@ -28,11 +28,15 @@ if (result.kind === 'accepted') {
 
 The pure converter accepts new Teams `message` activities in exact `personal`
 conversations. It ignores notifications, edits/deletes/undeletes, event-marked
-messages, groups/channels, explicit bots/skills, identifiable self messages, and
+messages, explicit bots/skills, identifiable self messages, and
 empty/whitespace-only text. Missing account roles are legitimate; neither a
 missing role nor `role: 'user'` attests humanity. Sender authorization remains
 Orka's stable-ID allowlist using exact `from.id`, never display name, AAD ID, or
-ID-prefix heuristics. No authorization or network calls happen here.
+ID-prefix heuristics for personal chats. Shared `groupChat`/`channel` conversion
+requires a bot mention and maps `from.aadObjectId`; channels also retain a root
+`threadId` without changing the exact `contextId`. See
+[shared mapping and caller boundaries](shared-rooms.md#identity-and-thread-mapping).
+No authorization or network calls happen here.
 
 At least one tenant claim (`channelData.tenant.id` or `conversation.tenantId`) is
 required; every supplied claim must be well formed and exactly match configured
@@ -80,6 +84,26 @@ the title and notice remain readable without a partial grapheme.
 The plain-text fallback normalizes whitespace, is independently limited to 512
 UTF-8 bytes, and indicates abbreviation. It is not a second message. A fallback
 may be abbreviated even when the card body fits unchanged.
+
+For an already-validated **shared** route and a durably observed correlation
+result, the caller may supply adapter-local presentation (not V1 metadata):
+
+```ts
+const roomMessage = formatDelivery(finalDelivery, {
+  requesterDisplayName: 'Synthetic Participant', // Saved per-event validated label.
+  continuation: true, // Only from SessionCorrelationPort for a different origin.
+  replyToId: 'synthetic-root', // Channel only, exact saved root, included in budget.
+});
+```
+
+Omit the second argument for unchanged personal output. An empty shared context
+uses the fixed neutral requester wording; never supply a provider ID as the name
+or infer continuation from sender/context alone. Receiver/dispatcher composition
+accepts a separate optional `SessionCorrelationPort`. SQLite exports explicit
+`initializeSessionCorrelation`/`openSessionCorrelation` in
+`src/delivery/sqlite-session-correlation.ts`; Table's existing journal implements
+that port without changing `DeliveryJournalPort`. See
+[retention, caps and absence behavior](shared-rooms.md#requester-and-continuation-presentation).
 
 Focused formatter tests: `node --import tsx --test test/format.test.ts`.
 Run `npm run check` for type contracts, all runtime tests, and the build.

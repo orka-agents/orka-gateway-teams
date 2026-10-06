@@ -41,11 +41,12 @@ export function validatePolicy(value: unknown = { maxPending: 1000, maxRecords: 
   return { maxRecords, maxPending: integer(input.maxPending, 1, maxRecords), replayWindowMs: integer(input.replayWindowMs, 1, MAX_REPLAY_WINDOW_MS) };
 }
 export function validateEvent(value: unknown): EventEnvelope & { replyTarget: string } {
-  // This slice accepts the converter's personal-text envelope, not SDK activities,
-  // arbitrary metadata, server-owned receivedAt, or transport/authentication data.
-  const input = record(value, ['protocolVersion', 'externalEventId', 'eventType', 'accountId', 'contextId', 'sender', 'text', 'replyTarget', 'occurredAt']);
+  // Only normalized text envelopes, never SDK activities, arbitrary metadata,
+  // server-owned receivedAt, or transport/authentication data.
+  const input = record(value, ['protocolVersion', 'externalEventId', 'eventType', 'accountId', 'contextId', 'sender', 'text', 'replyTarget', 'occurredAt', 'threadId']);
   if (input.protocolVersion !== PROTOCOL_VERSION || input.eventType !== 'text') return invalid();
   identity(input.externalEventId); identity(input.accountId); identity(input.contextId); identity(input.replyTarget);
+  if ('threadId' in input) identity(input.threadId);
   const sender = record(input.sender, ['id', 'displayName']); identity(sender.id);
   if (sender.displayName !== undefined) identity(sender.displayName);
   if (typeof input.text !== 'string' || !input.text || /^\p{White_Space}*$/u.test(input.text) ||
@@ -57,19 +58,45 @@ export function validateEvent(value: unknown): EventEnvelope & { replyTarget: st
   return decode(bytes) as EventEnvelope & { replyTarget: string };
 }
 export function validateRoute(value: unknown): ReplyRoute {
-  const input = record(value, ['serviceUrl', 'channelId', 'bot', 'conversation']);
+  const input = record(value, ['serviceUrl', 'channelId', 'bot', 'conversation', 'requester', 'threadId']);
   const bot = record(input.bot, ['id', 'role']); const conversation = record(input.conversation, ['id', 'conversationType', 'tenantId']);
-  if (input.channelId !== 'msteams' || bot.role !== 'bot' || conversation.conversationType !== 'personal') return invalid();
-  return { serviceUrl: httpsBase(input.serviceUrl, true), channelId: 'msteams', bot: { id: identity(bot.id), role: 'bot' },
-    conversation: { id: identity(conversation.id), conversationType: 'personal', tenantId: identity(conversation.tenantId) } };
+  const kind = conversation.conversationType;
+  if (input.channelId !== 'msteams' || bot.role !== 'bot' || !['personal', 'groupChat', 'channel'].includes(kind as string)) return invalid();
+  const base = { serviceUrl: httpsBase(input.serviceUrl, true), channelId: 'msteams' as const, bot: { id: identity(bot.id), role: 'bot' as const } };
+  const id = identity(conversation.id); const tenantId = identity(conversation.tenantId);
+  if (kind === 'personal') {
+    if ('requester' in input || 'threadId' in input) return invalid();
+    return { ...base, conversation: { id, conversationType: 'personal', tenantId } };
+  }
+  const profile = record(input.requester, ['id', 'displayName']);
+  const requester = { id: identity(profile.id), ...('displayName' in profile ? { displayName: identity(profile.displayName) } : {}) };
+  if (kind === 'groupChat') {
+    if ('threadId' in input) return invalid();
+    return { ...base, conversation: { id, conversationType: 'groupChat', tenantId }, requester };
+  }
+  return { ...base, conversation: { id, conversationType: 'channel', tenantId }, requester, threadId: identity(input.threadId) };
 }
-export function matchRoute(event: EventEnvelope, route: Pick<ReplyRoute, 'bot' | 'conversation'>, scope: Readonly<IngressScope>): void {
+export type RouteEvidence = Pick<ReplyRoute, 'bot' | 'conversation' | 'requester' | 'threadId'>;
+export function matchRoute(event: EventEnvelope, route: RouteEvidence, scope: Readonly<IngressScope>): void {
   if (event.accountId !== scope.tenantId || route.conversation.tenantId !== scope.tenantId ||
-      event.contextId !== route.conversation.id || event.sender.id === route.bot.id) invalid();
+      event.contextId !== route.conversation.id) invalid();
+  if (route.conversation.conversationType === 'personal') {
+    if (event.sender.id === route.bot.id || event.threadId !== undefined || route.requester !== undefined || route.threadId !== undefined) invalid();
+  } else {
+    // Shared sender IDs are AAD identities, not the bot's Teams account ID.
+    // The authenticated converter owns provider-account self detection.
+    if (!route.requester || identity(route.requester.id) !== event.sender.id) invalid();
+    if (route.conversation.conversationType === 'channel') {
+      if (identity(route.threadId) !== event.threadId) invalid();
+    } else if (event.threadId !== undefined || route.threadId !== undefined) invalid();
+  }
 }
-export function fingerprint(event: EventEnvelope, route: Pick<ReplyRoute, 'bot'>, scope: Readonly<IngressScope>): string {
-  return digest(encode([scope.appId, scope.tenantId, event.protocolVersion, event.externalEventId, event.eventType,
-    event.accountId, event.contextId, event.sender.id, event.text, route.bot.id, event.occurredAt ?? null]));
+export function fingerprint(event: EventEnvelope, route: RouteEvidence, scope: Readonly<IngressScope>): string {
+  const personal = [scope.appId, scope.tenantId, event.protocolVersion, event.externalEventId, event.eventType,
+    event.accountId, event.contextId, event.sender.id, event.text, route.bot.id, event.occurredAt ?? null];
+  // Preserve the historical personal tuple byte-for-byte; shared scope is separately tagged.
+  return digest(encode(route.conversation.conversationType === 'personal' ? personal :
+    ['teams-ingress-shared-v1', ...personal, route.conversation.conversationType, route.threadId ?? null, route.requester!.id]));
 }
 export function validateReceipt(value: unknown): IngressReceipt {
   const input = record(value, ['status', 'eventId', 'state', 'message']);

@@ -184,9 +184,10 @@ and notification-only operation disabled. Packaging still includes only the
 reviewed manifest and two icons, with no overwrite or upload.
 
 **A successful package is not shared-room runtime support or live validation.**
-The current runtime and authenticated setup capture remain personal-only. Do not
-roll out the shared-room package until the adapter implements bot-targeted
-@mention filtering, room/thread routing, and explicit pilot-member allowlists.
+Authenticated setup capture remains personal-only; the runtime supports explicit
+bot mentions and retained group/channel routes. Before shared rollout, follow
+[shared-room binding, evidence and rollback rules](shared-rooms.md) with explicit
+pilot-member AAD allowlists and operator-reviewed room/thread identities.
 Do not add read-all-message RSC permissions or sender policy `all` to bypass those
 gates. The shared-room live result will be recorded separately in
 [live validation](live-validation.md); the existing personal result is unchanged.

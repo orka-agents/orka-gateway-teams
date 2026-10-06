@@ -5,6 +5,7 @@ import { bindTable, digest, initializationDigestV2, object, decodeRecoveryAudit,
 import type { BoundTable, ForeignInspectionVisitorV2, MetadataV2, OwnedAuditBudget, OwnedAuditOptions, StoredRecordV2, TableBinding } from '../storage/table/types.js';
 import { InboxIndex } from './table-index.js';
 import type { IndexVersion, IndexWorkingCredit } from './table-index.js';
+import { routeEvidence, routeFields } from './table-index-slots.js';
 import { decodeEvent, decodeRoute, decodeSeal, decodeState, encodeSeal } from './table-codec.js';
 import { encode, fingerprint, matchRoute, validateScope } from './codec.js';
 import { decodeResult, validateResult } from './table-result.js';
@@ -84,8 +85,7 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
           else if (body !== null) {
             const route = index.routeByTarget(event.replyTarget);
             if (!route || route.externalEventId !== d.id) throw new TableError('corrupt');
-            const summary = { bot: { id: route.botId, role: 'bot' as const },
-              conversation: { id: route.conversationId, conversationType: 'personal' as const, tenantId: scope.tenantId } };
+            const summary = routeEvidence(route, scope.tenantId);
             matchRoute(body, summary, scope);
             if (fingerprint(body, summary, scope) !== event.fingerprint) throw new TableError('corrupt');
           }
@@ -93,7 +93,7 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
           const r = decodeRoute(key, d.payload);
           if (r.route.conversation.tenantId !== scope.tenantId) throw new TableError('corrupt');
           if (pass === 1) index.addRoute({ replyTarget: d.id, externalEventId: r.externalEventId, botId: r.route.bot.id,
-            conversationId: r.route.conversation.id, routeDigest: r.routeDigest, routeEncodingBytes: encode(r.route).length,
+            conversationId: r.route.conversation.id, ...routeFields(r.route), routeDigest: r.routeDigest, routeEncodingBytes: encode(r.route).length,
             payloadBytes: d.payload.length, version });
         } else if (d.type === 'control' && d.id.startsWith('control_recovery:')) {
           const audit = decodeRecoveryAudit(d.payload);

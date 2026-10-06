@@ -12,7 +12,7 @@ import { createTableIngressStore } from '../src/ingress/table-store.js';
 import { createTableDeliveryJournalV2 } from '../src/delivery/table-journal.js';
 import { prepareStorageIdentity } from '../src/auth/storage-identity.js';
 import { NativeAdapter } from '../src/ingress/http-adapter.js';
-import { authFixture, post, receiverConfig, scope } from './support/ingress-auth.js';
+import { activity, authFixture, post, receiverConfig, scope } from './support/ingress-auth.js';
 import { runtimeIdentity, runtimeTableService, tableRuntimeConfig } from './support/table-runtime.js';
 import { deferred, eventually } from './support/table-service.js';
 import { httpsFixture } from './support/ingress-https.js';
@@ -185,6 +185,42 @@ test('one failed release still drains and closes the other store; stop and done 
   await assert.rejects(runtime.done, { message: 'Ingress storage failed' });
   assert.equal(f.observed.inboxCloses.length, 1); assert.equal(f.observed.deliveryCloses.length, 1);
   assert.equal(f.tables.inbox.rows.get('M')?.Owner, ''); assert.notEqual(f.tables.delivery.rows.get('M')?.Owner, ''); await f.drained();
+});
+
+test('production-selected Table shared runtime uses the existing journal correlation port across restart and alias replay', async (t) => {
+  const f = await fixture(t); f.config.receiver = { ...receiverConfig }; const auth = await authFixture(t);
+  const events: EventEnvelope[] = []; const messages: string[] = [];
+  const upstream = await httpsFixture(t, async (req, res) => {
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    events.push(JSON.parse(Buffer.concat(chunks).toString())); res.writeHead(202); res.end(JSON.stringify({ status: 'accepted', eventId: `table-origin-${events.length}`, state: 'Queued' }));
+  });
+  const native = https.request;
+  t.mock.method(https, 'request', (url: URL, options: https.RequestOptions, callback: (res: IncomingMessage) => void) =>
+    url.hostname === 'orka.example.invalid' ? native(new URL(url.pathname + url.search, upstream.baseUrl), { ...options, ca: upstream.ca, servername: 'localhost' }, callback) : native(url, options, callback));
+  syncBuiltinESMExports(); t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const dependencies = { ...auth.dependencies, botToken: 'synthetic-table-bot-token', providerPost: async (url: string, bytes: Buffer) => {
+    assert.equal(url, `${receiverConfig.serviceUrls[0]}v3/conversations/19%3Atable-room%3Bmessageid%3Droot/activities`);
+    assert.equal(JSON.parse(bytes.toString()).replyToId, 'root'); messages.push(bytes.toString());
+    return { status: 201, data: Buffer.from('{"id":"shared-table-receipt"}') };
+  } };
+  let runtime = await f.start(dependencies);
+  for (const n of [1, 2]) {
+    const input = activity(); input.id = `table-shared-${n}`; input.conversation = { id: '19:table-room;messageid=root', conversationType: 'channel', tenantId: scope.tenantId };
+    input.replyToId = 'root'; input.from.aadObjectId = `synthetic-table-aad-${n}`; input.from.name = n === 1 ? 'Alice' : 'Bob';
+    input.text = '<at>Orka</at> request'; input.entities = [{ type: 'mention', mentioned: { id: receiverConfig.recipientIds[0] }, text: '<at>Orka</at>' }];
+    assert.equal((await post(runtime.port, auth.token(), input)).status, 200); await eventually(() => events.length === n);
+    const body = { ...finalDelivery, contextId: input.conversation.id, threadId: 'root', replyTarget: events[n - 1]!.replyTarget!,
+      idempotencyId: `table-shared-op-${n}`, deliveryId: `table-shared-delivery-${n}`, originatingEventId: `table-origin-${n}` };
+    const deliver = (request: typeof body) => fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/deliveries`, { method: 'POST', headers: {
+      Authorization: `Bearer ${f.config.outbound!.bearerToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(request) });
+    assert.deepEqual(await (await deliver(body)).json(), { status: 'delivered', providerMessageId: 'shared-table-receipt' });
+    assert.equal(messages[n - 1]!.includes("Continuing the room's conversation"), n === 2);
+    assert.ok(messages[n - 1]!.includes(`Asked by ${n === 1 ? 'Alice' : 'Bob'}`));
+    await runtime.stop(); await runtime.done; await f.drained(); runtime = await f.start(dependencies);
+    assert.deepEqual(await (await deliver({ ...body, deliveryId: `table-restart-alias-${n}` })).json(), { status: 'delivered', providerMessageId: 'shared-table-receipt' });
+    assert.equal(messages.length, n); assert.equal([...f.tables.delivery.rows.values()].filter(row => row.T === 'control').length, 1);
+  }
+  await runtime.stop(); await runtime.done; await f.drained(); assert.equal(f.identity.calls.bot, 0);
 });
 
 test('production-selected stores use real ACA storage, bot federation and native Entra without token/opening overrides', async (t) => {

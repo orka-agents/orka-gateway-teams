@@ -78,6 +78,7 @@ function route(key: Readonly<DataKey>, value: unknown): RoutePayload {
   keyId(key, 'route'); const v = shape(value, ['schema', 'externalEventId', 'route', 'routeDigest']);
   if (v.schema !== 1) fail();
   const input = object(v.route); object(input.bot); object(input.conversation);
+  if ('requester' in input) object(input.requester);
   const route = validateRoute(input); const routeDigest = hex(v.routeDigest);
   if (digest(encode(route)) !== routeDigest) fail();
   return { schema: 1, externalEventId: identity(v.externalEventId), route, routeDigest };

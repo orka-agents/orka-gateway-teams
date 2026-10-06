@@ -40,6 +40,47 @@ async function fixture(t: TestContext) {
   return { auth, path, store, receiver };
 }
 
+test('SDK personal admission route retains the historical exact JSON byte order', async t => {
+  const auth = await authFixture(t); let bytes = '';
+  const receiver = await startReceiver(receiverConfig, { scope, admit(event, route) {
+    bytes = JSON.stringify(route); return { kind: 'accepted', replyTarget: event.replyTarget! };
+  } }, auth.dependencies);
+  t.after(() => receiver.stop());
+  assert.equal((await post(receiver.port, auth.token())).status, 200);
+  assert.equal(bytes, '{"serviceUrl":"https://teams-service.example.invalid/","channelId":"msteams","bot":{"id":"28:fixture-app","role":"bot"},"conversation":{"id":"19:fixture-personal","conversationType":"personal","tenantId":"11111111-1111-4111-8111-111111111111"}}');
+});
+
+for (const kind of ['groupChat', 'channel'] as const) {
+  test(`actual SDK-authenticated ${kind} durably retains each requesting profile and winning route`, async t => {
+    const { auth, receiver, store } = await fixture(t);
+    const body = activity(); body.conversation.conversationType = kind; body.conversation.isGroup = true;
+    body.from.aadObjectId = 'aad-winner'; body.from.name = 'Winner';
+    body.text = '<at>Bot</at> shared request';
+    body.entities = [{ type: 'mention', text: '<at>Bot</at>', mentioned: { id: body.recipient.id } }];
+    if (kind === 'channel') body.replyToId = 'channel-root';
+    const response = await post(receiver.port, auth.token(), body);
+    assert.equal(response.status, 200); assert.deepEqual(await response.json(), { status: 'accepted' });
+    const replay = structuredClone(body); replay.from.name = 'Later profile';
+    const replies = await Promise.all(Array.from({ length: 4 }, () => post(receiver.port, auth.token(), replay)));
+    for (const reply of replies) { assert.equal(reply.status, 200); assert.deepEqual(await reply.json(), { status: 'duplicate' }); }
+    const others = ['aad-b', 'aad-c'].map((id, n) => ({ ...body, id: 'shared-' + n, from: { ...body.from, aadObjectId: id, name: 'Person ' + n } }));
+    assert.ok((await Promise.all(others.map(input => post(receiver.port, auth.token(), input)))).every(r => r.status === 200));
+    const first = store.claim()!; assert.equal(first.event.sender.id, 'aad-winner'); assert.equal(first.event.sender.displayName, 'Winner');
+    const expectedRoute = { serviceUrl: body.serviceUrl, channelId: 'msteams', bot: { id: body.recipient.id, role: 'bot' },
+      conversation: { id: body.conversation.id, conversationType: kind, tenantId: scope.tenantId }, requester: { id: 'aad-winner', displayName: 'Winner' },
+      ...(kind === 'channel' ? { threadId: 'channel-root' } : {}) };
+    assert.deepEqual(store.getRoute(first.event.replyTarget!), expectedRoute);
+    for (let n = 0; n < others.length; n++) {
+      const claim = store.claim()!; const route = store.getRoute(claim.event.replyTarget!)!;
+      assert.ok(others.some(other => other.from.aadObjectId === claim.event.sender.id));
+      assert.deepEqual(route.requester, claim.event.sender);
+    }
+    store.complete(first, { status: 'accepted', eventId: 'receipt', state: 'Queued' });
+    assert.deepEqual(await (await post(receiver.port, auth.token(), replay)).json(), { status: 'duplicate' });
+    assert.deepEqual(store.getRoute(first.event.replyTarget!), expectedRoute); assert.equal(auth.requests(), 2);
+  });
+}
+
 const invalidClaims: [string, Record<string, unknown>][] = [
   ['missing exp', { exp: undefined }], ['missing nbf', { nbf: undefined }],
   ['string exp', { exp: '4000000000' }], ['null nbf', { nbf: null }],

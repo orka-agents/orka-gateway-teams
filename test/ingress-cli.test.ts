@@ -9,6 +9,7 @@ import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { receiverConfig, scope } from './support/ingress-auth.js';
+import { openSessionCorrelation } from '../src/delivery/sqlite-session-correlation.js';
 import { openIngressStore } from '../src/ingress/store.js';
 
 function cli(t: TestContext, args: string[], env: NodeJS.ProcessEnv, early = false) {
@@ -33,6 +34,18 @@ test('CLI init provisions only explicit nonsecret scope and refuses existing sto
   assert.equal(await init.finished, 0); assert.equal(existsSync(env.INGRESS_DB), true);
   assert.ok(init.output().includes('teams-ingress: initialized'));
   const again = cli(t, ['init'], env); assert.equal(await again.finished, 1);
+});
+
+test('CLI explicitly initializes correlation with only app/tenant/path and refuses Table or reinitialization', async (t) => {
+  const fixture = envFixture(t); const path = join(dirname(fixture.INGRESS_DB), 'correlation.sqlite');
+  const env = { TEAMS_APP_ID: scope.appId, TEAMS_TENANT_ID: scope.tenantId, CORRELATION_DB: path };
+  assert.equal(await cli(t, ['init-correlation'], env).finished, 0);
+  const handle = openSessionCorrelation(path, { appId: scope.appId, tenantId: scope.tenantId }); handle.close();
+  assert.equal(existsSync(fixture.INGRESS_DB), false);
+  assert.equal(await cli(t, ['init-correlation'], env).finished, 1);
+  const other = `${path}.other`;
+  assert.equal(await cli(t, ['init-correlation'], { ...env, CORRELATION_DB: other, GATEWAY_STORAGE_BACKEND: 'table-v2' }).finished, 1);
+  assert.equal(existsSync(other), false);
 });
 
 test('CLI unknown command, missing/malformed config and missing DB fail safely before listening', async (t) => {

@@ -61,6 +61,22 @@ test('both provisioning commands reject overlapping configured storage paths bef
   }
 });
 
+test('optional correlation configuration is full SQLite only and aliases include every sidecar', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'teams-correlation-config-')); t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const env = { ...environment(), INGRESS_DB: join(directory, 'inbox.sqlite'), DELIVERY_DB: join(directory, 'journal.sqlite') };
+  const correlation = join(directory, 'correlation.sqlite');
+  assert.equal(parseConfig({ ...env, CORRELATION_DB: correlation }, 'serve').outbound?.correlationDbPath, correlation);
+  for (const path of [env.INGRESS_DB, env.DELIVERY_DB, `${env.DELIVERY_DB}.owner.sqlite`, `${env.INGRESS_DB}-wal`, `${env.DELIVERY_DB}-journal`, 'relative.sqlite']) {
+    assert.throws(() => parseConfig({ ...env, CORRELATION_DB: path }, 'serve'), ConfigurationError);
+  }
+  const file = env.INGRESS_DB; writeFileSync(file, 'synthetic', { mode: 0o600 });
+  for (const name of ['hard', 'symlink']) {
+    const alias = join(directory, name); if (name === 'hard') linkSync(file, alias); else symlinkSync(file, alias);
+    assert.throws(() => parseConfig({ ...env, CORRELATION_DB: alias }, 'serve'), ConfigurationError);
+  }
+  assert.throws(() => parseConfig({ ...env, OUTBOUND_ENABLED: 'false', CORRELATION_DB: correlation }, 'serve'), ConfigurationError);
+});
+
 test('init-delivery requires only nonsecret scope and delivery path, not serve credentials or an inbox', () => {
   const env = environment();
   assert.deepEqual(parseConfig({ TEAMS_APP_ID: env.TEAMS_APP_ID, TEAMS_TENANT_ID: env.TEAMS_TENANT_ID,

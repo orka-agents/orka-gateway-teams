@@ -46,7 +46,7 @@ test('V1 exact authenticated health/capabilities and readiness gate precede clai
   const f = await fixture(t); const get = (path: string) => fetch(`http://127.0.0.1:${f.server.port}${path}`, { headers: { Authorization: `bEaReR ${f.token}` } });
   assert.deepEqual(await (await get('/v1/health')).json(), { status: 'ok' });
   assert.deepEqual(await (await get('/v1/capabilities')).json(), { protocolVersion: 'orka.gateway.v1', adapterName: 'orka-gateway-teams', adapterVersion: '0.0.0',
-    capabilities: { inboundText: true, outboundText: true, threads: false, senderIdentity: true, explicitSessions: false, idempotentDelivery: true } });
+    capabilities: { inboundText: true, outboundText: true, threads: true, senderIdentity: true, explicitSessions: false, idempotentDelivery: true } });
   f.ready(false);
   for (const path of ['/v1/health', '/v1/capabilities']) assert.equal((await get(path)).status, 503);
   assert.equal((await f.call()).status, 503); assert.equal(f.sends(), 0);
