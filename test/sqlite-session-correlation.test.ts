@@ -135,6 +135,57 @@ test('SQLite schema prevents replacement and pruning of immutable first origins 
   });
   assert.deepEqual(s.open().observeSession(first), { kind: 'observed', continuation: false });
 });
+for (const target of ['scope', 'sessions'] as const) test(`SQLite refuses INSERT OR REPLACE of immutable ${target} with recursive triggers off`, t => {
+  const s = fixture(t); s.initialize(); const port = s.open(); port.observeSession(first); port.close();
+  raw(s.path, db => {
+    db.exec('PRAGMA recursive_triggers = OFF');
+    assert.equal(db.prepare('PRAGMA recursive_triggers').get()?.recursive_triggers, 0);
+    if (target === 'scope') {
+      const digest = db.prepare('SELECT digest FROM scope WHERE singleton = 1').get()?.digest;
+      assert.throws(() => db.prepare('INSERT OR REPLACE INTO scope VALUES (1, ?)').run(later.originDigest), /immutable scope/u);
+      assert.equal(db.prepare('SELECT digest FROM scope WHERE singleton = 1').get()?.digest, digest);
+    } else {
+      assert.throws(() => db.prepare('INSERT OR REPLACE INTO sessions VALUES (?, ?)').run(first.sessionDigest, later.originDigest), /immutable session/u);
+      assert.equal(db.prepare('SELECT first_origin_digest FROM sessions WHERE session_digest = ?').get(first.sessionDigest)?.first_origin_digest, first.originDigest);
+    }
+  });
+  const reopened = s.open();
+  assert.deepEqual(reopened.observeSession(first), { kind: 'observed', continuation: false });
+  assert.deepEqual(reopened.observeSession(later), { kind: 'observed', continuation: true });
+});
+for (const rowid of ['rowid', '_rowid_', 'oid']) test(`SQLite refuses ${rowid}-targeted REPLACE of a retained first origin with recursive triggers off`, t => {
+  const s = fixture(t); s.initialize(); const port = s.open(); port.observeSession(first); port.close();
+  raw(s.path, db => {
+    db.exec('PRAGMA recursive_triggers = OFF');
+    assert.equal(db.prepare('PRAGMA recursive_triggers').get()?.recursive_triggers, 0);
+    // The first inserted row has rowid 1 in the provisional schema. Changing its digest bypasses the keyed INSERT guard.
+    assert.throws(() => {
+      db.prepare(`INSERT OR REPLACE INTO sessions (${rowid}, session_digest, first_origin_digest) VALUES (1, ?, ?)`).run(second.sessionDigest, later.originDigest);
+      db.prepare(`INSERT OR REPLACE INTO sessions (${rowid}, session_digest, first_origin_digest) VALUES (1, ?, ?)`).run(first.sessionDigest, later.originDigest);
+    }, /no column named (?:rowid|_rowid_|oid)/u);
+    assert.equal(db.prepare('SELECT count(*) AS n FROM sessions').get()?.n, 1);
+    assert.equal(db.prepare('SELECT first_origin_digest FROM sessions WHERE session_digest = ?').get(first.sessionDigest)?.first_origin_digest, first.originDigest);
+  });
+  const reopened = s.open();
+  assert.deepEqual(reopened.observeSession(first), { kind: 'observed', continuation: false });
+  assert.deepEqual(reopened.observeSession(later), { kind: 'observed', continuation: true });
+});
+test('SQLite refuses a provisional rowid correlation sidecar without migration or repair', t => {
+  const s = fixture(t); s.initialize(); const port = s.open(); port.observeSession(first); port.close();
+  raw(s.path, db => {
+    const triggers = db.prepare("SELECT sql FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = 'sessions'").all();
+    db.exec(`DROP TABLE sessions;
+      CREATE TABLE sessions (
+    session_digest TEXT PRIMARY KEY NOT NULL CHECK (length(session_digest) = 64 AND session_digest NOT GLOB '*[^0-9a-f]*'),
+    first_origin_digest TEXT NOT NULL CHECK (length(first_origin_digest) = 64 AND first_origin_digest NOT GLOB '*[^0-9a-f]*')
+  ) STRICT`);
+    db.prepare('INSERT INTO sessions VALUES (?, ?)').run(first.sessionDigest, first.originDigest);
+    for (const trigger of triggers) db.exec(String(trigger.sql));
+    assert.equal(db.prepare('SELECT rowid FROM sessions').get()?.rowid, 1);
+  });
+  const before = readFileSync(s.path); assert.throws(() => s.open(), code('corrupt'));
+  assert.equal(before.equals(readFileSync(s.path)), true);
+});
 test('correlation canonical tagged tuples match independent SHA256 vectors', () => {
   const result = createSessionObservation({ appId: 'App', tenantId: 'Tenant' }, { ...finalDelivery, accountId: 'Tenant', contextId: 'Room',
     threadId: 'Thread', sessionRef: { namespace: 'Namespace', name: 'Session' }, originatingEventId: 'Origin' });

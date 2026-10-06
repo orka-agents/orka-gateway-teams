@@ -69,10 +69,11 @@ export function parseSqliteConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'init-d
       return init;
     }
     const { outbound: http, ...settings } = parseServeSettings(env, scope);
+    const correlationDb = env.CORRELATION_DB;
     const outbound = http === undefined ? undefined : validateOutboundConfig({ ...http, dbPath: absolutePath(env.DELIVERY_DB),
-      ...(env.CORRELATION_DB === undefined ? {} : { correlationDbPath: absolutePath(env.CORRELATION_DB) }) },
+      ...(correlationDb === undefined ? {} : { correlationDbPath: absolutePath(correlationDb) }) },
       init.dbPath, settings.bearerToken, settings.receiver);
-    if (http === undefined && (env.DELIVERY_DB !== undefined || env.CORRELATION_DB !== undefined)) fail();
+    if (http === undefined && (env.DELIVERY_DB !== undefined || correlationDb !== undefined)) fail();
     return { ...init, ...settings, ...(outbound === undefined ? {} : { outbound }) };
   } catch { throw new ConfigurationError(); }
 }

@@ -13,10 +13,16 @@ const schema = [
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     digest TEXT NOT NULL CHECK (length(digest) = 64 AND digest NOT GLOB '*[^0-9a-f]*')
   ) STRICT`,
+  // A hidden rowid would let REPLACE conflict with a retained row while bypassing the digest-keyed INSERT guard.
   `CREATE TABLE sessions (
     session_digest TEXT PRIMARY KEY NOT NULL CHECK (length(session_digest) = 64 AND session_digest NOT GLOB '*[^0-9a-f]*'),
     first_origin_digest TEXT NOT NULL CHECK (length(first_origin_digest) = 64 AND first_origin_digest NOT GLOB '*[^0-9a-f]*')
-  ) STRICT`,
+  ) STRICT, WITHOUT ROWID`,
+  // REPLACE bypasses delete triggers when recursive_triggers is off; guard existing keys before insertion.
+  `CREATE TRIGGER scope_no_replace BEFORE INSERT ON scope WHEN EXISTS (SELECT 1 FROM scope WHERE singleton = NEW.singleton)
+    BEGIN SELECT RAISE(ABORT, 'immutable scope'); END`,
+  `CREATE TRIGGER sessions_no_replace BEFORE INSERT ON sessions WHEN EXISTS (SELECT 1 FROM sessions WHERE session_digest = NEW.session_digest)
+    BEGIN SELECT RAISE(ABORT, 'immutable session'); END`,
   `CREATE TRIGGER scope_no_update BEFORE UPDATE ON scope BEGIN SELECT RAISE(ABORT, 'immutable scope'); END`,
   `CREATE TRIGGER scope_no_delete BEFORE DELETE ON scope BEGIN SELECT RAISE(ABORT, 'immutable scope'); END`,
   `CREATE TRIGGER sessions_no_update BEFORE UPDATE ON sessions BEGIN SELECT RAISE(ABORT, 'immutable session'); END`,

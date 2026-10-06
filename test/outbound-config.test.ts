@@ -77,6 +77,18 @@ test('optional correlation configuration is full SQLite only and aliases include
   assert.throws(() => parseConfig({ ...env, OUTBOUND_ENABLED: 'false', CORRELATION_DB: correlation }, 'serve'), ConfigurationError);
 });
 
+test('optional correlation path snapshots an accessor-backed environment value exactly once', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'teams-correlation-snapshot-')); t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const correlation = join(directory, 'correlation.sqlite'); const changed = join(directory, 'changed.sqlite');
+  for (const [initial, subsequent] of [[correlation, changed], [correlation, undefined], [undefined, changed]]) {
+    let reads = 0;
+    const env: NodeJS.ProcessEnv = { ...environment(), INGRESS_DB: join(directory, 'inbox.sqlite'), DELIVERY_DB: join(directory, 'journal.sqlite'),
+      get CORRELATION_DB() { return ++reads === 1 ? initial : subsequent; } };
+    assert.equal(parseConfig(env, 'serve').outbound?.correlationDbPath, initial);
+    assert.equal(reads, 1);
+  }
+});
+
 test('init-delivery requires only nonsecret scope and delivery path, not serve credentials or an inbox', () => {
   const env = environment();
   assert.deepEqual(parseConfig({ TEAMS_APP_ID: env.TEAMS_APP_ID, TEAMS_TENANT_ID: env.TEAMS_TENANT_ID,
