@@ -13,6 +13,15 @@ An unclean/occupied store blocks reopening until verified termination and an
 explicit audited operator reclaim; there is no automatic takeover, reset or
 adoption command.
 
+[Bounded interim delivery](interim-delivery.md) is a separate controller-first,
+off-by-default opt-in. The fixed renderer has no interim JSON option: an approved
+operator-owned runtime template can add `INTERIM_DELIVERY_ENABLED=true` to the
+gateway container environment only through the same verified clean owner handover.
+Do not create a revision over an active owner or reinitialize stores. Settle or
+abandon pending messages with the supporting controller before disabling or
+rolling back; v0.2.0 stays final/error-only, and no old dispatcher may inherit
+pending messages. Existing live evidence does not qualify interim delivery.
+
 ## 1. Resolve installation and infrastructure first
 
 ### Scope and operator tools

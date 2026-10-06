@@ -433,7 +433,7 @@ fixtures do, and retain the narrowed `OutgoingTeamsMessage` contract.
 | Layer | Owns | Does not own |
 |---|---|---|
 | #550 converter | supported-type checks, tenant/field validation, stable normalized event | auth, inbox, reply-target creation, network |
-| #551 formatter | final/error/empty text, adapter-local room labels, measured replyToId, wrapping, Unicode-safe truncation and 20 KiB message budget | destination authorization, auth, send, retry, persistence |
+| #551 formatter | final/error/empty terminal text, update/question presentation, adapter-local room labels, measured replyToId, wrapping, Unicode-safe truncation and 20 KiB message budget | destination authorization, auth, send, retry, persistence |
 | Delivery journal | durable local claims, immutable identity/alias checks, fenced settlement and receipt replay | auth, routing, provider calls, retries, endpoints |
 | Ingress receiver/inbox/relay | request verification, app/tenant/recipient enforcement, durable original event + route, Orka admission | sender authorization, provider sends, outbound capabilities |
 | Outbound listener/dispatcher/sender | separate bearer boundary, bounded V1 requests, journal-backed send/receipt replay | changing original ingress replay keys, recovering lost provider receipts |
@@ -501,7 +501,8 @@ never substitute a channel-wide context. See [shared mapping](docs/shared-rooms.
 
 The wire discriminator is exactly `orka.gateway.v1`; unknown wire fields are not
 forward-compatible extensions. Bounds in `src/protocol/types.ts` are UTF-8 limits:
-256 KiB request, 64 KiB text, 256-byte identities, 32 metadata entries with 256-byte
+256 KiB request, 64 KiB ingress/terminal text, 16 KiB interim text, 256-byte
+identities, 32 metadata entries with 256-byte
 keys/values, and 64 KiB adapter response. Metadata must also be allowed by the
 GatewayClass. These types/constants alone do not enforce runtime validation.
 
@@ -666,8 +667,12 @@ One main SQLite connection is used; no provider work occurs in a transaction.
 
 Required identities, scopes, reference components and provider receipts are
 nonempty, bounded to 256 UTF-8 bytes and preserved exactly. Boundary Unicode
-`White_Space`, Cc controls and lone surrogates are rejected, not repaired. Text
-permits empty strings and TAB/LF/CR, with the existing 64 KiB UTF-8 bound. Metadata
+`White_Space`, Cc controls and lone surrogates are rejected, not repaired. Terminal text
+permits empty strings and TAB/LF/CR, with the existing 64 KiB UTF-8 bound.
+`kind: 'message'` instead requires nonempty/non-whitespace text (BOM-only also
+refused) at most 16 KiB UTF-8, with the same Unicode/control checks. Journals accept
+valid messages regardless of the runtime setting; their schemas and terminal
+fingerprints are unchanged. See [interim semantics and rollout](docs/interim-delivery.md). Metadata
 permits up to 32 string entries: nonempty identity-like keys and string values of
 at most 256 UTF-8 bytes, without Cc controls or lone surrogates. Empty/whitespace
 metadata values are preserved. Optional fields must be omitted rather than set to
@@ -746,7 +751,7 @@ See [full-mode configuration, API and limits](docs/runtime-reference.md#enable-t
 Keep these ownership boundaries intact:
 
 - `startReceiver(config, sink, dependencies?, outbound?)` preserves the SDK-only
-  ingress route. Optional `outbound` is `{ journal, getRoute, correlation? }`; optional returned
+  ingress route. Optional `outbound` is `{ journal, getRoute, correlation?, interimDelivery? }`; optional returned
   `receiver.outbound` is the journal-backed `DeliveryDispatcher`, never a raw sender
   or token. `receiver.stop()` is idempotent and drains intake and the dispatcher.
 - The receiver privately resolves the SAME App's PUBLIC `app.api.http.token` as a
@@ -759,7 +764,7 @@ Keep these ownership boundaries intact:
   since constructor `clientSecret` wins over its token option. The closure still
   always reads that public property. CLI never supplies either seam; never add
   cloud/JWKS/token/proxy bypass environment variables.
-- `startOutboundServer({host, port, bearerToken}, dispatcher, scope, isReady)`
+- `startOutboundServer({host, port, bearerToken, interimDelivery?}, dispatcher, scope, isReady)`
   returns `{port, stop, failed}`. It owns a separate native HTTP listener, exact
   bearer-authenticated V1 paths, 256 KiB body / 16 KiB header limits, a ten-second
   absolute connection/request budget, remaining nine-second dispatch budget and
@@ -845,10 +850,18 @@ limits](docs/shared-rooms.md).
 
 ## Frozen protocol references
 
-The starter follows Orka at `0c8ab6fb`:
+The unchanged V1 starter baseline follows Orka at `0c8ab6fb`:
 
 - [Protocol source](https://github.com/orka-agents/orka/blob/0c8ab6fb/internal/gateway/protocol/types.go)
 - [Normative adapter protocol and security contract](https://github.com/orka-agents/orka/blob/0c8ab6fb/docs/development/gateway-protocol-v1.md)
+
+The additive bounded interim kind/capability extension instead follows pinned
+Orka `0e567418` [protocol](https://github.com/orka-agents/orka/blob/0e567418/docs/development/gateway-protocol-v1.md)
+and [ADR 0032](https://github.com/orka-agents/orka/blob/0e567418/docs/adr/0032-gateway-interim-delivery.md).
+It is off by default; older strict controllers must never receive the capability
+field, even false. The runtime propagates `INTERIM_DELIVERY_ENABLED` to the listener
+and dispatcher. Focused check:
+`node --import tsx --test test/interim-delivery.test.ts test/outbound-*.test.ts test/table-runtime-config.test.ts test/table-runtime-lifecycle.test.ts`.
 
 [#549](https://github.com/orka-agents/orka/issues/549) tracks V1 acceptance and
 closeout. The bounded converter in [#550](https://github.com/orka-agents/orka/issues/550)

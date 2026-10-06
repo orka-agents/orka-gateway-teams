@@ -27,7 +27,10 @@ const MAX_FALLBACK_BYTES = 512;
 const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
 
 export const formatDelivery: FormatDelivery = (delivery, presentation) => {
-  const title = delivery.kind === 'final' ? 'Orka reply' : 'Orka could not complete the request';
+  // The explicit prefix changes presentation only, not wire or Task semantics.
+  const title = delivery.kind === 'message'
+    ? (delivery.text.startsWith('Question: ') ? 'Orka question' : 'Orka update')
+    : delivery.kind === 'final' ? 'Orka reply' : 'Orka could not complete the request';
   const emptyText = delivery.kind === 'final'
     ? 'Orka finished without a text reply.'
     : 'This request could not be completed.';

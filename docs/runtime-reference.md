@@ -12,6 +12,7 @@ Run the commands below from the repository root.
 - [Request/reply configuration](#enable-the-full-requestreply-runtime)
 - [Authenticated V1 API and delivery behavior](#authenticated-v1-api)
 - [Shared rooms, correlation and rollback](shared-rooms.md)
+- [Interim messages, question limitations and controller-first rollout](interim-delivery.md)
 
 ## Run durable ingress
 
@@ -213,13 +214,15 @@ Add these variables to the existing serve configuration and use the same `npm st
 | Variable | Full-mode requirement / default |
 |---|---|
 | `OUTBOUND_ENABLED` | Exactly `true` to enable; absent or `false` means ingress-only |
+| `INTERIM_DELIVERY_ENABLED` | Optional exact `true` / `false`, omitted defaults off; `true` requires full mode and a supporting controller. See [rollout and withdrawal](interim-delivery.md) |
 | `DELIVERY_DB` | Absolute, separately provisioned journal path |
 | `CORRELATION_DB` | Optional SQLite-only separate evidence path; explicit `init-correlation`, never initialized by serve. Omitted/missing main means no continuation label; existing corrupt/busy/foreign-scope storage fails startup |
 | `ORKA_OUTBOUND_BEARER_TOKEN` | Required Orka-to-adapter bearer, **different** from `ORKA_BEARER_TOKEN` |
 | `OUTBOUND_HOST` | `127.0.0.1`; explicit IPv4/IPv6 bind address |
 | `OUTBOUND_PORT` | `3979`; integer 1–65535 |
 
-All outbound fields must be absent when disabled. Invalid booleans, partial config,
+All outbound storage/bearer/listener fields must be absent when outbound is disabled.
+`INTERIM_DELIVERY_ENABLED=false` may be supplied without outbound; `true` is rejected. Invalid booleans, partial config,
 identical directional tokens and path collisions (including canonical aliases and
 ownership/SQLite sidecars) fail closed, not silently fall back to ingress-only.
 Bearers are nonempty RFC6750-shaped values bounded at 8192 characters; do not log
@@ -244,7 +247,7 @@ Expose this listener only through deployment-managed HTTPS with restricted netwo
 access. Do not publish either loopback HTTP listener directly to the Internet.
 
 - `GET /v1/health`: HTTP 200 with exactly `{"status":"ok"}` when locally ready.
-- `GET /v1/capabilities`: HTTP 200 with the following exact advertisement:
+- `GET /v1/capabilities`: HTTP 200 with the following exact default advertisement:
 
 ```json
 {
@@ -262,7 +265,13 @@ access. Do not publish either loopback HTTP listener directly to the Internet.
 }
 ```
 
-- `POST /v1/deliveries`: strict V1 `DeliveryRequest`, uncompressed UTF-8 JSON only.
+With `INTERIM_DELIVERY_ENABLED=true`, the capabilities object additionally contains
+`interimDelivery: true`. Omitted/false settings omit this field entirely for older
+strict-controller compatibility. New messages are refused while off, but saved
+message receipts replay even after withdrawal. See [interim semantics](interim-delivery.md).
+
+- `POST /v1/deliveries`: strict V1 `DeliveryRequest` (`final`, `error`, or opt-in
+  `message`), uncompressed UTF-8 JSON only.
   HTTP 200 domain results are `delivered` with the exact `providerMessageId`, or
   `retryableError` / `nonRetryableError` with fixed safe messages. No provider error,
   request text, header, metadata or task/session reference is echoed.
@@ -271,8 +280,10 @@ access. Do not publish either loopback HTTP listener directly to the Internet.
   encoding/media type 415; errors are fixed-safe `nonRetryableError` bodies.
   Authentication failures are 401; unknown method/path pairs are 404, not aliases.
 
-Headers are bounded at 16 KiB, request bodies at 256 KiB, text at 64 KiB, identities
-at 256 UTF-8 bytes, metadata at 32 bounded entries. The absolute connection/request
+Headers are bounded at 16 KiB, request bodies at 256 KiB, terminal text at 64 KiB,
+interim message text at 16 KiB, identities at 256 UTF-8 bytes, metadata at 32 bounded entries.
+Text bounds are UTF-8 bytes; invalid Unicode, empty/whitespace-only messages and
+oversized messages get HTTP 400 without claiming or sending. The absolute connection/request
 budget is ten seconds, including headers/body/token/provider work. Dispatch gets
 at most nine seconds and less when body/header receipt consumed the budget,
 reserving settlement margin. At most 32 delivery handlers are admitted; excess

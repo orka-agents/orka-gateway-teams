@@ -93,6 +93,13 @@ For ingress-only `serve`, omit delivery ID and all outbound settings; set
 `OUTBOUND_ENABLED` absent/`false`. Full mode uses `OUTBOUND_ENABLED=true` and the
 [existing HTTP configuration](runtime-reference.md#enable-the-full-requestreply-runtime),
 replacing `DELIVERY_DB` with `TABLE_DELIVERY_STORE_ID`.
+Optional `INTERIM_DELIVERY_ENABLED=true|false` uses the same full-mode setting as
+SQLite, off when omitted. [Upgrade the controller first](interim-delivery.md), then
+use a clean owner handover for the process/revision change. Settle/abandon pending
+messages with that controller before disabling or downgrading; never give pending
+messages to an old dispatcher. Do not reinitialize or change store IDs. The Table
+marker/operation/alias/receipt formats remain unchanged; shared correlation-reader
+constraints still apply.
 
 Serve refuses missing, occupied, unsupported or incompletely initialized stores.
 An occupied V2 owner reports `store-owned-requires-operator-recovery: occupied`

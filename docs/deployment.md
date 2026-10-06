@@ -7,6 +7,11 @@ The checked-in package/binding defaults remain personal-only. For explicitly
 allowlisted group/channel installation, shared-session privacy and optional
 SQLite evidence provisioning/mounts, follow [shared rooms](shared-rooms.md).
 Do not silently broaden the default binding, initializer Job or app permissions.
+[Bounded interim delivery](interim-delivery.md) is separately opt-in: upgrade the
+controller first, then add `INTERIM_DELIVERY_ENABLED=true` to the operator-owned
+runtime customization through controlled replacement. Defaults remain off for
+v0.2.0. Settle/abandon pending messages before withdrawal/downward rollback; no
+reinitialization, new stores or old dispatcher with pending message rows.
 
 This is **deployment packaging, not a first-time live bootstrap or live demo**.
 The supplied single-replica runtime uses the existing image CLI and persistent

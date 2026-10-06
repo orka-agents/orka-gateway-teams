@@ -15,6 +15,18 @@ function environment() {
     ORKA_BEARER_TOKEN: randomUUID(), ORKA_OUTBOUND_BEARER_TOKEN: randomUUID() };
 }
 
+test('interim capability is explicit full-mode only, accepts exact booleans and defaults omitted', () => {
+  const env = environment(); assert.equal(Object.hasOwn(parseConfig(env, 'serve').outbound!, 'interimDelivery'), false);
+  for (const value of ['true', 'false']) {
+    const config = parseConfig({ ...env, INTERIM_DELIVERY_ENABLED: value }, 'serve');
+    assert.equal(config.outbound?.interimDelivery, value === 'true'); assert.ok(Object.isFrozen(config.outbound));
+  }
+  for (const value of ['', 'TRUE', '1', 'yes', ' false']) assert.throws(() => parseConfig({ ...env, INTERIM_DELIVERY_ENABLED: value }, 'serve'), ConfigurationError);
+  const only: NodeJS.ProcessEnv = { ...env }; delete only.DELIVERY_DB; delete only.ORKA_OUTBOUND_BEARER_TOKEN; delete only.OUTBOUND_ENABLED;
+  assert.throws(() => parseConfig({ ...only, INTERIM_DELIVERY_ENABLED: 'true' }, 'serve'), ConfigurationError);
+  assert.equal('outbound' in parseConfig({ ...only, INTERIM_DELIVERY_ENABLED: 'false' }, 'serve'), false);
+});
+
 test('outbound is explicit, complete and independent; absent/false preserves ingress-only shape', () => {
   const env = environment(); const full = parseConfig(env, 'serve');
   assert.ok(full.outbound?.bearerToken === env.ORKA_OUTBOUND_BEARER_TOKEN);

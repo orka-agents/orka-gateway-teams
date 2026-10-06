@@ -2,6 +2,7 @@ import { createSessionObservation } from '../delivery/session-correlation.js';
 import { validateOutcome, validateScope } from '../delivery/identity.js';
 import type { BeginDeliveryResult, DeliveryClaim, DeliveryOutcome } from '../delivery/types.js';
 import { validateRoute } from '../ingress/codec.js';
+import { ConfigurationError } from '../ingress/config.js';
 import type { ReplyRoute } from '../ingress/types.js';
 import type { DeliveryRequest } from '../protocol/types.js';
 import { formatDelivery } from '../teams/format.js';
@@ -13,7 +14,8 @@ const retryable: DeliveryResponse = Object.freeze({ status: 'retryableError', me
 const nonRetryable: DeliveryResponse = Object.freeze({ status: 'nonRetryableError', message: 'Delivery cannot be completed safely.' });
 
 export function createDeliveryDispatcher(options: DispatcherOptions): DeliveryDispatcher {
-  const { journal, sender, getRoute, correlation } = options;
+  const { journal, sender, getRoute, correlation, interimDelivery } = options;
+  if (interimDelivery !== undefined && typeof interimDelivery !== 'boolean') throw new ConfigurationError();
   const scope = validateScope(options.scope);
   const services = new Set(options.serviceUrls); const recipients = new Set(options.recipientIds);
   const work = new Set<Promise<DeliveryResponse>>(); const controllers = new Set<AbortController>();
@@ -48,6 +50,8 @@ export function createDeliveryDispatcher(options: DispatcherOptions): DeliveryDi
     const { claim } = begun;
     const finish = (outcome: DeliveryOutcome) => settle(claim, outcome, retire);
     if (!active()) return finish({ kind: 'retryable' });
+    // Withdraw new-send permission, never a historical receipt or uncertain claim.
+    if (request.kind === 'message' && interimDelivery !== true) return finish({ kind: 'rejected' });
     let saved: ReplyRoute | undefined;
     try { saved = await getRoute(request.replyTarget); }
     catch { poison(); return finish({ kind: 'retryable' }); }

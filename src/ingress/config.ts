@@ -14,7 +14,7 @@ export class ConfigurationError extends Error { constructor() { super('Invalid i
 // SDK auth flags do not override Node's process-wide TLS trust bypass.
 export function tlsVerificationEnabled(): boolean { return process.env.NODE_TLS_REJECT_UNAUTHORIZED !== '0'; }
 export interface InitConfig { dbPath: string; scope: Readonly<IngressScope> }
-export interface OutboundConfig { dbPath: string; correlationDbPath?: string; bearerToken: string; host: string; port: number }
+export interface OutboundConfig extends OutboundServerConfig { dbPath: string; correlationDbPath?: string }
 /** Correlation provisioning needs no credentials, Orka endpoint or live store. */
 export function parseCorrelationConfig(env: NodeJS.ProcessEnv): { dbPath: string; scope: { appId: string; tenantId: string } } {
   try {
@@ -91,11 +91,14 @@ export function parseServeSettings(env: NodeJS.ProcessEnv, scope: Readonly<Ingre
   const policy = validatePolicy({ maxPending: number(env.INGRESS_MAX_PENDING, 1000),
     maxRecords: number(env.INGRESS_MAX_RECORDS, 100000), replayWindowMs: number(env.INGRESS_REPLAY_WINDOW_MS, 86400000) });
   const enabled = env.OUTBOUND_ENABLED;
-  if (enabled !== undefined && !['true', 'false'].includes(enabled)) fail();
+  const interim = env.INTERIM_DELIVERY_ENABLED;
+  if ((enabled !== undefined && !['true', 'false'].includes(enabled)) ||
+      (interim !== undefined && !['true', 'false'].includes(interim)) || (interim === 'true' && enabled !== 'true')) fail();
   let outbound: OutboundServerConfig | undefined;
   if (enabled === 'true') {
     outbound = validateOutboundServerConfig({ bearerToken: secret(env.ORKA_OUTBOUND_BEARER_TOKEN),
-      host: env.OUTBOUND_HOST ?? '127.0.0.1', port: number(env.OUTBOUND_PORT, 3979, 1, 65535) }, bearerToken, receiver);
+      host: env.OUTBOUND_HOST ?? '127.0.0.1', port: number(env.OUTBOUND_PORT, 3979, 1, 65535),
+      ...(interim === undefined ? {} : { interimDelivery: interim === 'true' }) }, bearerToken, receiver);
   } else if (['ORKA_OUTBOUND_BEARER_TOKEN', 'OUTBOUND_HOST', 'OUTBOUND_PORT'].some((key) => env[key] !== undefined)) fail();
   return { scope, receiver, bearerToken, policy, ...(outbound === undefined ? {} : { outbound }),
     ...(env.ORKA_CA_FILE === undefined ? {} : { caFile: absolutePath(env.ORKA_CA_FILE) }) };
@@ -131,7 +134,10 @@ export function validateOutboundServerConfig(input: OutboundServerConfig, ingres
     if (!/^[A-Za-z0-9._~+/-]+=*$/u.test(bearerToken) || bearerToken === ingressToken || !isIP(input.host) ||
         !Number.isInteger(input.port) || input.port < 0 || input.port > 65535 ||
         (input.port !== 0 && input.port === receiver.port && input.host === receiver.host)) fail();
-    return Object.freeze({ bearerToken, host: input.host, port: input.port });
+    const interimDelivery = input.interimDelivery;
+    if (interimDelivery !== undefined && typeof interimDelivery !== 'boolean') fail();
+    return Object.freeze({ bearerToken, host: input.host, port: input.port,
+      ...(interimDelivery === undefined ? {} : { interimDelivery }) });
   } catch { throw new ConfigurationError(); }
 }
 

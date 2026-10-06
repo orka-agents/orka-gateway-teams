@@ -16,6 +16,7 @@ export interface ProviderSender {
   stop(): Promise<void>;
 }
 export interface DispatcherOptions {
+  interimDelivery?: boolean;
   journal: DeliveryJournalPort;
   correlation?: SessionCorrelationPort;
   scope: Readonly<JournalScope>;
