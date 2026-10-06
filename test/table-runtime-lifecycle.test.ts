@@ -187,6 +187,61 @@ test('one failed release still drains and closes the other store; stop and done 
   assert.equal(f.tables.inbox.rows.get('M')?.Owner, ''); assert.notEqual(f.tables.delivery.rows.get('M')?.Owner, ''); await f.drained();
 });
 
+test('production-selected Table interim on/off: shared roots and prior-origin evidence survive clean disabled replay', async t => {
+  const f = await fixture(t); f.config.receiver = { ...receiverConfig };
+  const auth = await authFixture(t); const events: EventEnvelope[] = []; const messages: Record<string, any>[] = [];
+  const upstream = await httpsFixture(t, async (req, res) => {
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    events.push(JSON.parse(Buffer.concat(chunks).toString())); res.writeHead(202); res.end(JSON.stringify({ status: 'accepted', eventId: `interim-table-origin-${events.length}`, state: 'Queued' }));
+  });
+  const native = https.request;
+  t.mock.method(https, 'request', (url: URL, options: https.RequestOptions, callback: (res: IncomingMessage) => void) =>
+    url.hostname === 'orka.example.invalid' ? native(new URL(url.pathname + url.search, upstream.baseUrl), { ...options, ca: upstream.ca, servername: 'localhost' }, callback) : native(url, options, callback));
+  syncBuiltinESMExports(); t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const dependencies = { ...auth.dependencies, botToken: 'synthetic-table-bot-token', providerPost: async (url: string, bytes: Buffer) => {
+    assert.equal(url, `${receiverConfig.serviceUrls[0]}v3/conversations/19%3Ainterim-table-room%3Bmessageid%3Droot/activities`);
+    assert.ok(bytes.length <= 20480); messages.push(JSON.parse(bytes.toString()));
+    return { status: 201, data: Buffer.from('{"id":"interim-table-receipt"}') };
+  } };
+  let runtime = await f.start(dependencies);
+  const deliver = (request: unknown) => fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/deliveries`, { method: 'POST', headers: {
+    Authorization: `Bearer ${f.config.outbound!.bearerToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(request) });
+  const capability = async () => (await (await fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/capabilities`, {
+    headers: { Authorization: `Bearer ${f.config.outbound!.bearerToken}` } })).json() as { capabilities: Record<string, boolean> }).capabilities;
+  const receipt = { status: 'delivered', providerMessageId: 'interim-table-receipt' };
+  assert.equal(Object.hasOwn(await capability(), 'interimDelivery'), false);
+  assert.equal((await (await deliver({ ...finalDelivery, kind: 'message', idempotencyId: 'default-off', deliveryId: 'default-off' })).json() as { status: string }).status, 'nonRetryableError');
+  assert.equal(messages.length, 0); await runtime.stop(); await runtime.done; await f.drained();
+  f.config.outbound!.interimDelivery = true; runtime = await f.start(dependencies);
+  for (const n of [1, 2]) {
+    assert.equal((await capability()).interimDelivery, true);
+    const input = activity(); input.id = `table-interim-${n}`; input.conversation = { id: '19:interim-table-room;messageid=root', conversationType: 'channel', tenantId: scope.tenantId };
+    input.replyToId = 'root'; input.from.aadObjectId = `synthetic-table-aad-${n}`; input.from.name = n === 1 ? 'Alice' : 'Bob';
+    input.text = '<at>Orka</at> request'; input.entities = [{ type: 'mention', mentioned: { id: receiverConfig.recipientIds[0] }, text: '<at>Orka</at>' }];
+    assert.equal((await post(runtime.port, auth.token(), input)).status, 200); await eventually(() => events.length === n);
+    const body = { ...finalDelivery, kind: 'message' as const, text: 'Question: ' + 'é'.repeat(8187), contextId: input.conversation.id,
+      threadId: 'root', replyTarget: events[n - 1]!.replyTarget!, idempotencyId: `interim-table-op-${n}`, deliveryId: `interim-table-delivery-${n}`, originatingEventId: `interim-table-origin-${n}` };
+    assert.equal((await deliver({ ...body, text: 'é'.repeat(8193) })).status, 400);
+    assert.deepEqual(await (await deliver(body)).json(), receipt);
+    const message = messages[n - 1]!; const card = message.attachments[0].content;
+    assert.equal(message.replyToId, 'root'); assert.equal(card.body[0].text, 'Orka question');
+    assert.ok(JSON.stringify(card).includes(`Asked by ${n === 1 ? 'Alice' : 'Bob'}`));
+    assert.equal(JSON.stringify(card).includes("Continuing the room's conversation"), n === 2);
+    await runtime.stop(); await runtime.done; await f.drained();
+    f.config.outbound!.interimDelivery = false; runtime = await f.start(dependencies);
+    assert.equal(Object.hasOwn(await capability(), 'interimDelivery'), false);
+    assert.deepEqual(await (await deliver({ ...body, deliveryId: `disabled-table-alias-${n}` })).json(), receipt);
+    const controls = [...f.tables.delivery.rows.values()].filter(row => row.T === 'control'); assert.equal(controls.length, 1);
+    const observation = JSON.stringify(controls);
+    assert.equal((await (await deliver({ ...body, idempotencyId: `disabled-new-${n}`, deliveryId: `disabled-new-${n}` })).json() as { status: string }).status, 'nonRetryableError');
+    assert.ok(JSON.stringify([...f.tables.delivery.rows.values()].filter(row => row.T === 'control')) === observation);
+    assert.equal(messages.length, n);
+    await runtime.stop(); await runtime.done; await f.drained();
+    f.config.outbound!.interimDelivery = true; runtime = await f.start(dependencies);
+  }
+  await runtime.stop(); await runtime.done; await f.drained(); assert.equal(f.identity.calls.bot, 0);
+});
+
 test('production-selected Table shared runtime uses the existing journal correlation port across restart and alias replay', async (t) => {
   const f = await fixture(t); f.config.receiver = { ...receiverConfig }; const auth = await authFixture(t);
   const events: EventEnvelope[] = []; const messages: string[] = [];

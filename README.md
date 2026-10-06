@@ -18,14 +18,17 @@ Card. Follow-up messages can share an Orka Session through the configured Bindin
   contribute only their text; attachments are not processed.
 - **Final replies and errors.** Replies use a single text card. Long answers are
   shortened with a visible notice rather than split into multiple messages.
+- **Opt-in updates and questions during a Task.** A supporting Orka controller can
+  deliver bounded interim cards. Off by default; see [interim delivery](docs/interim-delivery.md)
+  for controller-first rollout, question presentation and next-turn limitations.
 - **Durable admission and receipt replay.** The inbox retains accepted messages
   for relay to Orka; confirmed delivery receipts prevent duplicate Teams sends
   when Orka retries the same delivery.
 - **Two storage options.** Local SQLite is the default. Azure Table V2 is selected
   explicitly for the Azure Container Apps deployment profile.
 
-The runtime does **not** support files, streaming or interim messages, or approval
-buttons. Shared rooms require reviewed app installation and separate allowlisted
+The runtime does **not** support files, token streaming, active-Task answer routing,
+or approval buttons. Shared rooms require reviewed app installation and separate allowlisted
 bindings; packaging alone does not authorize a room. Setup capture remains
 personal-chat only. Existing recorded live validation is personal-chat evidence,
 not shared-room qualification.
@@ -80,6 +83,9 @@ files or command-line arguments, for credentials.
 - **Ingress-only is the default.** Full request/reply requires
   `OUTBOUND_ENABLED=true`, separately initialized delivery storage, and distinct
   adapter-to-Orka and Orka-to-adapter bearer tokens.
+- **Interim delivery is off by default.** Full mode accepts explicit
+  `INTERIM_DELIVERY_ENABLED=true|false`. Enable only after upgrading the controller;
+  Orka v0.2.0 remains final/error-only. [Drain outstanding messages before disabling](docs/interim-delivery.md#disable-and-roll-back-safely).
 - **Shared continuation labels need local evidence.** SQLite optionally uses an
   explicitly provisioned `CORRELATION_DB`; omission/missing storage leaves rooms
   operational without continuation wording. Table uses its existing delivery
@@ -149,6 +155,7 @@ focused tests, and the optional container, Kubernetes, and app-packaging checks.
 | Deploy and operate | [Azure Container Apps](docs/aca-deployment.md) · [Kubernetes](docs/deployment.md) |
 | Configure the runtime and HTTP API | [Runtime reference](docs/runtime-reference.md) · [Table runtime](docs/table-runtime.md) |
 | Enable shared group/channel conversations | [Shared rooms](docs/shared-rooms.md) |
+| Deliver updates/questions during a Task | [Interim delivery and rollout](docs/interim-delivery.md) |
 | Establish trusted chat identities | [Authenticated setup capture](docs/setup-capture.md) |
 | Authenticate the bot | [Certificates](docs/certificate-auth.md) · [Managed-identity federation](docs/managed-identity-auth.md) |
 | Understand storage internals | [Table kernel and delivery journal](docs/table-storage.md) · [Table inbox](docs/table-inbox.md) |

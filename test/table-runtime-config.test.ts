@@ -28,6 +28,17 @@ for (const selector of [undefined, 'sqlite']) test(`SQLite ${selector ?? 'defaul
   assert.equal('storage' in result, false); assert.equal(result.receiver.port, 3978); assert.equal(result.outbound?.port, 3979);
 });
 
+test('Table closed outbound snapshots preserve explicit interim capability and reject malformed values', () => {
+  for (const flag of [true, false]) {
+    const config = parseRuntimeConfig({ ...environment(), INTERIM_DELIVERY_ENABLED: String(flag) }, 'serve'); assert.ok('storage' in config);
+    assert.equal(config.outbound?.interimDelivery, flag);
+    assert.equal(snapshotTableServeConfig(config).outbound?.interimDelivery, flag);
+    assert.ok(Object.isFrozen(config.outbound));
+    for (const value of [null, 'true', 1]) assert.throws(() => snapshotTableServeConfig({ ...config,
+      outbound: { ...config.outbound!, interimDelivery: value } } as unknown as typeof config), ConfigurationError);
+  }
+});
+
 test('Table selection has full scope, explicit identities and budgets but no SQLite paths', () => {
   const result = parseRuntimeConfig(environment(), 'serve'); assert.ok('storage' in result);
   assert.equal(result.storage.backend, 'table-v2'); assert.equal('dbPath' in result, false); assert.equal('dbPath' in result.outbound!, false);

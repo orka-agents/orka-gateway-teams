@@ -15,6 +15,7 @@ import { createDeliveryDispatcher } from '../src/outbound/dispatcher.js';
 import { createProviderSender } from '../src/outbound/sender.js';
 import type { DispatcherOptions, ProviderResult, ProviderSender } from '../src/outbound/types.js';
 import { finalDelivery, finalMessage } from './fixtures/outgoing.js';
+import type { DeliveryRequest } from '../src/protocol/types.js';
 import { expectedEvent } from './fixtures/incoming.js';
 import { httpsFixture } from './support/ingress-https.js';
 
@@ -44,6 +45,49 @@ function operation(path: string) {
   try { return db.prepare('SELECT state, attempt_id AS attemptId, idempotency_id AS idempotencyId, provider_message_id AS receipt FROM operations').get()!; }
   finally { db.close(); }
 }
+
+for (const interimDelivery of [undefined, false]) test('fresh messages default off and never resolve routes or send', async t => {
+  const f = fixture(t); let sends = 0; let routes = 0;
+  const dispatcher = f.create({ ...(interimDelivery === undefined ? {} : { interimDelivery }),
+    getRoute() { routes++; return route; }, sender: { async send() { sends++; return delivered; }, async stop() {} } });
+  const input: DeliveryRequest = { ...finalDelivery, kind: 'message' };
+  assert.deepEqual(await dispatcher.deliver(input), nonRetryable);
+  assert.deepEqual(await dispatcher.deliver({ ...input, deliveryId: 'disabled-alias' }), nonRetryable);
+  assert.equal(sends, 0); assert.equal(routes, 0); assert.equal(operation(f.path).state, 'rejected'); assert.equal(dispatcher.healthy, true);
+});
+
+test('enabled messages capture capability, then delivered replay survives disabling and removed route policy after final', async t => {
+  const f = fixture(t); let sends = 0;
+  const options: DispatcherOptions = { journal: f.journal, scope, getRoute: () => route, serviceUrls: [route.serviceUrl],
+    recipientIds: [route.bot.id], interimDelivery: true, sender: { async send() { sends++; return delivered; }, async stop() {} } };
+  const dispatcher = createDeliveryDispatcher(options); t.after(() => dispatcher.stop()); options.interimDelivery = false;
+  const input: DeliveryRequest = { ...finalDelivery, kind: 'message', deliveryId: 'message', idempotencyId: 'message' };
+  assert.deepEqual(await dispatcher.deliver(input), response);
+  assert.deepEqual(await dispatcher.deliver(finalDelivery), response); await dispatcher.stop(); f.journal.close();
+  const reopened = openDeliveryJournal(f.path, scope); t.after(() => reopened.close());
+  const disabled = f.create({ journal: reopened, interimDelivery: false, serviceUrls: [], recipientIds: [],
+    getRoute() { throw new Error('must not resolve historical route'); }, sender: { async send() { sends++; return delivered; }, async stop() {} } });
+  assert.deepEqual(await disabled.deliver({ ...input, deliveryId: 'restart-message-alias' }), response);
+  assert.deepEqual(await disabled.deliver({ ...input, text: input.text + ' ' }), nonRetryable);
+  assert.deepEqual(await disabled.deliver({ ...input, kind: 'final' }), nonRetryable);
+  assert.equal(sends, 2); assert.equal(disabled.healthy, true);
+});
+
+test('disabled messages honor authoritative inFlight and unknown outcomes', async t => {
+  const f = fixture(t); const input: DeliveryRequest = { ...finalDelivery, kind: 'message' };
+  const begin = f.journal.begin(input); assert.equal(begin.kind, 'claimed');
+  if (begin.kind !== 'claimed') throw new Error('Missing fixture claim');
+  const dispatcher = f.create({ sender: { async send() { throw new Error('must not send'); }, async stop() {} } });
+  assert.deepEqual(await dispatcher.deliver(input), retryable);
+  f.journal.settle(begin.claim, { kind: 'unknown' });
+  assert.deepEqual(await dispatcher.deliver({ ...input, deliveryId: 'unknown-alias' }), nonRetryable);
+  assert.equal(dispatcher.healthy, true);
+});
+
+test('dispatcher refuses nonboolean interim capability before use', t => {
+  const f = fixture(t);
+  for (const interimDelivery of ['true', null, 1]) assert.throws(() => f.create({ interimDelivery } as unknown as Partial<DispatcherOptions>));
+});
 
 test('claim is committed before sending; receipt is durable before V1 success and alias replay', async (t) => {
   const f = fixture(t); let calls = 0;

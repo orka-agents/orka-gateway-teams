@@ -74,6 +74,46 @@ function providerWrapper(t: TestContext, baseUrl: string, ca: Buffer, expectedTo
   };
 }
 
+for (const flag of [undefined, false, true]) test(`SQLite selected runtime interim ${flag ?? 'default'}: HTTP capability, native provider and disabled restart receipt`, async t => {
+  const auth = await authFixture(t); const accepted = deferred<EventEnvelope>(); const providerToken = randomUUID(); let sends = 0;
+  const upstream = await httpsFixture(t, async (req, res) => {
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    accepted.resolve(JSON.parse(Buffer.concat(chunks).toString())); res.writeHead(202); res.end('{"status":"accepted","eventId":"interim-origin","state":"Queued"}');
+  });
+  const provider = await httpsFixture(t, async (req, res) => {
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const bytes = Buffer.concat(chunks); assert.ok(bytes.length <= 20480); sends++;
+    const card = JSON.parse(bytes.toString()).attachments[0].content;
+    assert.equal(card.body[0].text, sends === 1 ? 'Orka update' : 'Orka reply');
+    res.writeHead(201); res.end('{"id":"interim-runtime-receipt"}');
+  });
+  const f = storage(t, upstream.baseUrl, upstream.ca); if (flag !== undefined) f.config.outbound!.interimDelivery = flag;
+  const dependencies = { ...auth.dependencies, botToken: () => providerToken, providerPost: providerWrapper(t, provider.baseUrl, provider.ca, providerToken) };
+  let runtime = f.own(await startIngressRuntime(f.config, dependencies));
+  const capabilities = async () => (await (await fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/capabilities`, {
+    headers: { Authorization: `Bearer ${f.config.outbound!.bearerToken}` } })).json() as { capabilities: Record<string, boolean> }).capabilities;
+  assert.equal(Object.hasOwn(await capabilities(), 'interimDelivery'), flag === true);
+  assert.equal((await post(runtime.port, auth.token())).status, 200); const event = await accepted.promise;
+  const input = { ...finalDelivery, kind: 'message', text: '😀'.repeat(4096), replyTarget: event.replyTarget!, originatingEventId: 'interim-origin' };
+  const receipt = { status: 'delivered', providerMessageId: 'interim-runtime-receipt' };
+  assert.equal((await deliver(runtime, f.config, { ...input, text: input.text + 'a' })).status, 400);
+  const result = await (await deliver(runtime, f.config, input)).json() as { status: string };
+  assert.equal(result.status, flag ? 'delivered' : 'nonRetryableError'); assert.equal(sends, flag ? 1 : 0);
+  if (flag) {
+    assert.deepEqual(result, receipt);
+    const terminal = { ...input, kind: 'final', idempotencyId: 'interim-final', deliveryId: 'interim-final' };
+    assert.deepEqual(await (await deliver(runtime, f.config, terminal)).json(), receipt); await runtime.stop();
+    f.config.outbound!.interimDelivery = false;
+    runtime = f.own(await startIngressRuntime({ ...f.config, receiver: { ...f.config.receiver,
+      recipientIds: ['other-bot'], serviceUrls: ['https://other.example.invalid/'] } }, dependencies));
+    assert.equal(Object.hasOwn(await capabilities(), 'interimDelivery'), false);
+    assert.deepEqual(await (await deliver(runtime, f.config, { ...input, deliveryId: 'disabled-restart-alias' })).json(), receipt);
+    assert.deepEqual(await (await deliver(runtime, f.config, terminal)).json(), receipt);
+    assert.equal((await (await deliver(runtime, f.config, { ...input, idempotencyId: 'fresh-disabled', deliveryId: 'fresh-disabled' })).json() as { status: string }).status, 'nonRetryableError');
+    assert.equal(sends, 2);
+  }
+});
+
 test('real registered SDK input -> inbox -> HTTPS Orka -> V1 reply -> SDK HTTPS receipt; concurrent aliases and restart replay one effect', { timeout: 12000 }, async (t) => {
   const auth = await authFixture(t); const event = deferred<EventEnvelope>(); const accepted = deferred<void>(); const release = deferred<void>();
   const providerToken = randomUUID(); let sends = 0; let bytes = 0; let inboundAuthenticated = false;

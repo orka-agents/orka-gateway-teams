@@ -19,14 +19,15 @@ import { deferred, receiverConfig, scope as ingressScope, serviceUrl } from './s
 const scope = { appId: ingressScope.appId, tenantId: ingressScope.tenantId };
 const retryable: DeliveryResponse = { status: 'retryableError', message: 'Delivery is temporarily unavailable.' };
 const rejected = { status: 'nonRetryableError', message: 'Delivery cannot be completed safely.' };
-async function fixture(t: TestContext, sender?: ProviderSender) {
+async function fixture(t: TestContext, sender?: ProviderSender, interimDelivery?: boolean) {
   const directory = mkdtempSync(join(tmpdir(), 'teams-outbound-api-')); const path = join(directory, 'delivery.sqlite');
   initializeDeliveryJournal(path, scope); const journal = openDeliveryJournal(path, scope); let sends = 0; let ready = true;
-  const dispatcher = createDeliveryDispatcher({ journal, scope, getRoute: () => ({ serviceUrl, channelId: 'msteams',
+  const dispatcher = createDeliveryDispatcher({ journal, scope, ...(interimDelivery === undefined ? {} : { interimDelivery }), getRoute: () => ({ serviceUrl, channelId: 'msteams',
     bot: { id: receiverConfig.recipientIds[0]!, role: 'bot' }, conversation: { id: finalDelivery.contextId, conversationType: 'personal', tenantId: scope.tenantId } }),
     recipientIds: receiverConfig.recipientIds, serviceUrls: receiverConfig.serviceUrls,
     sender: sender ?? { async send() { sends++; return { kind: 'delivered', providerMessageId: 'receipt-api' }; }, async stop() {} } });
-  const token = randomUUID(); const server = await startOutboundServer({ host: '127.0.0.1', port: 0, bearerToken: token }, dispatcher, scope, () => ready);
+  const token = randomUUID(); const server = await startOutboundServer({ host: '127.0.0.1', port: 0, bearerToken: token,
+    ...(interimDelivery === undefined ? {} : { interimDelivery }) }, dispatcher, scope, () => ready);
   t.after(async () => { await server.stop(); await dispatcher.stop(); journal.close(); rmSync(directory, { recursive: true, force: true }); });
   const call = (body: unknown = finalDelivery, auth = token) => fetch(`http://127.0.0.1:${server.port}/v1/deliveries`, {
     method: 'POST', headers: { Authorization: `Bearer ${auth}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -41,6 +42,34 @@ function raw(port: number, data: string): Promise<string> {
     socket.once('error', reject); socket.once('close', () => { clearTimeout(timeout); resolve(result); });
   });
 }
+
+for (const enabled of [undefined, false, true]) test(`HTTP capability ${enabled ?? 'omitted'} and bounded message dispatch/replay after terminal`, async t => {
+  const f = await fixture(t, undefined, enabled);
+  const capabilities = await (await fetch(`http://127.0.0.1:${f.server.port}/v1/capabilities`, { headers: { Authorization: `Bearer ${f.token}` } })).json() as { capabilities: Record<string, boolean> };
+  assert.equal(Object.hasOwn(capabilities.capabilities, 'interimDelivery'), enabled === true);
+  if (enabled) assert.equal(capabilities.capabilities.interimDelivery, true);
+  const input = { ...finalDelivery, kind: 'message', text: '😀'.repeat(4096), deliveryId: 'message-1', idempotencyId: 'message-1' };
+  for (const text of [input.text + 'a', 'a'.repeat(16385), '', ' \t\n', '\ud800', 'a\u0000']) {
+    const result = await f.call({ ...input, text }); assert.equal(result.status, 400); assert.deepEqual(await result.json(), rejected);
+  }
+  const result = await f.call(input); assert.equal(result.status, 200);
+  const receipt = { status: 'delivered', providerMessageId: 'receipt-api' };
+  assert.deepEqual(await result.json(), enabled ? receipt : rejected);
+  if (enabled) {
+    assert.deepEqual(await (await f.call({ ...input, deliveryId: 'message-2', idempotencyId: 'message-2' })).json(), receipt);
+    assert.deepEqual(await (await f.call({ ...input, deliveryId: 'message-alias' })).json(), receipt);
+    assert.deepEqual(await (await f.call(finalDelivery)).json(), receipt);
+    assert.deepEqual(await (await f.call({ ...input, deliveryId: 'postfinal-alias' })).json(), receipt);
+    assert.deepEqual(await (await f.call({ ...input, kind: 'error' })).json(), rejected);
+  }
+  assert.equal(f.sends(), enabled ? 3 : 0);
+});
+
+test('outbound server validates boolean capability before binding', async () => {
+  const dispatcher: DeliveryDispatcher = { healthy: true, async deliver() { return retryable; }, async stop() {} };
+  for (const interimDelivery of [null, 'true', 1]) await assert.rejects(startOutboundServer({ host: '127.0.0.1', port: 0,
+    bearerToken: randomUUID(), interimDelivery } as unknown as Parameters<typeof startOutboundServer>[0], dispatcher, scope, () => true).then(server => server.stop()));
+});
 
 test('V1 exact authenticated health/capabilities and readiness gate precede claims', async (t) => {
   const f = await fixture(t); const get = (path: string) => fetch(`http://127.0.0.1:${f.server.port}${path}`, { headers: { Authorization: `bEaReR ${f.token}` } });

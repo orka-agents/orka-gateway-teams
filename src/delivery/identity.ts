@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import {
   MAX_HTTP_BODY_BYTES, MAX_IDENTITY_BYTES, MAX_METADATA_ENTRIES,
-  MAX_METADATA_KEY_BYTES, MAX_METADATA_VALUE_BYTES, MAX_TEXT_BYTES, PROTOCOL_VERSION,
+  MAX_METADATA_KEY_BYTES, MAX_METADATA_VALUE_BYTES, MAX_TEXT_BYTES, MAX_MESSAGE_TEXT_BYTES, PROTOCOL_VERSION,
 } from '../protocol/types.js';
 import { DeliveryJournalError } from './types.js';
 import type { DeliveryClaim, DeliveryOutcome, JournalScope } from './types.js';
@@ -13,7 +13,7 @@ export function requestIdentity(value: unknown, scope: JournalScope): RequestIde
     'protocolVersion', 'deliveryId', 'idempotencyId', 'originatingEventId', 'taskRef', 'sessionRef',
     'kind', 'accountId', 'contextId', 'threadId', 'replyTarget', 'text', 'metadata',
   ]);
-  if (request.protocolVersion !== PROTOCOL_VERSION || !['final', 'error'].includes(request.kind as string)) invalid();
+  if (request.protocolVersion !== PROTOCOL_VERSION || !['final', 'error', 'message'].includes(request.kind as string)) invalid();
   const deliveryId = identity(request.deliveryId);
   const idempotencyId = identity(request.idempotencyId);
   const accountId = identity(request.accountId);
@@ -26,6 +26,8 @@ export function requestIdentity(value: unknown, scope: JournalScope): RequestIde
     if (Buffer.byteLength(key, 'utf8') > MAX_METADATA_KEY_BYTES) invalid();
     return [key, string(metadata[key], MAX_METADATA_VALUE_BYTES, false)];
   });
+  const text = string(request.text, request.kind === 'message' ? MAX_MESSAGE_TEXT_BYTES : MAX_TEXT_BYTES, true);
+  if (request.kind === 'message' && !text.trim()) invalid();
   const canonical = JSON.stringify([
     'teams-delivery-v1', scope.appId, scope.tenantId, request.protocolVersion,
     // Delivery aliases deliberately have the stable ID's fingerprint.
@@ -34,7 +36,7 @@ export function requestIdentity(value: unknown, scope: JournalScope): RequestIde
     'sessionRef' in request ? reference(request.sessionRef) : null,
     request.kind, accountId, identity(request.contextId),
     'threadId' in request && request.threadId !== '' ? identity(request.threadId) : '',
-    identity(request.replyTarget), string(request.text, MAX_TEXT_BYTES, true), entries,
+    identity(request.replyTarget), text, entries,
   ]);
   if (Buffer.byteLength(canonical, 'utf8') > MAX_HTTP_BODY_BYTES) invalid();
   return { deliveryId, idempotencyId, digest: createHash('sha256').update(canonical, 'utf8').digest('hex') };

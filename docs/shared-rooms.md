@@ -1,9 +1,11 @@
 # Shared Teams rooms
 
 The runtime accepts explicitly invoked text requests in `groupChat` and `channel`
-conversations and returns **final replies or errors** as one Adaptive Card. No
-streaming, interim messages, approval buttons, files or attachment extraction is
-provided. Existing personal chats and their sender identities remain unchanged.
+conversations and returns **final replies or errors** as one Adaptive Card.
+[Bounded interim updates/questions](interim-delivery.md) are separately opt-in and
+require a supporting controller. No token streaming, active-Task answer routing,
+approval buttons, files or attachment extraction is provided. Existing personal
+chats and their sender identities remain unchanged.
 
 ## Installation and authorization
 

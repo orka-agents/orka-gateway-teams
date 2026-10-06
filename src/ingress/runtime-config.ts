@@ -75,7 +75,7 @@ export function snapshotTableServeConfig(input: TableServeConfig): TableServeCon
     const bearerToken = value.bearerToken;
     if (typeof bearerToken !== 'string' || bearerToken.length > 8192 || !/^[A-Za-z0-9._~+/-]+=*$/u.test(bearerToken)) throw new ConfigurationError();
     const outbound = value.outbound === undefined ? undefined : validateOutboundServerConfig(
-      auditFields(value.outbound, ['host', 'port', 'bearerToken']) as unknown as OutboundServerConfig, bearerToken, receiver);
+      auditFields(value.outbound, ['host', 'port', 'bearerToken', 'interimDelivery']) as unknown as OutboundServerConfig, bearerToken, receiver);
     const binding = resource(s, s.ingressStoreId, 'ingress', scope);
     if (outbound) resource(s, s.deliveryStoreId, 'delivery', scope);
     else if (s.deliveryStoreId !== undefined) throw new ConfigurationError();

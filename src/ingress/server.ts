@@ -27,7 +27,7 @@ export interface ReceiverDependencies { sdkCloud?: CloudEnvironment; fetchKeys?:
   botToken?: Token; providerPost?: ProviderPost; certificateNetwork?: INetworkModule; managedIdentity?: ManagedIdentityDependencies }
 export interface AdmissionSink { readonly scope: IngressStore['scope'];
   admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>): AdmissionResult | Promise<AdmissionResult> }
-export interface ReceiverOutbound { journal: DeliveryJournalPort; correlation?: SessionCorrelationPort; getRoute: (key: string) => ReplyRoute | undefined | Promise<ReplyRoute | undefined> }
+export interface ReceiverOutbound { interimDelivery?: boolean; journal: DeliveryJournalPort; correlation?: SessionCorrelationPort; getRoute: (key: string) => ReplyRoute | undefined | Promise<ReplyRoute | undefined> }
 export interface Receiver { port: number; stop(): Promise<void>; failed: Promise<never>; outbound?: DeliveryDispatcher }
 export interface PreparedReceiver { start(sink: AdmissionSink, outbound?: ReceiverOutbound, signal?: AbortSignal): Promise<Receiver> }
 
@@ -140,6 +140,7 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
         } catch { return undefined; }
       }, dependencies.providerPost === undefined ? {} : { post: dependencies.providerPost });
       dispatcher = createDeliveryDispatcher({ journal: outbound.journal, getRoute: outbound.getRoute,
+        ...(outbound.interimDelivery === undefined ? {} : { interimDelivery: outbound.interimDelivery }),
         ...(outbound.correlation === undefined ? {} : { correlation: outbound.correlation }),
         scope: { appId: config.appId, tenantId: config.tenantId }, serviceUrls: config.serviceUrls, recipientIds: config.recipientIds, sender });
     }
