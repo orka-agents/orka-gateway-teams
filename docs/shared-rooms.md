@@ -154,7 +154,7 @@ Table V2 uses the existing delivery journal's separate observation port and
 partition: no extra Table store, credential, token provider or partition.
 Table mode rejects `CORRELATION_DB` instead of ignoring it.
 
-To enable SQLite labels, first disable intake/delivery and drain every owner.
+To enable SQLite continuation wording, first disable intake/delivery and drain every owner.
 Provision a **new separate** path in an existing private directory, using only
 nonsecret `TEAMS_APP_ID`, `TEAMS_TENANT_ID`, and `CORRELATION_DB` configuration:
 
@@ -175,7 +175,11 @@ configured databases, ownership files, SQLite sidecars and credential files
 before acquiring any live SQLite owner. An existing corrupt, busy, unsupported,
 foreign-scope or incompletely provisioned correlation store fails startup with a
 fixed safe category; it never silently degrades to missing evidence. The sidecar
-opens/audits before live inbox/journal ownership and before listeners. Runtime
+opens/audits before live inbox/journal ownership and before listeners. This new,
+pre-release sidecar requires the exact current schema, including a strict
+`WITHOUT ROWID` sessions table and immutable-key insertion guards. Earlier
+provisional sidecars are rejected as corrupt, without migration or repair;
+existing inbox and delivery journal schemas remain unchanged. Runtime
 shutdown drains observations, receiver/API, token/provider and relay work before
 closing all stores, attempting every close even if another fails. Never inspect
 live SQLite bytes with an ordinary descriptor in the owning process.

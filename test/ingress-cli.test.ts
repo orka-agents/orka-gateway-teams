@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { receiverConfig, scope } from './support/ingress-auth.js';
-import { openSessionCorrelation } from '../src/delivery/sqlite-session-correlation.js';
+import { initializeSessionCorrelation, openSessionCorrelation } from '../src/delivery/sqlite-session-correlation.js';
+import { ConfigurationError, parseCorrelationConfig } from '../src/ingress/config.js';
 import { openIngressStore } from '../src/ingress/store.js';
 
 function cli(t: TestContext, args: string[], env: NodeJS.ProcessEnv, early = false) {
@@ -46,6 +47,68 @@ test('CLI explicitly initializes correlation with only app/tenant/path and refus
   const other = `${path}.other`;
   assert.equal(await cli(t, ['init-correlation'], { ...env, CORRELATION_DB: other, GATEWAY_STORAGE_BACKEND: 'table-v2' }).finished, 1);
   assert.equal(existsSync(other), false);
+});
+
+test('CLI correlation provisioning refuses optional storage collisions before creating its main or owner', async (t) => {
+  for (const kind of ['ingress-wal', 'delivery-owner', 'both', 'parent-alias', 'hardlink'] as const) {
+    const fixture = envFixture(t); const directory = dirname(fixture.INGRESS_DB);
+    const delivery = join(directory, 'delivery.sqlite'); const correlation = join(directory, 'correlation.sqlite');
+    const env: NodeJS.ProcessEnv = { TEAMS_APP_ID: scope.appId, TEAMS_TENANT_ID: scope.tenantId, CORRELATION_DB: correlation };
+    if (kind === 'ingress-wal') { env.INGRESS_DB = fixture.INGRESS_DB; env.CORRELATION_DB = `${fixture.INGRESS_DB}-wal`; }
+    if (kind === 'delivery-owner') { env.DELIVERY_DB = delivery; env.CORRELATION_DB = `${delivery}.owner.sqlite-wal`; }
+    if (kind === 'both') { env.INGRESS_DB = `${correlation}.owner.sqlite-journal`; env.DELIVERY_DB = delivery; }
+    if (kind === 'parent-alias') {
+      mkdirSync(join(directory, 'actual')); symlinkSync(join(directory, 'actual'), join(directory, 'alias'));
+      env.INGRESS_DB = join(directory, 'actual', 'inbox.sqlite'); env.CORRELATION_DB = join(directory, 'alias', 'inbox.sqlite-wal');
+    }
+    if (kind === 'hardlink') {
+      writeFileSync(`${delivery}-shm`, 'synthetic reserved inode', { mode: 0o600 });
+      linkSync(`${delivery}-shm`, `${correlation}.owner.sqlite-wal`); env.DELIVERY_DB = delivery;
+    }
+    const run = cli(t, ['init-correlation'], env); await run.finished;
+    assert.equal(existsSync(env.CORRELATION_DB!), false, `${kind}: correlation main must remain absent`);
+    assert.equal(existsSync(`${env.CORRELATION_DB}.owner.sqlite`), false, `${kind}: correlation owner must remain absent`);
+    assert.equal(run.child.exitCode, 1, kind);
+    assert.ok(run.output().includes('teams-ingress: configuration-failed'), kind);
+    assert.ok(!run.output().includes('initialized'), kind);
+    assert.ok(!run.output().includes(directory), kind);
+  }
+});
+
+test('CLI correlation provisioning accepts unrelated optional stores without Orka scope or creating them', async (t) => {
+  for (const knobs of [[], ['INGRESS_DB'], ['DELIVERY_DB'], ['INGRESS_DB', 'DELIVERY_DB']]) {
+    const fixture = envFixture(t); const directory = dirname(fixture.INGRESS_DB); const path = join(directory, 'correlation.sqlite');
+    const env: NodeJS.ProcessEnv = { TEAMS_APP_ID: scope.appId, TEAMS_TENANT_ID: scope.tenantId, CORRELATION_DB: path };
+    for (const knob of knobs) env[knob] = join(directory, `${knob}.sqlite`);
+    assert.equal(await cli(t, ['init-correlation'], env).finished, 0);
+    const handle = openSessionCorrelation(path, { appId: scope.appId, tenantId: scope.tenantId }); handle.close();
+    for (const knob of knobs) {
+      assert.equal(existsSync(env[knob]!), false); assert.equal(existsSync(`${env[knob]}.owner.sqlite`), false);
+    }
+  }
+});
+
+test('correlation provisioning preflight preserves a live SQLite owner\'s child-process exclusion', (t) => {
+  const fixture = envFixture(t); const path = join(dirname(fixture.INGRESS_DB), 'live-correlation.sqlite');
+  const target = { appId: scope.appId, tenantId: scope.tenantId };
+  initializeSessionCorrelation(path, target); const owner = openSessionCorrelation(path, target);
+  const probe = () => {
+    const source = `import { openSessionCorrelation } from './src/delivery/sqlite-session-correlation.ts';
+      try { const handle = openSessionCorrelation(process.argv[1], JSON.parse(process.argv[2])); handle.close(); process.exit(3); }
+      catch (error) { process.exit(error.code === 'busy' ? 0 : 4); }`;
+    const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', source, path, JSON.stringify(target)],
+      { cwd: new URL('..', import.meta.url), stdio: 'pipe', timeout: 10000 });
+    assert.equal(child.error, undefined); assert.equal(child.signal, null); return child.status;
+  };
+  try {
+    assert.equal(probe(), 0);
+    const base = { TEAMS_APP_ID: scope.appId, TEAMS_TENANT_ID: scope.tenantId, DELIVERY_DB: path };
+    assert.equal(parseCorrelationConfig({ ...base, CORRELATION_DB: `${path}.other` }).dbPath, `${path}.other`);
+    assert.equal(probe(), 0, 'unrelated provisioning preflight must not release the live owner');
+    assert.throws(() => parseCorrelationConfig({ ...base, CORRELATION_DB: `${path}.owner.sqlite` }), ConfigurationError);
+    assert.equal(probe(), 0, 'rejected provisioning preflight must not release the live owner');
+  } finally { owner.close(); }
+  assert.equal(probe(), 3, 'a fresh child may open only after the original owner closes');
 });
 
 test('CLI unknown command, missing/malformed config and missing DB fail safely before listening', async (t) => {

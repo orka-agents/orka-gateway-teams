@@ -263,7 +263,7 @@ for (const conversationType of ['groupChat', 'channel'] as const) test(`register
   await runtime.stop(); const sidecar = openSessionCorrelation(correlationDbPath, journalScope); sidecar.close();
 });
 
-test('missing configured sidecar operates without labels and never initializes; corrupt/busy sidecars fail before either live store opens', async (t) => {
+test('missing configured sidecar operates without continuation wording and never initializes; corrupt/busy sidecars fail before either live store opens', async (t) => {
   const f = storage(t); const correlationDbPath = join(f.config.dbPath, '..', 'correlation.sqlite'); f.config.outbound!.correlationDbPath = correlationDbPath;
   const input: EventEnvelope = { ...expectedEvent, sender: { id: 'synthetic-aad', displayName: 'Alice' } };
   const sharedRoute = { ...route, conversation: { ...route.conversation, conversationType: 'groupChat' as const }, requester: input.sender };

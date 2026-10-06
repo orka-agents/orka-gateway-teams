@@ -4,7 +4,7 @@ import { linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { ConfigurationError, parseConfig } from '../src/ingress/config.js';
+import { ConfigurationError, parseConfig, parseCorrelationConfig, validateOutboundConfig } from '../src/ingress/config.js';
 import { receiverConfig, scope } from './support/ingress-auth.js';
 
 function environment() {
@@ -87,6 +87,76 @@ test('optional correlation path snapshots an accessor-backed environment value e
     assert.equal(parseConfig(env, 'serve').outbound?.correlationDbPath, initial);
     assert.equal(reads, 1);
   }
+});
+
+test('correlation provisioning checks all supplied optional storage footprints, including absent files', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'teams-correlation-init-')); t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const ingress = join(directory, 'inbox.sqlite'); const delivery = join(directory, 'journal.sqlite'); const correlation = join(directory, 'correlation.sqlite');
+  const base = { TEAMS_APP_ID: scope.appId, TEAMS_TENANT_ID: scope.tenantId, CORRELATION_DB: correlation };
+  const sidecars = ['', '-journal', '-wal', '-shm'];
+  for (const optional of [{ INGRESS_DB: ingress }, { DELIVERY_DB: delivery }, { INGRESS_DB: ingress, DELIVERY_DB: delivery }]) {
+    const mains = [...(optional.INGRESS_DB === undefined ? [] : [ingress]),
+      ...(optional.DELIVERY_DB === undefined ? [] : [delivery, `${delivery}.owner.sqlite`])];
+    for (const main of mains) for (const suffix of sidecars) {
+      assert.throws(() => parseCorrelationConfig({ ...base, ...optional, CORRELATION_DB: `${main}${suffix}` }), ConfigurationError);
+    }
+  }
+  for (const main of [correlation, `${correlation}.owner.sqlite`]) for (const suffix of sidecars) {
+    for (const knob of ['INGRESS_DB', 'DELIVERY_DB']) {
+      assert.throws(() => parseCorrelationConfig({ ...base, [knob]: `${main}${suffix}` }), ConfigurationError);
+    }
+  }
+  assert.throws(() => parseCorrelationConfig({ ...base, INGRESS_DB: `${delivery}.owner.sqlite-shm`, DELIVERY_DB: delivery }), ConfigurationError);
+});
+
+test('correlation provisioning rejects canonical parent, final symlink and hardlink aliases by metadata', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'teams-correlation-init-alias-')); t.after(() => rmSync(directory, { recursive: true, force: true }));
+  mkdirSync(join(directory, 'actual')); symlinkSync(join(directory, 'actual'), join(directory, 'alias'));
+  const ingress = join(directory, 'actual', 'inbox.sqlite'); const delivery = join(directory, 'actual', 'journal.sqlite');
+  const base = { TEAMS_APP_ID: scope.appId, TEAMS_TENANT_ID: scope.tenantId };
+  assert.throws(() => parseCorrelationConfig({ ...base, INGRESS_DB: ingress, CORRELATION_DB: join(directory, 'alias', 'inbox.sqlite-wal') }), ConfigurationError);
+  for (const [knob, path] of [['INGRESS_DB', ingress], ['DELIVERY_DB', delivery]] as const) {
+    for (const reserved of [path, `${path}-wal`, ...(knob === 'DELIVERY_DB' ? [`${path}.owner.sqlite-shm`] : [])]) {
+      writeFileSync(reserved, 'synthetic reserved inode', { mode: 0o600 });
+      for (const aliasKind of ['symlink', 'hardlink']) for (const suffix of ['', '.owner.sqlite-journal']) {
+        const correlation = join(directory, `${knob}-${aliasKind}-${suffix || 'main'}.sqlite`);
+        const alias = `${correlation}${suffix}`;
+        if (aliasKind === 'symlink') symlinkSync(reserved, alias); else linkSync(reserved, alias);
+        try { assert.throws(() => parseCorrelationConfig({ ...base, [knob]: path, CORRELATION_DB: correlation }), ConfigurationError); }
+        finally { rmSync(alias); }
+      }
+    }
+  }
+});
+
+test('correlation provisioning captures every supplied storage knob once, including optional absence', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'teams-correlation-init-snapshot-')); t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const correlation = join(directory, 'correlation.sqlite'); const ingress = join(directory, 'inbox.sqlite'); const delivery = join(directory, 'delivery.sqlite');
+  for (const initial of [{ INGRESS_DB: ingress, DELIVERY_DB: undefined }, { INGRESS_DB: undefined, DELIVERY_DB: delivery },
+    { INGRESS_DB: ingress, DELIVERY_DB: delivery }, { INGRESS_DB: undefined, DELIVERY_DB: undefined }]) {
+    const reads = { CORRELATION_DB: 0, INGRESS_DB: 0, DELIVERY_DB: 0 };
+    const env: NodeJS.ProcessEnv = { TEAMS_APP_ID: scope.appId, TEAMS_TENANT_ID: scope.tenantId,
+      get CORRELATION_DB() { return ++reads.CORRELATION_DB === 1 ? correlation : undefined; },
+      get INGRESS_DB() { return ++reads.INGRESS_DB === 1 ? initial.INGRESS_DB : correlation; },
+      get DELIVERY_DB() { return ++reads.DELIVERY_DB === 1 ? initial.DELIVERY_DB : correlation; } };
+    assert.deepEqual(parseCorrelationConfig(env), { dbPath: correlation, scope: { appId: scope.appId, tenantId: scope.tenantId } });
+    assert.deepEqual(reads, { CORRELATION_DB: 1, INGRESS_DB: 1, DELIVERY_DB: 1 });
+  }
+});
+
+test('correlation provisioning validates supplied optional paths without requiring them or Orka scope', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'teams-correlation-init-paths-')); t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const correlation = join(directory, 'correlation.sqlite');
+  const env = { TEAMS_APP_ID: scope.appId, TEAMS_TENANT_ID: scope.tenantId, CORRELATION_DB: correlation };
+  assert.deepEqual(parseCorrelationConfig(env), { dbPath: correlation, scope: { appId: scope.appId, tenantId: scope.tenantId } });
+  for (const knob of ['INGRESS_DB', 'DELIVERY_DB']) for (const path of ['', 'relative.sqlite', join(directory, 'missing-parent', 'store.sqlite')]) {
+    assert.throws(() => parseCorrelationConfig({ ...env, [knob]: path }), ConfigurationError);
+  }
+});
+
+test('optional correlation provisioning does not relax required ingress paths for outbound library validation', () => {
+  const outbound = { dbPath: '/tmp/teams-config-delivery.sqlite', bearerToken: 'synthetic-outbound-token', host: '127.0.0.1', port: 3979 };
+  assert.throws(() => validateOutboundConfig(outbound, undefined as unknown as string, 'synthetic-ingress-token', receiverConfig), ConfigurationError);
 });
 
 test('init-delivery requires only nonsecret scope and delivery path, not serve credentials or an inbox', () => {

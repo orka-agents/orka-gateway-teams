@@ -20,6 +20,8 @@ export function parseCorrelationConfig(env: NodeJS.ProcessEnv): { dbPath: string
   try {
     if (parseStorageBackend(env) !== 'sqlite') fail();
     const dbPath = absolutePath(env.CORRELATION_DB);
+    const ingressPath = env.INGRESS_DB; const deliveryPath = env.DELIVERY_DB;
+    validateStoragePaths(ingressPath, deliveryPath, dbPath);
     return { dbPath, scope: { appId: guid(env.TEAMS_APP_ID), tenantId: guid(env.TEAMS_TENANT_ID) } };
   } catch { throw new ConfigurationError(); }
 }
@@ -118,7 +120,7 @@ export function validateOutboundConfig(input: OutboundConfig, ingressPath: strin
     const http = validateOutboundServerConfig(input, ingressToken, receiver);
     const dbPath = absolutePath(input.dbPath);
     const correlationDbPath = input.correlationDbPath === undefined ? undefined : absolutePath(input.correlationDbPath);
-    validateStoragePaths(ingressPath, dbPath, correlationDbPath);
+    validateStoragePaths(absolutePath(ingressPath), dbPath, correlationDbPath);
     return Object.freeze({ dbPath, ...http, ...(correlationDbPath === undefined ? {} : { correlationDbPath }) });
   } catch { throw new ConfigurationError(); }
 }
@@ -147,14 +149,16 @@ export function assertCaSeparation(caFile: string | undefined, paths: readonly s
 }
 
 /** Metadata-only preflight: never open/close an ordinary fd on a live SQLite inode. */
-function validateStoragePaths(ingressPath: string, deliveryPath: string, correlationPath?: string): void {
+function validateStoragePaths(ingressPath: string | undefined, deliveryPath: string | undefined, correlationPath?: string): void {
   try {
     const canonical = (input: string) => {
       const path = absolutePath(input); return join(realpathSync(dirname(path)), basename(path));
     };
-    const ingress = canonical(ingressPath); const delivery = canonical(deliveryPath);
+    const ingress = ingressPath === undefined ? undefined : canonical(ingressPath);
+    const delivery = deliveryPath === undefined ? undefined : canonical(deliveryPath);
     const correlation = correlationPath === undefined ? undefined : canonical(correlationPath);
-    const paths = [ingress, delivery, `${delivery}.owner.sqlite`,
+    const paths = [...(ingress === undefined ? [] : [ingress]),
+      ...(delivery === undefined ? [] : [delivery, `${delivery}.owner.sqlite`]),
       ...(correlation === undefined ? [] : [correlation, `${correlation}.owner.sqlite`])].flatMap((path) =>
       [path, `${path}-journal`, `${path}-wal`, `${path}-shm`]);
     const names = new Set<string>(); const inodes = new Set<string>();
