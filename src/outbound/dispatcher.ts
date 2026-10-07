@@ -1,3 +1,4 @@
+import { addAbortListener } from 'node:events';
 import { createSessionObservation } from '../delivery/session-correlation.js';
 import { validateOutcome, validateScope } from '../delivery/identity.js';
 import type { BeginDeliveryResult, DeliveryClaim, DeliveryOutcome } from '../delivery/types.js';
@@ -102,13 +103,19 @@ export function createDeliveryDispatcher(options: DispatcherOptions): DeliveryDi
     deliver(request, context: DeliveryContext = {}) {
       const deadline = Math.min(performance.now() + 9000, context.deadline ?? Infinity);
       const controller = new AbortController(); controllers.add(controller);
-      const signal = context.signal ? AbortSignal.any([context.signal, controller.signal]) : controller.signal;
+      const caller = context.signal;
+      // Callers may reuse a long-lived signal. Release its forwarding listener
+      // after dispatch/settlement, without weakening stop or retirement fences.
+      const forwardCaller = () => controller.abort(caller!.reason);
+      if (caller?.aborted) forwardCaller();
+      const subscription = caller && !caller.aborted ? addAbortListener(caller, forwardCaller) : undefined;
       let resolve!: (value: DeliveryResponse) => void;
       const pending = new Promise<DeliveryResponse>((done) => { resolve = done; });
       // Register before synchronous callbacks; dispatch takes its deep snapshot
       // before calling the async-compatible journal, not after its first await.
       work.add(pending);
-      void dispatch(request, signal, deadline, () => controller.abort()).then(resolve, () => { poison(); resolve(retryable); });
+      void dispatch(request, controller.signal, deadline, () => controller.abort())
+        .finally(() => subscription?.[Symbol.dispose]()).then(resolve, () => { poison(); resolve(retryable); });
       void pending.then(() => { work.delete(pending); controllers.delete(controller); });
       return pending;
     },
