@@ -19,7 +19,7 @@ import type { ForeignOwnerFenceV2, TableBinding } from '../storage/table/types.j
 import { createTableDeliveryJournalV2, TableDeliveryStartupFailure } from '../delivery/table-journal.js';
 import { auditConfig, auditFields } from '../storage/table/audit.js';
 import type { ServeConfig } from './config.js';
-import { logIngress } from './logger.js';
+import { logIngress, startProcessMemoryDiagnostics } from './logger.js';
 import { createOrkaClient } from './client.js';
 import { createIngressPort, initializeIngressStore, openIngressStore } from './store.js';
 import type { IngressPort, IngressScope, StoreOptions } from './types.js';
@@ -308,7 +308,8 @@ function readCaBundle(path: string): Buffer {
 
 async function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
   let runtime: IngressRuntime | undefined; const abort = new AbortController();
-  const shutdown = () => { abort.abort(); if (runtime) void runtime.stop().catch(() => {}); };
+  let stopDiagnostics: (() => void) | undefined;
+  const shutdown = () => { stopDiagnostics?.(); abort.abort(); if (runtime) void runtime.stop().catch(() => {}); };
   try {
     if (args.length !== 1 || !['init', 'init-delivery', 'init-correlation', 'serve', 'recover-ingress', 'recover-delivery'].includes(args[0]!)) throw new ConfigurationError();
     if (args[0] === 'init-correlation') {
@@ -334,7 +335,8 @@ async function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
     process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
     // No environment-controlled cloud, JWKS or authentication override enters here.
     runtime = await startIngressRuntime(config, {}, abort.signal);
-    if (!abort.signal.aborted) logIngress('listening'); else shutdown();
+    if (!abort.signal.aborted) { logIngress('listening'); stopDiagnostics = startProcessMemoryDiagnostics(); }
+    else shutdown();
     await runtime.done; logIngress('stopped'); return 0;
   } catch (error) {
     if (error instanceof RecoveryFailure) logIngress('operator-recovery-failed', error.reason);
@@ -347,6 +349,7 @@ async function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
     else logIngress('startup-failed', 'unavailable');
     return 1;
   } finally {
+    stopDiagnostics?.();
     process.off('SIGINT', shutdown); process.off('SIGTERM', shutdown);
   }
 }

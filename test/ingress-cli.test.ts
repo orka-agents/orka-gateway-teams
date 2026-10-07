@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { existsSync, linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -13,9 +13,11 @@ import { initializeSessionCorrelation, openSessionCorrelation } from '../src/del
 import { ConfigurationError, parseCorrelationConfig } from '../src/ingress/config.js';
 import { openIngressStore } from '../src/ingress/store.js';
 
-function cli(t: TestContext, args: string[], env: NodeJS.ProcessEnv, early = false) {
-  const child = spawn(process.execPath, ['--import', 'tsx', ...(early ? ['--import', './test/support/setup-early-signal.ts'] : []), 'src/ingress/main.ts', ...args], {
-    cwd: new URL('..', import.meta.url), env: { PATH: process.env.PATH, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+function cli(t: TestContext, args: string[], env: NodeJS.ProcessEnv, early = false, diagnostics?: string) {
+  const child = spawn(process.execPath, ['--import', 'tsx', ...(early ? ['--import', './test/support/setup-early-signal.ts'] : []),
+    ...(diagnostics ? ['--import', './test/support/ingress-memory-preload.ts'] : []), 'src/ingress/main.ts', ...args], {
+    cwd: new URL('..', import.meta.url), env: { PATH: process.env.PATH, ...env,
+      ...(diagnostics ? { MEMORY_DIAGNOSTICS_TEST: diagnostics } : {}) }, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = ''; let stderr = '';
   child.stdout.on('data', (chunk) => { stdout += chunk; }); child.stderr.on('data', (chunk) => { stderr += chunk; });
   const finished = new Promise<number | null>((resolve, reject) => { child.once('error', reject); child.once('exit', resolve); });
@@ -162,6 +164,86 @@ test('CLI startup SIGTERM suppresses listening announcement and releases the ini
   assert.equal(await run.finished, 1); assert.ok(!run.output().includes('listening'));
   assert.ok(run.output().includes('teams-ingress: startup-failed: cancelled'));
   for (const secret of [env.TEAMS_CLIENT_SECRET, env.ORKA_BEARER_TOKEN]) assert.ok(!run.output().includes(secret));
+  const store = openIngressStore(env.INGRESS_DB, scope); store.close();
+});
+
+for (const mode of ['SIGTERM', 'SIGINT', 'natural-failure']) test(`CLI memory diagnostics start after listening and clean up on ${mode}`, async t => {
+  const probe = createServer(); await new Promise<void>(resolve => probe.listen(0, '127.0.0.1', resolve));
+  const address = probe.address(); assert.ok(address && typeof address !== 'string');
+  await new Promise<void>(resolve => probe.close(() => resolve()));
+  const env = { ...envFixture(t), TEAMS_CLIENT_SECRET: randomUUID(), ORKA_BEARER_TOKEN: randomUUID(),
+    TEAMS_RECIPIENT_IDS: JSON.stringify(receiverConfig.recipientIds), TEAMS_SERVICE_URLS: JSON.stringify(receiverConfig.serviceUrls),
+    INGRESS_PORT: String(address.port) };
+  assert.equal(await cli(t, ['init'], env).finished, 0);
+  const run = cli(t, ['serve'], env, false, mode);
+  assert.equal(await run.finished, mode === 'natural-failure' ? 1 : 0);
+  const output = run.output();
+  assert.ok(output.includes('teams-ingress: listening'));
+  assert.ok(output.includes(mode === 'natural-failure' ? 'teams-ingress: storage-failed: runtime-failure' : 'teams-ingress: stopped'));
+  const records = output.split('\n').filter(line => line.startsWith('teams-ingress: process-memory '));
+  assert.equal(records.length, 2);
+  assert.deepEqual(records.map(line => JSON.parse(line.slice('teams-ingress: process-memory '.length))),
+    [{ rss: 101, heapTotal: 202, heapUsed: 303, external: 404, arrayBuffers: 505 },
+      { rss: 101, heapTotal: 202, heapUsed: 303, external: 404, arrayBuffers: 505 }]);
+  assert.ok(!output.slice(0, output.indexOf('diagnostics-test: before-first-minute')).includes('process-memory'));
+  assert.ok(!output.slice(output.indexOf('diagnostics-test: two-minutes')).includes('process-memory'));
+  if (mode !== 'natural-failure') assert.ok(output.includes('diagnostics-test: signal-draining'));
+  assert.ok(output.includes('diagnostics-test: after-runtime'));
+  for (const sentinel of ['private', env.TEAMS_CLIENT_SECRET, env.ORKA_BEARER_TOKEN]) assert.ok(!output.includes(sentinel));
+  if (mode === 'natural-failure') chmodSync(env.INGRESS_DB, 0o600);
+  const store = openIngressStore(env.INGRESS_DB, scope); store.close();
+});
+
+test('CLI memory diagnostics never start for initialization commands', async t => {
+  const env = envFixture(t);
+  for (const [command, variables] of [
+    ['init', env], ['init-delivery', { ...env, DELIVERY_DB: `${env.INGRESS_DB}.delivery` }],
+    ['init-correlation', { TEAMS_APP_ID: scope.appId, TEAMS_TENANT_ID: scope.tenantId, CORRELATION_DB: `${env.INGRESS_DB}.correlation` }],
+  ] as [string, NodeJS.ProcessEnv][]) {
+    const run = cli(t, [command], variables, false, 'clock-only');
+    assert.equal(await run.finished, 0); assert.ok(run.output().includes('teams-ingress: initialized'));
+    assert.ok(run.output().includes('diagnostics-test: without-listening'));
+    assert.ok(!run.output().includes('process-memory'));
+  }
+});
+
+for (const command of ['recover-ingress', 'recover-delivery']) test(`CLI memory diagnostics never start for ${command}`, async t => {
+  const env = { TEAMS_APP_ID: scope.appId, TEAMS_TENANT_ID: scope.tenantId, ORKA_BASE_URL: scope.orkaBaseUrl,
+    ORKA_GATEWAY_NAMESPACE: scope.gatewayNamespace, ORKA_GATEWAY_NAME: scope.gatewayName,
+    GATEWAY_STORAGE_BACKEND: 'table-v2', TABLE_ACCOUNT: 'example123', TABLE_NAME: 'journal',
+    TABLE_INGRESS_STORE_ID: 'stable', TABLE_DELIVERY_STORE_ID: 'stable',
+    TABLE_MANAGED_IDENTITY_HOST: 'imds', TABLE_MANAGED_IDENTITY_CLIENT_ID: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+    TABLE_AUDIT_MAX_PAGES: '100', TABLE_AUDIT_MAX_BYTES: '10485760', TABLE_AUDIT_MAX_DURATION_MS: '30000',
+    TABLE_AUDIT_MAX_TRACKING_BYTES: '1048576', TABLE_MAX_INDEX_BYTES: '16777216',
+    TABLE_RECOVERY_EXPECTED_OWNER: '22222222-2222-4222-8222-222222222222', TABLE_RECOVERY_EXPECTED_EPOCH: '1',
+    TABLE_RECOVERY_ATTESTATION_DIGEST: 'b'.repeat(64) };
+  const run = cli(t, [command], env, false, 'early-signal');
+  assert.equal(await run.finished, 1);
+  assert.ok(run.output().includes('teams-ingress: operator-recovery-failed: cancelled'));
+  assert.ok(run.output().includes('diagnostics-test: starting'));
+  assert.ok(run.output().includes('diagnostics-test: without-listening'));
+  assert.ok(!run.output().includes('process-memory'));
+});
+
+test('CLI memory diagnostics never start for invalid configuration, failed binding or startup cancellation', async t => {
+  const occupied = createServer(); await new Promise<void>(resolve => occupied.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise<void>(resolve => occupied.close(() => resolve())));
+  const address = occupied.address(); assert.ok(address && typeof address !== 'string');
+  const env = { ...envFixture(t), TEAMS_CLIENT_SECRET: randomUUID(), ORKA_BEARER_TOKEN: randomUUID(),
+    TEAMS_RECIPIENT_IDS: JSON.stringify(receiverConfig.recipientIds), TEAMS_SERVICE_URLS: JSON.stringify(receiverConfig.serviceUrls),
+    INGRESS_PORT: String(address.port) };
+  assert.equal(await cli(t, ['init'], env).finished, 0);
+  for (const [variables, mode, category] of [
+    [{}, 'clock-only', 'configuration-failed'],
+    [{ ...env, INGRESS_DB: `${env.INGRESS_DB}.missing` }, 'clock-only', 'store-open-failed'],
+    [env, 'clock-only', 'listener-failed'], [env, 'early-signal', 'startup-failed: cancelled'],
+  ] as [NodeJS.ProcessEnv, string, string][]) {
+    const run = cli(t, ['serve'], variables, false, mode);
+    assert.equal(await run.finished, 1); assert.ok(run.output().includes(`teams-ingress: ${category}`));
+    assert.ok(run.output().includes('diagnostics-test: without-listening'));
+    assert.ok(!run.output().includes('teams-ingress: listening')); assert.ok(!run.output().includes('process-memory'));
+    for (const sentinel of ['private', env.TEAMS_CLIENT_SECRET, env.ORKA_BEARER_TOKEN]) assert.ok(!run.output().includes(sentinel));
+  }
   const store = openIngressStore(env.INGRESS_DB, scope); store.close();
 });
 

@@ -128,8 +128,15 @@ supplemental verification. SDK JWT verification must also pass before its awaite
 raw callback runs; the default activity/OAuth pipeline is not dispatched. Auth
 bypass is explicitly false and cloud explicitly public, regardless of SDK env
 variables. SDK logger/children discard every argument even under debug settings.
-Only fixed lifecycle/error categories are logged; no activities, JWTs, credentials,
-SDK error objects, sender labels, or request URLs are logged or echoed.
+Application stderr logs contain fixed lifecycle/error categories and, only while
+CLI `serve` is listening, one `teams-ingress: process-memory` JSON record every
+60 seconds. Its only fields are numeric `rss`, `heapTotal`, `heapUsed`, `external`
+and `arrayBuffers` from `process.memoryUsage()`, in bytes. The first sample follows
+a full interval; the unreferenced timer stops immediately on SIGINT/SIGTERM and is
+cleared on CLI completion/failure. Initialization and operator recovery do not
+sample. These diagnostics detect growth; they do not fix it or force GC. No
+activities, JWTs, credentials, SDK error objects, sender labels, request URLs or
+arbitrary process/environment data are logged or echoed.
 
 Supplemental `jsonwebtoken` RS256 verification uses the actual selected RSA JWK,
 which must endorse `msteams`; exact issuer `https://api.botframework.com`, exact
