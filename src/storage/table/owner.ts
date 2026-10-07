@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { addAbortListener } from 'node:events';
 import { bindTable, bytes, dataRow, digest, etag, fail, integer, object } from './codec.js';
 import { OwnedTableClient } from './client.js';
 import type { WorkContext } from './client.js';
@@ -367,11 +368,21 @@ class TableKernel<F extends MetadataFormat> {
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.limits.cleanupTimeoutMs);
     return { context: { signal: controller.signal, deadline: performance.now() + this.limits.cleanupTimeoutMs }, done: () => clearTimeout(timer) };
   }
-  private write(expected: Metadata, originalETag: string | undefined, actions: readonly DataAction[], context: WorkContext): Promise<void> {
+  private async write(expected: Metadata, originalETag: string | undefined, actions: readonly DataAction[], context: WorkContext): Promise<void> {
     if (this.invalidated) throw new TableError('unresolved');
     // Revoke pre-POST permission even across token awaits and independent cleanup
     // contexts. Reads and actual token/request/socket drain remain independent.
-    return this.client.write(expected as MetadataFor<F>, originalETag, actions, { ...context, signal: AbortSignal.any([context.signal, this.writePermission.signal]) });
+    // Explicit disposal avoids retaining AbortSignal.any bookkeeping on the
+    // kernel-lifetime permission signal after every completed idle poll.
+    const controller = new AbortController();
+    const forwardCaller = () => controller.abort(context.signal.reason);
+    const forwardPermission = () => controller.abort(this.writePermission.signal.reason);
+    if (context.signal.aborted) forwardCaller();
+    if (this.writePermission.signal.aborted) forwardPermission();
+    const caller = context.signal.aborted ? undefined : addAbortListener(context.signal, forwardCaller);
+    const permission = this.writePermission.signal.aborted ? undefined : addAbortListener(this.writePermission.signal, forwardPermission);
+    try { await this.client.write(expected as MetadataFor<F>, originalETag, actions, { ...context, signal: controller.signal }); }
+    finally { caller?.[Symbol.dispose](); permission?.[Symbol.dispose](); }
   }
   private async transition(original: StoredRecord, expected: Metadata, actions: readonly DataAction[], context: WorkContext): Promise<Confirmed> {
     if (this.invalidated) throw new TableError('unresolved');

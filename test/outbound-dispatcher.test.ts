@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { fork } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { getEventListeners } from 'node:events';
 import { Client } from '@microsoft/teams.common/http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -100,6 +101,54 @@ test('claim is committed before sending; receipt is durable before V1 success an
   assert.deepEqual(await dispatcher.deliver({ ...finalDelivery, text: 'different', deliveryId: 'conflicting-alias' }), nonRetryable);
   assert.deepEqual(await dispatcher.deliver({ ...finalDelivery, idempotencyId: 'different-stable' }), nonRetryable);
   assert.equal(calls, 1); assert.equal(dispatcher.healthy, true);
+});
+
+for (const outcome of ['receipt', 'unknown', 'settlement-failure'] as const)
+  test(`reused caller abort forwarding is removed after ${outcome}`, async t => {
+    const f = fixture(t); const caller = new AbortController(); const gate = deferred<ProviderResult>();
+    const started = deferred<void>(); let sendSignal: AbortSignal | undefined;
+    const dispatcher = f.create({ sender: { async send(_saved, _message, context) {
+      sendSignal = context!.signal; started.resolve(); return gate.promise;
+    }, async stop() {} }, ...(outcome === 'settlement-failure' ? {
+      journal: { begin: f.journal.begin.bind(f.journal), settle() { throw new Error('synthetic settlement failure'); }, close() {} },
+    } : {}) });
+    const pending = dispatcher.deliver(finalDelivery, { signal: caller.signal });
+    await started.promise;
+    const listeners = getEventListeners(caller.signal, 'abort').length;
+    gate.resolve(outcome === 'unknown' ? { kind: 'unknown' } : delivered);
+    const result = await pending;
+    assert.deepEqual(result, outcome === 'receipt' ? response : outcome === 'unknown' ? nonRetryable : retryable);
+    assert.equal(listeners, 1);
+    assert.equal(getEventListeners(caller.signal, 'abort').length, 0);
+    assert.equal(sendSignal!.aborted, true); // Retirement still fences late provider work.
+    caller.abort(); assert.equal(getEventListeners(caller.signal, 'abort').length, 0);
+  });
+
+test('caller abort forwarding cannot be suppressed and still retains an acknowledged receipt', async t => {
+  const f = fixture(t); const caller = new AbortController(); const gate = deferred<ProviderResult>();
+  const started = deferred<void>(); let sendSignal: AbortSignal | undefined;
+  const reason = new Error('synthetic disconnect');
+  caller.signal.addEventListener('abort', event => event.stopImmediatePropagation(), { once: true });
+  const dispatcher = f.create({ sender: { async send(_saved, _message, context) {
+    sendSignal = context!.signal; started.resolve(); return gate.promise;
+  }, async stop() {} } });
+  const pending = dispatcher.deliver(finalDelivery, { signal: caller.signal });
+  await started.promise; caller.abort(reason);
+  const aborted = sendSignal!.aborted; const forwardedReason = sendSignal!.reason;
+  gate.resolve(delivered); assert.deepEqual(await pending, response);
+  assert.equal(aborted, true); assert.equal(forwardedReason, reason);
+  assert.equal(getEventListeners(caller.signal, 'abort').length, 0);
+  assert.equal(operation(f.path).state, 'delivered');
+});
+
+test('an already-aborted caller synchronously prevents delivery admission', async t => {
+  const f = fixture(t); const caller = new AbortController(); caller.abort();
+  const dispatcher = f.create({ journal: {
+    begin() { throw new Error('must not admit a cancelled caller'); },
+    settle() { throw new Error('must not settle an unclaimed request'); }, close() {},
+  } });
+  assert.deepEqual(await dispatcher.deliver(finalDelivery, { signal: caller.signal }), retryable);
+  assert.equal(dispatcher.healthy, true); assert.equal(getEventListeners(caller.signal, 'abort').length, 0);
 });
 
 test('concurrent aliases return inFlight without a second provider call', async (t) => {

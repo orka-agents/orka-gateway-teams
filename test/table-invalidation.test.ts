@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { getEventListeners } from 'node:events';
 import { test as nodeTest } from 'node:test';
 import type { TestContext } from 'node:test';
 import { createTableKernel as createV1, createTableKernelV2 as createV2 } from '../src/storage/table/owner.js';
@@ -85,6 +86,40 @@ for (const boundary of ['initialize', 'acquire', 'mutate', 'release', 'barrier']
     t.diagnostic(`held/returned tokens: ${heldTokens}/${returnedTokens}; grants: ${grants}; clean release: ${cleanRelease}; post-invalidation writes: 0`);
   });
 }
+
+test('caller cancellation reaches a held write token and forwarding stays until actual drain', async t => {
+  const s = await tableService(t); const caller = new AbortController(); const gate = deferred<string>();
+  let hold = false; let heldSignal: AbortSignal | undefined;
+  const k = createTableKernel(tableBinding, { ...s.dependencies, token: async (...args) => {
+    if (hold) { hold = false; heldSignal = args[1].signal; return gate.promise; }
+    return s.dependencies.token(...args);
+  } });
+  await k.initialize(); await k.acquire(); await k.scan(); const writes = s.stats.writes;
+  const operations: string[] = [];
+  s.controls.hook = e => { if (e.actions[0]) operations.push(String(e.actions[0].entity.Operation)); e.reply(); };
+  const reason = new Error('synthetic caller cancellation');
+  caller.signal.addEventListener('abort', event => event.stopImmediatePropagation(), { once: true });
+  const pending = k.mutate(input, () => { hold = true; return plan(); }, { signal: caller.signal });
+  const rejected = assert.rejects(pending);
+  await eventually(() => !!heldSignal);
+  const listeners = getEventListeners(caller.signal, 'abort').length;
+  caller.abort(reason);
+  const aborted = heldSignal!.aborted; const heldPending = k.status().pending;
+  gate.resolve(syntheticToken); await rejected;
+  await eventually(() => k.status().pending === 0);
+  await k.close();
+  // Admission, write forwarding, and the synthetic propagation blocker remain
+  // attached during held work; the SDK may also subscribe while draining.
+  assert.ok(listeners >= 3);
+  // The existing SDK-token boundary uses its own AbortController; its reason is
+  // deliberately not the caller's, but cancellation must already have reached it.
+  assert.equal(aborted, true); assert.equal(heldPending, 1);
+  assert.equal(getEventListeners(caller.signal, 'abort').length, 0);
+  assert.deepEqual(operations, ['barrier', 'release']); // No caller mutation POST, only reconciliation and close.
+  assert.equal(s.stats.writes, writes + operations.length);
+  assert.equal(s.rows.get('M')?.Owner, '');
+  assert.equal(s.stats.requests, s.stats.socketCloses);
+});
 
 test('invalidation during committed release readback rejects close after drain without denying the release', async t => {
   const s = await tableService(t); const k = createTableKernel(tableBinding, s.dependencies);
