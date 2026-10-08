@@ -119,7 +119,7 @@ export function hasTableCanary(rows: readonly Record<string, unknown>[], canarie
 export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), 'teams-table-cli-'));
   const fixtureDir = join(directory, 'fixture'); const work = join(directory, 'work');
-  const runs: ProcessRun[] = [];
+  const runs: ProcessRun[] = []; let fixtureOwners = 0;
   t.after(async () => {
     // Failure cleanup runs before fixture servers close. It is NOT drain evidence.
     await cleanupTableCliRuns(runs);
@@ -228,6 +228,10 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
     });
     const run = { child, done, output: () => stderr, ...(name === undefined ? {} : { name }) }; runs.push(run); return run;
   }
+  async function assertServerDrain() {
+    await until(() => observers.every(observer => observer.drained()), 'native server request/socket drain BEFORE force-close');
+    tables.drained(); identity.drained(); assert.equal(effects.contract, true, 'native fixed-purpose wire contract');
+  }
   async function finished(run: ProcessRun, code: number, event: string, native = true) {
     await until(() => run.child.exitCode !== null || run.child.signalCode !== null, 'CLI exited without forced fixture cleanup');
     const result = await run.done;
@@ -239,13 +243,14 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
     const lines = result.stderr.split('\n').filter(line => line.startsWith(marker)); assert.equal(lines.length, 1);
     const counts = JSON.parse(lines[0]!.slice(marker.length)) as Record<string, number>;
     assert.equal(counts.unexpected, 0); assert.equal(counts.requests, counts.requestCloses); assert.equal(counts.sockets, counts.socketCloses);
-    assert.equal(counts.requests, counts.sockets); if (native) assert.ok(counts.table! > 0 && counts.identity! > 0);
+    assert.equal(counts.requests! >= counts.sockets!, true); if (native) assert.ok(counts.table! > 0 && counts.identity! > 0);
     if (run.name) {
       const state = await execute('docker', ['inspect', '--format', '{{.State.Status}} {{.State.ExitCode}} {{.Config.User}} {{.HostConfig.ReadonlyRootfs}}', run.name]);
       assert.equal(state.code, 0); assert.equal(state.stdout.trim(), `exited ${code} 1000:1000 true`);
     }
-    await until(() => observers.every(observer => observer.drained()), 'native server request/socket drain BEFORE force-close');
-    tables.drained(); identity.drained(); assert.equal(effects.contract, true, 'native fixed-purpose wire contract');
+    // This child's native counters prove its own actual close. Live peer clients
+    // legitimately retain idle pooled sockets; global server proof follows their normal close.
+    if (fixtureOwners === 0 && runs.every(peer => peer.child.exitCode !== null || peer.child.signalCode !== null)) await assertServerDrain();
     assert.deepEqual(readdirSync(work), [], 'no SQLite or other CLI artifacts'); return counts;
   }
   async function start() {
@@ -290,7 +295,7 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
     const binding = kind === 'ingress' ? { kind, account: common.TABLE_ACCOUNT, table: common.TABLE_NAME,
       storeId: common.TABLE_INGRESS_STORE_ID, scope } : { kind, account: common.TABLE_ACCOUNT, table: common.TABLE_NAME,
       storeId: common.TABLE_DELIVERY_STORE_ID, scope: { appId: scope.appId, tenantId: scope.tenantId } };
-    const previous = createTableKernelV2(binding, { token: async () => syntheticToken, request: tables.request });
+    const previous = createTableKernelV2(binding, { token: async () => syntheticToken, request: tables.request }); fixtureOwners++;
     await previous.acquire();
     const before = rows.get('M')!;
     assert.notEqual(before.Owner, '', 'public owner handle acquired the initialized store');
@@ -306,7 +311,8 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
     const audit = rows.get(`control_${Buffer.from(`control_recovery:${exit.auditId}`).toString('base64url')}`)!;
     assert.ok(audit); assert.equal(exit.auditDigest, audit.Digest);
     assert.equal([...rows.keys()].filter(key => key.startsWith('control_')).length, auditCount + 1);
-    await assert.rejects(previous.close(), 'superseded owner cannot release the recovered store');
+    await assert.rejects(previous.close(), 'superseded owner cannot release the recovered store'); fixtureOwners--;
+    await assertServerDrain();
   }
   assert.equal(identity.calls.bot, 0); assert.equal(effects.entra, 0);
   // Strict verification accepts the real signature, but the default SDK fetches

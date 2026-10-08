@@ -32,7 +32,8 @@ async function characterize(t: TestContext, config: PromiseCase & { tableUrl: st
       callbacks: result.callbacks === (config.callback === 'record' ? 1 : config.callback === 'endPass' ? 2 : 5),
       noLaterCallbacks: result.laterCallbacks === 0, constructorReads: result.constructorReads === (config.malformed ? 1 : 0),
       unhandled: result.unhandled === (config.malformed ? 1 : 0), callbackRejections: result.callbackRejections === (config.malformed ? 1 : 0),
-      nativeDrained: typeof result.requests === 'number' && result.requests > 0 && result.requests === result.requestCloses && result.requests === result.socketCloses,
+      nativeDrained: typeof result.requests === 'number' && result.requests > 0 && result.requests === result.requestCloses && result.requests === result.socketCloses &&
+        typeof result.sockets === 'number' && result.sockets > 0 && result.sockets <= result.requests && result.sockets === result.physicalSocketCloses,
     };
   });
   const timer = setTimeout(() => { timedOut = true; stop(); }, 15000);

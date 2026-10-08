@@ -24,7 +24,8 @@ process.once('message', (config: Config) => {
 });
 
 async function run(config: Config) {
-  let requests = 0; let requestCloses = 0; let socketCloses = 0;
+  let requests = 0; let requestCloses = 0; let socketCloses = 0; let sockets = 0; let physicalSocketCloses = 0;
+  const socketUses = new WeakMap<import('node:net').Socket, number>();
   const kernel = (config.format === 1 ? createTableKernel : createTableKernelV2)(tableBinding, {
     token: async () => syntheticToken,
     request: ((url: URL, options: https.RequestOptions, callback: (response: IncomingMessage) => void) => {
@@ -32,7 +33,13 @@ async function run(config: Config) {
       const request = https.request(new URL(url.pathname + url.search, config.tableUrl),
         { ...options, hostname: '127.0.0.1', servername: 'localhost', ca: config.tableCA }, callback);
       request.once('close', () => requestCloses++);
-      request.once('socket', socket => socket.once('close', () => socketCloses++));
+      request.once('socket', socket => {
+        const uses = socketUses.get(socket); socketUses.set(socket, (uses ?? 0) + 1);
+        if (uses === undefined) {
+          sockets++;
+          socket.once('close', () => { physicalSocketCloses++; socketCloses += socketUses.get(socket) ?? 0; socketUses.delete(socket); });
+        }
+      });
       return request;
     }) as typeof https.request,
   });
@@ -68,7 +75,7 @@ async function run(config: Config) {
     await new Promise<void>(resolve => setImmediate(resolve));
     return { audit, mutation, laterAudit, close, poisoned, ready, callbacks, laterCallbacks, constructorReads,
       unhandled, callbackRejections, pending: kernel.status().pending, closed: kernel.status().lifecycle === 'closed',
-      requests, requestCloses, socketCloses };
+      requests, requestCloses, socketCloses, sockets, physicalSocketCloses };
   } finally {
     // Always await real kernel/native cleanup, even when setup or observation fails.
     // A hung close makes the parent timeout fail; it is not reported as drained.

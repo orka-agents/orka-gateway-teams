@@ -1,5 +1,7 @@
 import https from 'node:https';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ClientRequest, IncomingMessage } from 'node:http';
+import type { Socket } from 'node:net';
 import { TableClient } from '@azure/data-tables';
 import type { TableEntity, TransactionAction } from '@azure/data-tables';
 import { createHttpHeaders, defaultRetryPolicy, bearerTokenAuthenticationPolicyName, decompressResponsePolicyName,
@@ -20,12 +22,17 @@ export interface AuditPageAllowance { maxBytes: number; exhaust: () => void }
 type RequestKind = { kind: 'read'; row: string } | { kind: 'point-query'; row: string } |
   { kind: 'page'; cursor?: PageCursor; allowance?: AuditPageAllowance } | { kind: 'write'; initialize: boolean };
 interface NativeResponse { status: number; body: Buffer; headers: IncomingMessage['headers'] }
+interface SdkWork { kind: RequestKind; context: WorkContext; consume: (response: NativeResponse) => void }
 function available(context: WorkContext): boolean { return !context.signal.aborted && performance.now() < context.deadline; }
 function unavailable(): TableError { return new TableError('unavailable'); }
 
 /** Public SDK serialization only. No caller can obtain or configure the SDK client. */
 export class OwnedTableClient<F extends MetadataFormat = 1> {
   private readonly work = new Set<Promise<unknown>>();
+  private readonly agent = new https.Agent({ keepAlive: true, maxSockets: 2, maxTotalSockets: 2, maxFreeSockets: 2, maxCachedSessions: 1, scheduling: 'fifo', timeout: 30000 });
+  private readonly sockets = new Map<Socket, Promise<void>>();
+  private readonly sdkWork = new AsyncLocalStorage<SdkWork>();
+  private cachedSdk?: TableClient;
   private closing?: Promise<void>;
   private readonly request: typeof https.request;
   private readonly token: TableDependencies['token'];
@@ -44,7 +51,7 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
     return this.track(async () => {
       if (row !== 'M' && !/^(event|route|delivery|alias|control)_[A-Za-z0-9_-]{1,342}$/u.test(row)) fail();
       let record: StoredFor<F> | undefined; let query = false;
-      const sdk = this.sdk({ kind: 'read', row }, context, response => {
+      const { sdk, work } = this.sdk({ kind: 'read', row }, context, response => {
         if (response.status === 404) {
           const code = errorCode(response);
           if (code === 'EntityNotFound') return;
@@ -53,13 +60,13 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
         if (response.status !== 200) throw unavailable();
         record = readRecord(this.format, this.binding, response.body, row, header(response.headers.etag));
       });
-      await sdk.getEntity(this.binding.partition, row);
+      await this.sdkWork.run(work, () => sdk.getEntity(this.binding.partition, row));
       if (!query) return record;
       // Generic 404 is only permission to disambiguate, never evidence of absence.
       // Both GETs retain this one tracked read and its original deadline/signal.
       if (!available(context)) throw unavailable();
       let received = false; let corrupt = false;
-      const exact = this.sdk({ kind: 'point-query', row }, context, response => {
+      const { sdk: exact, work: exactWork } = this.sdk({ kind: 'point-query', row }, context, response => {
         if (response.status !== 200) throw unavailable();
         const records = readPage(this.format, this.binding, response.body);
         if (records.length > 1 || (records[0] && records[0].row !== row) ||
@@ -71,13 +78,13 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
         .byPage({ maxPageSize: 1 });
       try {
         try {
-          const result = await iterator.next();
+          const result = await this.sdkWork.run(exactWork, () => iterator.next());
           if (!received || result.done) throw new TableError('incomplete');
           if (result.value.continuationToken !== undefined) throw new TableError('corrupt');
           return record;
         } catch (error) {
           corrupt = error instanceof TableError && error.code === 'corrupt'; throw error;
-        } finally { await iterator.return?.(); }
+        } finally { await this.sdkWork.run(exactWork, async () => { await iterator.return?.(); }); }
       } catch (error) {
         // Iterator cleanup must not erase an already observed authority contradiction.
         if (corrupt) throw new TableError('corrupt'); throw error;
@@ -90,7 +97,7 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
       if (allowance && (!Number.isSafeInteger(allowance.maxBytes) || allowance.maxBytes < 1 || allowance.maxBytes > MAX_RESPONSE_BYTES)) fail();
       const gate = allowance ? { maxBytes: allowance.maxBytes, exhaust: () => { exhausted = true; allowance.exhaust(); } } : undefined;
       let page: RawPage<F> | undefined; let parts: Omit<PageCursor, 'token'> = {};
-      const sdk = this.sdk({ kind: 'page', ...(cursor ? { cursor } : {}), ...(gate ? { allowance: gate } : {}) }, context, response => {
+      const { sdk, work } = this.sdk({ kind: 'page', ...(cursor ? { cursor } : {}), ...(gate ? { allowance: gate } : {}) }, context, response => {
         if (response.status !== 200) throw unavailable();
         page = { records: readPage(this.format, this.binding, response.body), size: response.body.length };
         const partition = continuation(response.headers['x-ms-continuation-nextpartitionkey']);
@@ -102,7 +109,7 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
         .byPage({ maxPageSize: 1, ...(cursor ? { continuationToken: cursor.token } : {}) });
       try {
         try {
-          const result = await iterator.next(); if (!page || result.done) throw new TableError('incomplete');
+          const result = await this.sdkWork.run(work, () => iterator.next()); if (!page || result.done) throw new TableError('incomplete');
           const token = result.value.continuationToken;
           if (token !== undefined) {
             if (token.length > 8192 || (!parts.partition && !parts.row)) throw new TableError('corrupt');
@@ -112,7 +119,7 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
         } catch (error) {
           if (allowance && error instanceof TableError && error.code === 'corrupt') corrupt = true;
           throw error;
-        } finally { await iterator.return?.(); }
+        } finally { await this.sdkWork.run(work, async () => { await iterator.return?.(); }); }
       } catch (error) {
         // Cleanup cannot erase already observed corruption or the native body
         // gate. A truncated body must never become decoder input.
@@ -170,18 +177,29 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
       }
     } catch { return Promise.reject(new TableError('invalid-input')); }
     return this.track(async () => {
-      const sdk = this.sdk({ kind: 'write', initialize: originalETag === undefined }, context, () => {});
-      if (originalETag === undefined) await sdk.createEntity(transaction[0]![1]); else await sdk.submitTransaction(transaction);
+      const { sdk, work } = this.sdk({ kind: 'write', initialize: originalETag === undefined }, context, () => {});
+      await this.sdkWork.run(work, async () => {
+        if (originalETag === undefined) await sdk.createEntity(transaction[0]![1]); else await sdk.submitTransaction(transaction);
+      });
     });
   }
   close(): Promise<void> {
-    this.closing ??= Promise.allSettled([...this.work]).then(() => {}); return this.closing;
+    this.closing ??= Promise.allSettled([...this.work]).then(async () => {
+      const closed = [...this.sockets.values()];
+      this.agent.destroy();
+      await Promise.all(closed);
+      this.sdkWork.disable();
+    }); return this.closing;
   }
-  private sdk(kind: RequestKind, context: WorkContext, consume: (response: NativeResponse) => void): TableClient {
+  private sdk(kind: RequestKind, context: WorkContext, consume: (response: NativeResponse) => void): { sdk: TableClient; work: SdkWork } {
+    const work = { kind, context, consume };
+    if (this.cachedSdk) return { sdk: this.cachedSdk, work };
     const sdk = new TableClient(`https://${this.binding.account}.table.core.windows.net`, this.binding.table, {
       retryOptions: { maxRetries: 0 }, redirectOptions: { maxRetries: 0 },
       httpClient: { sendRequest: async (request: PipelineRequest): Promise<PipelineResponse> => {
         try {
+          const current = this.sdkWork.getStore(); if (!current) throw unavailable();
+          const { kind, context, consume } = current;
           const body = request.body === undefined ? '' : request.body;
           if (typeof body !== 'string') throw unavailable();
           this.fence(request, body, kind);
@@ -193,11 +211,12 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
           try {
             // Await the real token callback even after deadline; timeout is not resource drain.
             let token: string;
-            try { token = await this.token('https://storage.azure.com/.default', { signal: signal.signal, deadline: context.deadline }); }
+            // Long-lived token/cache and pooled socket resources must not inherit operation metadata.
+            try { token = await this.sdkWork.exit(() => this.token('https://storage.azure.com/.default', { signal: signal.signal, deadline: context.deadline })); }
             catch { throw unavailable(); }
             if (!available(context) || signal.signal.aborted || typeof token !== 'string' || token.length > 8192 || !/^[A-Za-z0-9._~+/-]+=*$/u.test(token)) throw unavailable();
             this.fence(request, body, kind);
-            response = await this.native(request, body, token, { signal: signal.signal, deadline: context.deadline }, kind.kind === 'page' ? kind.allowance : undefined);
+            response = await this.sdkWork.exit(() => this.native(request, body, token, { signal: signal.signal, deadline: context.deadline }, kind.kind === 'page' ? kind.allowance : undefined));
           } finally { clearTimeout(timer); context.signal.removeEventListener('abort', abort); }
           if (kind.kind !== 'write') {
             if (response.status !== 200 && !(kind.kind === 'read' && response.status === 404)) throw unavailable();
@@ -224,7 +243,8 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
     sdk.pipeline.addPolicy({ name: 'tableContainment', async sendRequest(request, next) {
       try { return await next(request); } catch (error) { throw error instanceof TableError ? error : unavailable(); }
     } }, { phase: 'Serialize', beforePolicies: ['serializationPolicy'] });
-    return sdk;
+    this.cachedSdk = sdk;
+    return { sdk, work };
   }
   private fence(request: PipelineRequest, body: string, kind: RequestKind): void {
     const url = new URL(request.url); const path = decodeURIComponent(url.pathname);
@@ -251,24 +271,33 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
       }
     }
   }
+  private trackSocket(socket: Socket): void {
+    if (this.sockets.has(socket)) return;
+    // Keep the physical-lifetime listener outside the native request's lexical scope.
+    const closed = new Promise<void>(resolve => socket.once('close', () => { this.sockets.delete(socket); resolve(); }));
+    this.sockets.set(socket, closed);
+  }
   private native(request: PipelineRequest, body: string, token: string, context: WorkContext, allowance?: AuditPageAllowance): Promise<NativeResponse> {
     return new Promise((resolve, reject) => {
       let req: ClientRequest | undefined; let response: IncomingMessage | undefined; let result: NativeResponse | undefined;
       let failed = false; let exhausted = false; let requestClosed = false; let socketClosed = true;
+      let socket: Socket | undefined; let finished = false;
+      const onSocketClose = () => { socketClosed = true; finish(); };
       const finish = () => {
-        if (!requestClosed || !socketClosed) return;
+        if (finished || !requestClosed || (failed && !socketClosed)) return;
+        finished = true; socket?.removeListener('close', onSocketClose);
         context.signal.removeEventListener('abort', abort);
         if (exhausted) reject(new TableError('incomplete')); else if (failed || !result) reject(unavailable()); else resolve(result);
       };
-      const abort = () => { failed = true; response?.destroy(); req?.destroy(); };
+      const abort = () => { if (finished) return; failed = true; response?.destroy(); req?.destroy(); if (requestClosed) socket?.destroy(); };
       try {
         const headers = request.headers.toJSON();
         // Auth is only present in the native request, not PipelineRequest/SDK errors.
         Object.assign(headers, { host: `${this.binding.account}.table.core.windows.net`, authorization: `Bearer ${token}`,
-          accept: 'application/json;odata=fullmetadata', connection: 'close', 'content-length': String(Buffer.byteLength(body)) });
+          accept: 'application/json;odata=fullmetadata', connection: 'keep-alive', 'content-length': String(Buffer.byteLength(body)) });
         delete headers['accept-encoding'];
         if (Object.entries(headers).reduce((n, [k, v]) => n + Buffer.byteLength(k) + Buffer.byteLength(v) + 4, 0) > 16384) throw unavailable();
-        req = this.request(new URL(request.url), { method: request.method, headers, agent: false, rejectUnauthorized: true, maxHeaderSize: 16384 }, res => {
+        req = this.request(new URL(request.url), { method: request.method, headers, agent: this.agent, rejectUnauthorized: true, maxHeaderSize: 16384 }, res => {
           response = res; const chunks: Buffer[] = []; let size = 0;
           res.on('error', abort); res.on('aborted', abort);
           const consumed = new Set<string>();
@@ -292,8 +321,16 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
             result = { status: res.statusCode ?? 0, body: Buffer.concat(chunks), headers: res.headers };
           });
         });
-        req.once('socket', socket => { socketClosed = false; socket.once('close', () => { socketClosed = true; finish(); }); });
-        req.on('error', () => { failed = true; }); req.once('close', () => { requestClosed = true; finish(); });
+        req.once('socket', assigned => {
+          socket = assigned; socketClosed = false;
+          this.trackSocket(assigned);
+          assigned.once('close', onSocketClose);
+        });
+        req.on('error', abort); req.once('close', () => {
+          requestClosed = true;
+          if (!result || failed) { failed = true; socket?.destroy(); }
+          finish();
+        });
         context.signal.addEventListener('abort', abort, { once: true });
         if (!available(context)) abort(); else req.end(body);
       } catch {

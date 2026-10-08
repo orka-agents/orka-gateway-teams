@@ -79,23 +79,23 @@ function checkEntity(e: Record<string, unknown>, expectedPartition: string, expe
     e.Digest === hash(['orka-data-v1', expectedBinding.toString('base64'), e.T, e.Id, payload.toString('base64')]);
 }
 export async function tableService(t: FixtureHooks, kind: 'delivery' | 'ingress' = 'delivery', metadataFormat: 1 | 2 = 1,
-  scopeOverride?: Partial<Extract<TableBinding, { kind: 'ingress' }>['scope']>) {
+  scopeOverride?: Partial<Extract<TableBinding, { kind: 'ingress' }>['scope']>, tlsFixture: typeof httpsFixture = httpsFixture) {
   const partition = kind === 'delivery' ? 'v1_delivery_c3RhYmxl' : 'v1_ingress_c3RhYmxl';
   const scope = { appId: 'App', tenantId: 'Tenant', orkaBaseUrl: 'https://orka.example.invalid/', gatewayNamespace: 'gateway', gatewayName: 'teams', ...scopeOverride };
   // Keep wire expectations fixture-owned, including the ordered full ingress scope.
   const expectedBinding = Buffer.from(JSON.stringify(['orka-table-v1', 'example123', 'journal', kind, 'stable', kind === 'delivery' ?
     [scope.appId, scope.tenantId] : [scope.appId, scope.tenantId, scope.orkaBaseUrl, scope.gatewayNamespace, scope.gatewayName]]));
   const rows = new Map<string, Record<string, unknown>>(); let version = 0;
-  const stats = { requests: 0, writes: 0, reads: 0, pages: 0, tokens: 0, requestCloses: 0, socketCloses: 0, bytes: 0, violation: false, lastActions: 0, conditionFailure: '' };
+  const stats = { requests: 0, writes: 0, reads: 0, pages: 0, tokens: 0, requestCloses: 0, socketCloses: 0, sockets: 0, physicalSocketCloses: 0, bytes: 0, violation: false, lastActions: 0, conditionFailure: '' };
   const controls: { hook?: (event: ServiceRequest) => Promise<void> | void; request?: TableDependencies['request']; missingCode?: 'ResourceNotFound' } = {};
   function error(res: ServerResponse, status: number, code: string) {
     res.writeHead(status, { 'content-type': 'application/json', 'x-ms-error-code': code }); res.end(JSON.stringify({ 'odata.error': { code, message: { lang: 'en-US', value: 'synthetic service error' } } }));
   }
-  const fixture = await httpsFixture(t, async (req, res) => {
+  const fixture = await tlsFixture(t, async (req, res) => {
     try {
       stats.requests++;
       if (req.headers.host !== 'example123.table.core.windows.net' || req.headers.authorization !== `Bearer ${syntheticToken}` ||
-          req.headers.connection !== 'close' || req.headers.accept !== 'application/json;odata=fullmetadata') stats.violation = true;
+          !['close', 'keep-alive'].includes(req.headers.connection ?? '') || req.headers.accept !== 'application/json;odata=fullmetadata') stats.violation = true;
       const parts: Buffer[] = []; for await (const part of req) parts.push(Buffer.from(part));
       const body = Buffer.concat(parts); stats.bytes += body.length;
       const path = decodeURIComponent(req.url ?? ''); const actions: WireAction[] = [];
@@ -160,10 +160,20 @@ export async function tableService(t: FixtureHooks, kind: 'delivery' | 'ingress'
       if (controls.hook) await controls.hook({ req, res, path, actions, commit, reply }); else reply();
     } catch { stats.violation = true; res.destroy(); }
   });
+  const socketUses = new WeakMap<import('node:net').Socket, number>();
   const request: typeof https.request = ((url: URL, options: https.RequestOptions, callback: (response: IncomingMessage) => void) => {
-    if (url.origin !== 'https://example123.table.core.windows.net' || options.agent !== false || options.rejectUnauthorized !== true) stats.violation = true;
+    const boundedAgent = options.agent instanceof https.Agent && options.agent.options.keepAlive === true && options.agent.maxSockets === 2 &&
+      options.agent.maxTotalSockets === 2 && options.agent.maxFreeSockets === 2 && options.agent.options.maxCachedSessions === 1;
+    if (url.origin !== 'https://example123.table.core.windows.net' || (options.agent !== false && !boundedAgent) || options.rejectUnauthorized !== true || options.maxHeaderSize !== 16384) stats.violation = true;
     const req = https.request(new URL(url.pathname + url.search, fixture.baseUrl), { ...options, hostname: '127.0.0.1', servername: 'localhost', ca: fixture.ca }, callback as never);
-    req.once('close', () => stats.requestCloses++); req.once('socket', socket => socket.once('close', () => stats.socketCloses++));
+    req.once('close', () => stats.requestCloses++); req.once('socket', socket => {
+      const uses = socketUses.get(socket); socketUses.set(socket, (uses ?? 0) + 1);
+      if (uses === undefined) {
+        stats.sockets++;
+        // Legacy socketCloses balances request uses, but only after their shared physical socket closes.
+        socket.once('close', () => { stats.physicalSocketCloses++; stats.socketCloses += socketUses.get(socket) ?? 0; socketUses.delete(socket); });
+      }
+    });
     return req;
   }) as typeof https.request;
   const dependencies: TableDependencies = { token: async (scope, context) => { stats.tokens++; if (scope !== 'https://storage.azure.com/.default' || !(context.signal instanceof AbortSignal) || !Number.isFinite(context.deadline)) stats.violation = true; return syntheticToken; },

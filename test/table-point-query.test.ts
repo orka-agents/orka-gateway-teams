@@ -141,10 +141,10 @@ for (const cancel of ['abort', 'deadline'] as const) test(`fallback token ${canc
   assert.equal(s.stats.requests, 1); assert.equal(s.stats.requestCloses, 1); assert.equal(s.stats.socketCloses, 1);
 });
 
-test('abort after point socket close issues neither fallback token nor query', async t => {
+test('abort after point request close issues neither fallback token nor query', async t => {
   const s = await tableService(t); s.controls.missingCode = 'ResourceNotFound'; const abort = new AbortController();
   s.controls.request = ((...args: Parameters<typeof https.request>) => {
-    const req = s.request(...args); req.once('socket', socket => socket.once('close', () => abort.abort())); return req;
+    const req = s.request(...args); req.once('close', () => abort.abort()); return req;
   }) as typeof https.request;
   const c = new OwnedTableClient(bindTable(tableBinding), s.dependencies);
   await assert.rejects(c.read('M', { signal: abort.signal, deadline: performance.now() + 30000 }), code('unavailable'));
@@ -165,7 +165,7 @@ test('fallback native abort waits for actual request and socket destruction, not
     .then(() => { settled = true; return false; }, e => { settled = true; return code('unavailable')(e); });
   await eventually(() => query || settled); assert.equal(query, true); abort.abort(); await eventually(() => !!release);
   const close = c.close().then(() => { closed = true; }); await new Promise(r => setTimeout(r, 20));
-  assert.equal(settled, false); assert.equal(closed, false); assert.equal(s.stats.requestCloses, 1); assert.equal(s.stats.socketCloses, 1);
+  assert.equal(settled, false); assert.equal(closed, false); assert.equal(s.stats.requestCloses, 1); assert.equal(s.stats.socketCloses, 0);
   release!(); assert.equal(await outcome, true); await close;
   assert.equal(s.stats.requests, 2); assert.equal(s.stats.requestCloses, 2); assert.equal(s.stats.socketCloses, 2);
 });

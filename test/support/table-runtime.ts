@@ -52,12 +52,15 @@ export async function runtimeTableService(t: FixtureHooks, scope: Readonly<Ingre
       forward.on('error', () => res.destroy()); forward.end(body);
     } catch { stats.contract = false; res.destroy(); }
   });
+  const seenSockets = new WeakSet<import('node:net').Socket>();
   const request = ((url: URL, options: https.RequestOptions, callback: (response: IncomingMessage) => void) => {
     stats.requests++;
-    stats.contract &&= url.origin === 'https://example123.table.core.windows.net' && options.agent === false && options.rejectUnauthorized === true;
+    const boundedAgent = options.agent instanceof https.Agent && options.agent.options.keepAlive === true && options.agent.maxSockets === 2 &&
+      options.agent.maxTotalSockets === 2 && options.agent.maxFreeSockets === 2 && options.agent.options.maxCachedSessions === 1;
+    stats.contract &&= url.origin === 'https://example123.table.core.windows.net' && (options.agent === false || boundedAgent) && options.rejectUnauthorized === true && options.maxHeaderSize === 16384;
     const req = native(new URL(url.pathname + url.search, router.baseUrl), { ...options, hostname: '127.0.0.1', ca: router.ca, servername: 'localhost' }, callback);
     req.once('close', () => stats.requestCloses++);
-    req.once('socket', socket => { stats.sockets++; socket.once('close', () => stats.socketCloses++); });
+    req.once('socket', socket => { if (seenSockets.has(socket)) return; seenSockets.add(socket); stats.sockets++; socket.once('close', () => stats.socketCloses++); });
     return req;
   }) as NonNullable<TableDependencies['request']>;
   return { inbox, delivery, request, stats, fixture: router, drained() {
