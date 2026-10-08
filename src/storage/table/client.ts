@@ -271,6 +271,12 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
       }
     }
   }
+  private trackSocket(socket: Socket): void {
+    if (this.sockets.has(socket)) return;
+    // Keep the physical-lifetime listener outside the native request's lexical scope.
+    const closed = new Promise<void>(resolve => socket.once('close', () => { this.sockets.delete(socket); resolve(); }));
+    this.sockets.set(socket, closed);
+  }
   private native(request: PipelineRequest, body: string, token: string, context: WorkContext, allowance?: AuditPageAllowance): Promise<NativeResponse> {
     return new Promise((resolve, reject) => {
       let req: ClientRequest | undefined; let response: IncomingMessage | undefined; let result: NativeResponse | undefined;
@@ -317,10 +323,7 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
         });
         req.once('socket', assigned => {
           socket = assigned; socketClosed = false;
-          if (!this.sockets.has(assigned)) {
-            const closed = new Promise<void>(resolve => assigned.once('close', () => { this.sockets.delete(assigned); resolve(); }));
-            this.sockets.set(assigned, closed);
-          }
+          this.trackSocket(assigned);
           assigned.once('close', onSocketClose);
         });
         req.on('error', abort); req.once('close', () => {

@@ -5,6 +5,7 @@ import https from 'node:https';
 import type { ClientRequest, RequestListener } from 'node:http';
 import type { Socket } from 'node:net';
 import { after, test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { OwnedTableClient } from '../src/storage/table/client.js';
 import { bindTable } from '../src/storage/table/codec.js';
 import { createTableKernelV2 } from '../src/storage/table/owner.js';
@@ -73,6 +74,18 @@ function observeNative(s: Awaited<ReturnType<typeof service>>) {
   return { requests, sockets, closedSockets, agent: () => agent,
     queued: () => Object.values(agent?.requests ?? {}).reduce((sum, queue) => sum + (queue?.length ?? 0), 0) };
 }
+
+test('Table client idle pooled socket releases the completed public read request and native context signal', { timeout: 15000 }, () => {
+  const child = spawnSync(process.execPath, ['--expose-gc', '--import', 'tsx',
+    fileURLToPath(new URL('./support/table-client-pool-retention-worker.ts', import.meta.url))],
+  { encoding: 'utf8', timeout: 12000, maxBuffer: 4096 });
+  // Report only process status and the bounded counters, never worker stderr.
+  assert.equal(child.error, undefined, 'Retention worker failed to start or timed out');
+  assert.equal(child.status, 0, 'Retention worker did not exit successfully');
+  assert.deepEqual(JSON.parse(child.stdout), {
+    requestReleased: true, signalReleased: true, requests: 1, requestCloses: 1, socketCloses: 0,
+  });
+});
 
 test('Table client reuses one SDK pipeline and physical TLS socket across 130 requests, then closes all resources', async t => {
   const s = await service(t); s.rows.set('M', stamp(wireM(), 1));
