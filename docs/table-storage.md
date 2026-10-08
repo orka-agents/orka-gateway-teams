@@ -42,7 +42,11 @@ default credentials, token cache/cycler, challenge refresh or fallback. The
 implements the separate fixed-purpose storage cache/acquisition contract.
 Authorization and live Azure qualification still require operator work.
 The optional native HTTPS `request` dependency is a **library-test seam**, not an
-environment endpoint override or production TLS bypass.
+environment endpoint override or production TLS bypass. Each bound client privately
+owns one cached public SDK pipeline and one verified fixed-origin HTTPS Agent,
+bounded to two total/active/free sockets and one cached TLS session. Request
+context remains operation-local; neither the cached pipeline nor idle pooled
+sockets retain an operation's context/response consumer.
 
 | Operation | Meaning |
 |---|---|
@@ -268,7 +272,8 @@ Each logical point read performs one native GET, or at most two when a validated
 `ResourceNotFound` requires the exact-key collection query. The query uses only
 `$filter` (both keys) and `$top=1`, consumes one iterator yield and returns it;
 there is no continuation or third request. Both GETs share the original tracked
-operation, signal and deadline, with actual token/request/socket/iterator drain.
+operation, signal and deadline, with actual token/request/body/iterator drain;
+failed native work also awaits actual tainted-socket close.
 This does not add write retries or enlarge reconciliation/traversal budgets.
 
 Each scan starts a new public SDK iterator, consumes one page, then returns that
@@ -282,7 +287,13 @@ full audit and requires a later retention/operational decision.
 
 A close release can require its initial read/write phase plus its separate cleanup
 reconciliation phase. Deadlines fence late work and destroy requests; they are not
-hard-real-time scheduler guarantees. Native request **and socket close** are awaited.
+hard-real-time scheduler guarantees. Successful native requests fully drain the
+response body and await request close; idle sockets remain owned by the client.
+Unsuccessful native requests additionally await actual tainted-socket close.
+Client close first drains tracked token/request/iterator work, then destroys all
+remaining active/idle pooled sockets and awaits every physical close before
+releasing operation-context storage. Cancelling an Agent-queued request aborts
+only that request, not its busy peers.
 The trusted token callback is also awaited even after cancellation: a callback
 that never settles can permanently prevent drain. There is no timeout-as-drain
 escape hatch or claim of owning arbitrary work created by external callbacks.
@@ -403,7 +414,10 @@ per cursor. There is no unbudgeted per-row cross-pass map.
 
 Audit uses a discriminated job in the existing FIFO, not another queue. An active
 abort, timeout, invalidation or close stops later requests/callbacks but retains
-its promise and work slot until token/native/socket/iterator work actually settles.
+its promise and work slot until token/native-body/request/iterator work actually
+settles, including actual tainted-socket close on native failure. Successful
+requests may reuse client-owned idle sockets; external client close destroys and
+awaits all remaining physical sockets.
 The audit-specific native abort subscription resists an earlier caller listener's
 `stopImmediatePropagation()`, without invoking caller signal getter/method
 overrides. The subscription is disposed on actual completion or queued removal;
@@ -538,7 +552,9 @@ No raw exception, signal reason, body, cursor or SDK detail is logged or attache
 as an error cause. A failed handle stays consumed.
 
 Both the admitted `inspect` promise and `close` wait for **actual token, native
-request/socket and iterator completion**. Cancellation latches failure and aborts
+body/request and iterator completion**, including tainted-socket close on native
+failure. Inspector close additionally destroys and awaits every remaining
+client-owned physical pooled socket. Cancellation latches failure and aborts
 private work, stopping further requests/callbacks, but `pending` remains 1 through
 actual drain, even while status is `failed` or `closing`. Completion rechecks
 cancellation/deadline/close/failure after the final callback and again at publication;

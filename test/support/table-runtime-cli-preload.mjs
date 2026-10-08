@@ -11,10 +11,11 @@ const settings = JSON.parse(readFileSync(new URL('./native-settings.json', impor
 const stats = { requests: 0, requestCloses: 0, sockets: 0, socketCloses: 0, unexpected: 0,
   table: 0, identity: 0, entra: 0, orka: 0, provider: 0, strictKeys: 0, sdkKeys: 0 };
 const keysUrl = 'https://login.botframework.com/v1/.well-known/keys';
+const seenSockets = new WeakSet();
 function tracked(req) {
   stats.requests++;
   req.once('close', () => stats.requestCloses++);
-  req.once('socket', socket => { stats.sockets++; socket.once('close', () => stats.socketCloses++); });
+  req.once('socket', socket => { if (seenSockets.has(socket)) return; seenSockets.add(socket); stats.sockets++; socket.once('close', () => stats.socketCloses++); });
   return req;
 }
 function argumentsFor(args, protocol) {

@@ -5,8 +5,10 @@ import { test } from 'node:test';
 import { TableClient } from '@azure/data-tables';
 import { createTableForeignInspectorV2 } from '../src/storage/table/index.js';
 import { budget, code, putData, visitor } from './support/owned-audit.js';
-import { foreign } from './support/foreign-inspection.js';
+import { foreign as foreignFixture } from './support/foreign-inspection.js';
 import { deferred, eventually, syntheticToken } from './support/table-service.js';
+
+const foreign = (t: Parameters<typeof foreignFixture>[0]) => foreignFixture(t, 'delivery', true);
 
 for (const reason of ['abort', 'deadline', 'request-timeout', 'close'] as const) test(`foreign ${reason} keeps token and both promises pending until real token completion`, async t => {
   const f = await foreign(t); const gate = deferred<string>(); let signal: AbortSignal | undefined; let callbacks = 0;
@@ -53,13 +55,14 @@ for (const stage of ['point', 'page'] as const) for (const reason of ['abort', '
       if (reason !== 'request-timeout') close ??= i.close().then(() => { closed = true; });
       await new Promise(r => setTimeout(r, 20)); assert.equal(settled, false); assert.equal(closed, false); assert.equal(i.status().pending, 1);
       assert.equal(i.status().ownership, 'none'); assert.equal(f.s.stats.requestCloses, requests + (stage === 'page' ? 1 : 0));
-      assert.equal(f.s.stats.socketCloses, requests + (stage === 'page' ? 1 : 0)); f.unchanged();
+      assert.equal(f.s.stats.socketCloses, requests); f.unchanged();
     } finally { release?.(); }
     assert.equal(await inspection, 'expected'); await (close ?? i.close());
     assert.equal(calls, 0); assert.equal(i.status().pending, 0); assert.equal(f.s.stats.requests, f.s.stats.requestCloses); assert.equal(f.s.stats.requests, f.s.stats.socketCloses); f.unchanged();
   });
 for (const failure of ['close', 'corrupt', 'body-budget'] as const) test(`foreign ${failure} awaits real public SDK iterator return and preserves failure precedence`, async t => {
   const f = await foreign(t); const i = f.create(); const gate = deferred(); let returning = false; let callbacks = 0;
+  const socketCloses = f.s.stats.socketCloses;
   if (failure !== 'close') f.s.controls.hook = e => {
     if (e.path.includes(",RowKey='M'")) e.reply();
     else { e.res.writeHead(200, { 'content-type': 'application/json' }); e.res.end('{invalid'); }
@@ -81,29 +84,33 @@ for (const failure of ['close', 'corrupt', 'body-budget'] as const) test(`foreig
   try {
     await eventually(() => returning); close = i.close().then(() => { closed = true; });
     await new Promise(r => setTimeout(r, 20)); assert.equal(settled, false); assert.equal(closed, false); assert.equal(i.status().pending, 1);
-    assert.equal(i.status().ownership, 'none'); assert.equal(f.s.stats.requests, f.s.stats.socketCloses); f.unchanged();
+    assert.equal(i.status().ownership, 'none'); assert.equal(f.s.stats.requests, f.s.stats.requestCloses);
+    assert.equal(f.s.stats.socketCloses, socketCloses + (failure === 'body-budget' ? 2 : 0)); f.unchanged();
   } finally { gate.resolve(); }
   assert.equal(await inspection, 'expected'); await close; assert.equal(callbacks, 0); assert.equal(i.status().pending, 0); f.unchanged();
 });
-test('foreign close drains a separately held real socket destroy, not just the request promise', async t => {
+test('foreign inspection drains requests while close awaits separately held real idle socket destruction', async t => {
   const f = await foreign(t); const i = f.create(); let release: (() => void) | undefined; let socketLive = () => false;
+  const socketCloses = f.s.stats.socketCloses; const seenSockets = new WeakSet<import('node:net').Socket>();
   f.s.controls.request = ((...args: Parameters<typeof https.request>) => {
     const req = f.s.request(...args);
     req.once('socket', socket => {
+      if (seenSockets.has(socket)) return; seenSockets.add(socket);
       const destroy = socket.destroy.bind(socket); socketLive = () => !socket.destroyed;
       socket.destroy = error => { release = () => { destroy(error); }; return socket; };
     }); return req;
   }) as typeof https.request;
   let settled = false; let closed = false; let calls = 0; let close: Promise<void> | undefined;
-  const inspection = i.inspect({ ...visitor(), record() { calls++; } }, budget()).then(() => 'success', e => code('incomplete')(e) ? 'incomplete' : 'other')
+  const inspection = i.inspect({ ...visitor(), record() { calls++; } }, budget()).then(() => 'success', () => 'other')
     .then(v => { settled = true; return v; });
   try {
-    await eventually(() => !!release); assert.equal(socketLive(), true);
-    close = i.close().then(() => { closed = true; });
-    await new Promise(r => setTimeout(r, 20)); assert.equal(settled, false); assert.equal(closed, false); assert.equal(i.status().pending, 1);
-    assert.equal(f.s.stats.requests - f.s.stats.socketCloses, 1); f.unchanged();
+    assert.equal(await inspection, 'success'); assert.equal(socketLive(), true);
+    close = i.close().then(() => { closed = true; }); await eventually(() => !!release);
+    await new Promise(r => setTimeout(r, 20)); assert.equal(settled, true); assert.equal(closed, false); assert.equal(i.status().pending, 0);
+    assert.equal(f.s.stats.requests, f.s.stats.requestCloses); assert.equal(f.s.stats.socketCloses, socketCloses); f.unchanged();
   } finally { release?.(); }
-  assert.equal(await inspection, 'incomplete'); await close; assert.equal(calls, 0); assert.equal(i.status().pending, 0); f.unchanged();
+  await close; assert.equal(calls, 1); assert.equal(i.status().pending, 0);
+  assert.equal(f.s.stats.requests, f.s.stats.socketCloses); f.unchanged();
 });
 test('foreign close after provisional M callback keeps later-page token reservation until settlement', async t => {
   const f = await foreign(t); putData(f.s); let tokens = 0; let held = false; const gate = deferred<string>(); let callbacks = 0;

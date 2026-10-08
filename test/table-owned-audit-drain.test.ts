@@ -67,7 +67,7 @@ for (const format of [1, 2] as const) {
     const audit = k.auditOwned(visitor(), budget(), { signal: abort.signal }).then(() => 'success', e => code('incomplete')(e) ? 'incomplete' : 'other').then(v => { settled = true; return v; });
     await eventually(() => s.stats.requests === requests + 1); abort.abort(); const prompt = !!release;
     const close = k.close().then(() => { closed = true; }); await eventually(() => !!release); await new Promise(r => setTimeout(r, 20));
-    assert.equal(settled, false); assert.equal(closed, false); assert.equal(k.status().pending, 1); assert.equal(s.stats.requestCloses, requests); assert.equal(s.stats.socketCloses, requests);
+    assert.equal(settled, false); assert.equal(closed, false); assert.equal(k.status().pending, 1); assert.equal(s.stats.requestCloses, requests); assert.equal(s.stats.socketCloses, 0);
     delete s.controls.request; delete s.controls.hook; release!(); const outcome = await audit; await close;
     assert.equal(prompt, true); assert.equal(outcome, 'incomplete'); assert.equal(k.status().pending, 0); assert.equal(s.stats.requests, s.stats.requestCloses); assert.equal(s.stats.requests, s.stats.socketCloses);
   });
@@ -157,7 +157,7 @@ for (const reason of ['abort', 'deadline', 'request-timeout', 'close', 'invalida
   if (reason === 'invalidate') { k.invalidate(); close = assert.rejects(k.close(), code('unresolved')).then(() => { closed = true; }); }
   await eventually(() => !!release); await new Promise(r => setTimeout(r, 20));
   assert.equal(settled, false); assert.equal(closed, false); assert.equal(k.status().pending, 1);
-  assert.equal(s.stats.requestCloses, requests); assert.equal(s.stats.socketCloses, requests); assert.equal(s.stats.writes, writes);
+  assert.equal(s.stats.requestCloses, requests); assert.equal(s.stats.socketCloses, 0); assert.equal(s.stats.writes, writes);
   delete s.controls.request; delete s.controls.hook; release!(); assert.equal(await outcome, 'expected'); await (close ?? k.close());
   assert.equal(k.status().pending, 0); assert.equal(s.stats.requests, s.stats.requestCloses); assert.equal(s.stats.requests, s.stats.socketCloses);
   assert.equal(s.rows.get('M')?.Owner === '', reason !== 'invalidate');

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter, getEventListeners } from 'node:events';
 import type { IncomingMessage } from 'node:http';
-import type https from 'node:https';
+import https from 'node:https';
 import { setImmediate } from 'node:timers/promises';
 import { createTableIngressStore } from '../../src/ingress/table-store.js';
 import { createDeliveryDispatcher } from '../../src/outbound/dispatcher.js';
@@ -93,7 +93,9 @@ function memoryTable() {
   }
   const request = ((url: URL, options: https.RequestOptions, callback: (response: IncomingMessage) => void) => {
     assert.equal(url.origin, 'https://example123.table.core.windows.net');
-    assert.equal(options.agent, false); assert.equal(options.rejectUnauthorized, true);
+    assert.equal(options.agent instanceof https.Agent && options.agent.options.keepAlive === true && options.agent.maxSockets === 2 &&
+      options.agent.maxTotalSockets === 2 && options.agent.maxFreeSockets === 2 && options.agent.options.maxCachedSessions === 1, true);
+    assert.equal(options.rejectUnauthorized, true); assert.equal(options.maxHeaderSize, 16384);
     assert.equal((options.headers as Record<string, string>).authorization, `Bearer ${syntheticToken}`);
     stats.requests++;
     const req = new EventEmitter(); const socket = new EventEmitter();
@@ -101,7 +103,7 @@ function memoryTable() {
     const close = () => {
       if (closed) return; closed = true;
       stats.requestCloses++; req.emit('close');
-      // The production promise must also wait for socket drain, not only end.
+      // Failed requests and client close must still wait for physical socket drain.
       queueMicrotask(() => { stats.socketCloses++; socket.emit('close'); });
     };
     return Object.assign(req, {

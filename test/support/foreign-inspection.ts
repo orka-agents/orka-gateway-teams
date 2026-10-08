@@ -7,7 +7,7 @@ import type { ForeignOwnerFenceV2 } from '../../src/storage/table/index.js';
 import { ingressBinding, tableBinding, tableService } from './table-service.js';
 
 /** A real owner installs M; only the separate inspector channel is counted below. */
-export async function foreign(t: TestContext, kind: 'delivery' | 'ingress' = 'delivery') {
+export async function foreign(t: TestContext, kind: 'delivery' | 'ingress' = 'delivery', drainOwner = false) {
   const binding = structuredClone(kind === 'delivery' ? tableBinding : ingressBinding);
   const s = await tableService(t, kind, 2); const owner = createTableKernelV2(binding, s.dependencies);
   await owner.initialize(); await owner.acquire();
@@ -15,6 +15,8 @@ export async function foreign(t: TestContext, kind: 'delivery' | 'ingress' = 'de
   if (!record || record.value.kind !== 'metadata') throw new Error('Fixture metadata missing');
   const m = record.value;
   const expected: ForeignOwnerFenceV2 = { initId: m.initId, initDigest: m.initDigest, owner: m.owner, epoch: m.epoch, mDigest: m.digest, etag: record.etag };
+  // Retain the installed foreign fence, but drain the fixture owner's idle pool.
+  if (drainOwner) { owner.invalidate(); await assert.rejects(owner.close(), e => e instanceof Error && 'code' in e && e.code === 'unresolved'); }
   const stats = { gets: 0, nonGets: 0, tokens: 0 }; const before = s.stats.writes;
   const dependencies = { token: async (...args: Parameters<typeof s.dependencies.token>) => { stats.tokens++; return s.dependencies.token(...args); },
     request: ((url: URL, options: https.RequestOptions, callback: (response: IncomingMessage) => void) => {
