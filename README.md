@@ -11,9 +11,10 @@ Card. Follow-up messages can share an Orka Session through the configured Bindin
 
 ## Supported behavior
 
-- **Personal and opt-in shared text conversations.** The operator configures an
-  exact Orka Binding and explicit sender allowlist. Shared group/channel requests
-  require a bot mention; channels reply to the saved root. See
+- **Personal and opt-in shared text conversations.** Personal chats use separate
+  sender-specific Orka Bindings. Shared rooms use one Binding per exact
+  conversation with `senderPolicy.mode: all`; Teams membership controls access.
+  Shared requests require a bot mention; channels reply to the saved root. See
   [shared-room setup, identity and rollback](docs/shared-rooms.md). Attachments
   contribute only their text; attachments are not processed.
 - **Final replies and errors.** Replies use a single text card. Long answers are
@@ -28,8 +29,8 @@ Card. Follow-up messages can share an Orka Session through the configured Bindin
   explicitly for the Azure Container Apps deployment profile.
 
 The runtime does **not** support files, token streaming, active-Task answer routing,
-or approval buttons. Shared rooms require reviewed app installation and separate allowlisted
-bindings; packaging alone does not authorize a room. Setup capture remains
+or approval buttons. Shared rooms require reviewed app installation and exact-room
+Bindings; packaging alone does not authorize a room. Setup capture remains
 personal-chat only. Existing recorded live validation is personal-chat evidence,
 not shared-room qualification.
 

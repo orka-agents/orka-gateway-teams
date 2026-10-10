@@ -12,17 +12,32 @@ chats and their sender identities remain unchanged.
 Before enabling shared intake, obtain tenant/app installation authority, enable
 the bot's Teams channel and install the reviewed app in the intended group/team.
 The optional [shared-room app package](aca-deployment.md#opt-in-shared-room-package-packaging-only)
-uses personal/groupChat/team scopes without RSC permissions. The default package
-and setup challenge remain personal-only; setup does not discover or authorize
-shared room membership. Installation is not sender authorization. Do not alter
-tenant policies or request RSC/Graph access as a workaround.
+uses personal/groupChat/team scopes without RSC permissions. Installation alone
+does not create a Binding. The default package and setup challenge remain
+personal-only. Do not change tenant policies or request RSC/Graph access as a
+workaround.
 
-Use exact operator-reviewed tenant, conversation, bot recipient and service URL
-values. Orka owns authorization: use `senderPolicy.mode: allowlist` with explicit
-pilot AAD object IDs, **never `all`**. A group or thread Session deliberately
-shares the Agent's conversation among allowed participants. Review audience,
-Agent access and retained history before opening intake; the adapter does not
-check membership, attest humanity or supply a history-management policy.
+For shared rooms, access comes from **Teams conversation membership**. Create one
+Binding for the exact verified tenant and conversation, with
+`senderPolicy.mode: all` when you trust its full membership. With this policy,
+omit `match.senderId` and `allowedSenderIds`; no per-person AAD ID list is needed.
+Keep the bot recipient and service URL restrictions.
+
+`all` is Orka's explicit trusted-context opt-in, not its default. Teams controls
+who can post in the room; Orka and the gateway do not query membership. Review the
+room's audience, Agent access and retained shared Session history before enabling
+it. Adding a member can give them access to that shared conversation.
+
+Membership includes guests and, in group chats, can include external/federated
+participants. The gateway checks the conversation's tenant against the configured
+tenant, **not the sender's home tenant**. Shared senders still need a valid
+`from.aadObjectId`; `all` does not mean "only people from our organization".
+For a room with external participants, use an `allowlist` Binding for approved
+senders, or use a chat without them.
+
+Personal chats keep their existing sender identities and separate Bindings:
+one Binding per person until [orka#736](https://github.com/orka-agents/orka/issues/736).
+An omitted sender policy still defaults to `allowlist`.
 
 Shared activities must contain a bounded mention entity targeting the validated
 incoming `recipient.id`, with exact mention text present in the message. Only the
@@ -41,8 +56,9 @@ is refused rather than guessed.
 | Validated `from.name` | Optional saved requester label, not authorization |
 | Channel root | `threadId` and measured outbound activity `replyToId` |
 
-Existing personal bindings **do not migrate** to AAD IDs. A shared binding uses
-AAD object IDs, not `from.id`, display names or email addresses.
+Existing personal bindings **do not migrate** to AAD IDs. The gateway still
+extracts a shared sender's validated `from.aadObjectId` for identity and requester
+attribution; a membership-based Binding does not list those IDs.
 
 For channels, a terminal `;messageid=<root>` suffix in `conversation.id` supplies
 the root; an explicit `replyToId` must match it. Without that suffix, a supplied
@@ -57,6 +73,16 @@ and URL input. The gateway sends one verified HTTPS POST to
 `body.replyToId` equal to the saved channel root. This matches the pinned Teams
 SDK's `ConversationActivityClient.reply`; there is no alternate endpoint,
 channel-wide rewrite, activity-ID injection, hidden normalization or retry.
+
+### Group chats and channels
+
+- **Group chat:** match its exact conversation ID and use `session.mode: context`.
+  Members share one Session; omit any thread or sender constraint.
+- **Channel:** use `session.mode: thread` so reply chains have separate Sessions.
+  Preserve the whole conversation ID, including any `;messageid=<root>` suffix.
+  The example below also pins one root: it does not authorize every thread in the
+  channel. A different exact conversation ID needs its own Binding; do not
+  replace it with `channelData.channel.id` or assume wildcard matching.
 
 ### Synthetic Binding examples
 
@@ -76,11 +102,7 @@ spec:
   match:
     accountId: 11111111-1111-4111-8111-111111111111
     contextId: "19:synthetic-pilot-group"
-  senderPolicy:
-    mode: allowlist
-    allowedSenderIds:
-      - 33333333-3333-4333-8333-333333333333
-      - 44444444-4444-4444-8444-444444444444
+  senderPolicy: {mode: all}
   session: {mode: context}
   activeTurnBehavior: queue
 ---
@@ -96,11 +118,7 @@ spec:
     accountId: 11111111-1111-4111-8111-111111111111
     contextId: "19:synthetic-pilot-channel@thread.skype;messageid=synthetic-root"
     threadId: synthetic-root
-  senderPolicy:
-    mode: allowlist
-    allowedSenderIds:
-      - 33333333-3333-4333-8333-333333333333
-      - 44444444-4444-4444-8444-444444444444
+  senderPolicy: {mode: all}
   session: {mode: thread}
   activeTurnBehavior: queue
 ```

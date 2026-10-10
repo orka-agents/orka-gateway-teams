@@ -459,10 +459,11 @@ missing `conversation.tenantId`. An otherwise valid role-less message is an elig
 `from.type: 'bot'`, and matching `from.id`/`recipient.id` are excluded. Unknown or
 malformed supplied roles are invalid. No display-name, AAD-ID or ID-prefix heuristic
 establishes identity or humanity. Personal `sender.id` is exactly `from.id`;
-shared `sender.id` is exactly validated `from.aadObjectId`. Orka's stable-ID
-allowlist owns sender authorization. Existing personal bindings remain unchanged;
-shared pilots use explicit AAD allowlists, never `senderPolicy: all`. Recipient identity, if supplied, is validated
-and compared exactly for self detection. Missing recipient identity is allowed and
+shared `sender.id` is exactly validated `from.aadObjectId`. Orka owns Binding
+authorization. Existing personal bindings remain unchanged; shared rooms use
+exact-conversation Bindings with explicit `senderPolicy.mode: all`, relying on
+Teams membership rather than per-person ID lists. Recipient identity, if supplied,
+is validated and compared exactly for self detection. Missing recipient identity is allowed and
 is not affirmative human proof; unused recipient metadata is not validated.
 
 At least one of `channelData.tenant.id` and `conversation.tenantId` must be supplied.
@@ -841,12 +842,13 @@ use `--reference-fixtures` or fabricate a production route. Synthetic wire fixtu
 remain distinct from live delivery, network-filesystem or power-cut validation.
 
 Keep tenant/account, conversation/context, thread, and sender identities separate.
-Personal sender authorization uses Teams `from.id`; shared authorization uses
+Personal sender authorization uses Teams `from.id`; shared sender identity is
 validated `from.aadObjectId`, never email or display name. `context-sender` remains
-personal policy; shared groups use `context`, channels `thread`, with explicit
-pilot allowlists and bot invocation. Audience/history/membership remain operator
-and Orka policy, not implied by local correlation. See [shared-room examples and
-limits](docs/shared-rooms.md).
+personal policy; shared groups use `context`, channels `thread`, with exact-room
+Bindings, explicit sender policy `all` and bot invocation. Teams membership is
+the room access boundary; no per-person ID list is needed. Audience and shared
+history still need operator review and are not implied by local correlation. See
+[shared-room examples and limits](docs/shared-rooms.md).
 
 ## Frozen protocol references
 

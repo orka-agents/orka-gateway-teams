@@ -195,10 +195,11 @@ reviewed manifest and two icons, with no overwrite or upload.
 **A successful package is not shared-room runtime support or live validation.**
 Authenticated setup capture remains personal-only; the runtime supports explicit
 bot mentions and retained group/channel routes. Before shared rollout, follow
-[shared-room binding, evidence and rollback rules](shared-rooms.md) with explicit
-pilot-member AAD allowlists and operator-reviewed room/thread identities.
-Do not add read-all-message RSC permissions or sender policy `all` to bypass those
-gates. The shared-room live result will be recorded separately in
+[shared-room binding, evidence and rollback rules](shared-rooms.md): one Binding
+per exact verified conversation, `senderPolicy.mode: all`, and room access through
+Teams membership—not per-person AAD ID lists. Review the room audience and any
+channel root before enabling intake. No read-all-message RSC permission is needed.
+The shared-room live result will be recorded separately in
 [live validation](live-validation.md); the existing personal result is unchanged.
 
 ## 3. Build and render the fixed profiles
