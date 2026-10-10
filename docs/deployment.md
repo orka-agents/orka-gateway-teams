@@ -3,9 +3,9 @@
 For the evaluated ACA/Table profile, use the separate [ACA runbook](aca-deployment.md)
 and [live evidence/closeout report](live-validation.md). This page describes the
 existing SQLite/Kubernetes packaging; the ACA additions do not alter it.
-The checked-in package/binding defaults remain personal-only. For explicitly
-allowlisted group/channel installation, shared-session privacy and optional
-SQLite evidence provisioning/mounts, follow [shared rooms](shared-rooms.md).
+The checked-in package/binding defaults remain personal-only. For membership-based
+group/channel access, exact-conversation Bindings, shared-session privacy and
+optional SQLite evidence provisioning/mounts, follow [shared rooms](shared-rooms.md).
 Do not silently broaden the default binding, initializer Job or app permissions.
 [Bounded interim delivery](interim-delivery.md) is separately opt-in: upgrade the
 controller first, then add `INTERIM_DELIVERY_ENABLED=true` to the operator-owned
@@ -82,7 +82,7 @@ operator action, using the Microsoft sources linked below.
 | Bot credential | Default Kubernetes assets: `teams-bot` Secret key `client-secret` → `TEAMS_CLIENT_SECRET`, a client-secret **value**, not its ID. Explicit certificate authentication supports host/Docker; managed-identity federation supports VM/ACI IMDS and the explicit ACA local subset ([one profile evaluated live](live-validation.md); other hosting/policy variants still require validation). Neither mode supplies a Kubernetes overlay. |
 | Verified bot recipient IDs | `TEAMS_RECIPIENT_IDS`, JSON array of exact allowed incoming `recipient.id` values, 1–100 entries. |
 | Verified service base URLs | `TEAMS_SERVICE_URLS`, JSON array of exact canonical public-cloud HTTPS URLs, 1–100 entries. Match path case/trailing slash; no query/fragment/userinfo/nonstandard service port. |
-| Verified sender IDs | Binding `senderPolicy.allowedSenderIds`: exact activity `from.id`, not display name, email, AAD ID or a guessed prefix. |
+| Verified personal sender IDs | Personal Binding `senderPolicy.allowedSenderIds`: exact activity `from.id`, not display name, email, AAD ID or a guessed prefix. Shared rooms use exact-conversation Bindings with `all`, not per-person lists; see [shared rooms](shared-rooms.md). |
 | Verified personal conversation | Binding `match.contextId`: exact conversation ID. **Required by the current Orka CRD**, not an optional wildcard. |
 | Existing Orka HTTPS API base | `ORKA_BASE_URL`, including installation base path; real TLS frontend plus trusted CA. The normal Orka Service is HTTP: changing `http` to `https` does not provision TLS. |
 | Stable Gateway target | Namespace `orka-system`, name `teams`; both enter the ingress DB's immutable scope. Keep its UID and Orka ledger stable. |

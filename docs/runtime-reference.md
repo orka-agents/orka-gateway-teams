@@ -161,7 +161,9 @@ merely because the client-facing deadline has elapsed.
 The original body must identify the configured recipient, tenant and service URL
 before conversion. JWT `appid`/`tid` are not body identity. The converter remains
 the authoritative message filter: personal `from.id` and shared
-`from.aadObjectId` are Orka sender-allowlist candidates, not proof of humanity.
+`from.aadObjectId` are sender identities, not proof of humanity. Orka applies the
+Binding's sender policy; membership-based room Bindings use explicit `all`, not
+per-person lists.
 Shared group/channel messages require a validated mention of the configured bot;
 see [exact mapping and invocation](shared-rooms.md#identity-and-thread-mapping). Unsupported authenticated
 activities explicitly return 200 ignored without storage. Invalid/wrong-scope
