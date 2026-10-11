@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
@@ -20,6 +21,11 @@ function cli(t: TestContext, env: NodeJS.ProcessEnv, args: string[] = [], early 
   return { child, done, stdout: () => stdout, stderr: () => stderr };
 }
 
+async function port(): Promise<number> {
+  const server = createServer(); await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address(); assert.ok(address && typeof address !== 'string'); await new Promise<void>((resolve) => server.close(() => resolve())); return address.port;
+}
+
 for (const mode of ['invalid credentials', 'runtime environment', 'extra arguments', 'missing input', 'existing output'] as const) {
   test(`standalone capture CLI safely refuses ${mode} without listening or touching existing bytes`, async (t) => {
     const { config, directory, challenge } = setupFiles(t); const env = setupEnv(config);
@@ -37,7 +43,7 @@ for (const mode of ['invalid credentials', 'runtime environment', 'extra argumen
 
 test('standalone CLI expires nonzero without any runtime store, provider credential use or artifact', async (t) => {
   const { config, directory } = setupFiles(t);
-  const process = cli(t, { ...setupEnv(config), SETUP_PORT: '43978', SETUP_TIMEOUT_MS: '1000' });
+  const process = cli(t, { ...setupEnv(config), SETUP_PORT: String(await port()), SETUP_TIMEOUT_MS: '1000' });
   const result = await process.done; assert.equal(result.code, 1); assert.equal(result.signal, null);
   assert.equal(process.stdout().length, 0); assert.equal(process.stderr() === 'teams-setup: listening\nteams-setup: failed\n', true);
   assert.deepEqual(readdirSync(directory), ['challenge']);
@@ -45,9 +51,13 @@ test('standalone CLI expires nonzero without any runtime store, provider credent
 
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   test(`standalone CLI ${signal} drains and exits nonzero before capture`, async (t) => {
-    const { config, directory } = setupFiles(t); const process = cli(t, { ...setupEnv(config), SETUP_PORT: '43978' });
+    const { config, directory } = setupFiles(t); const process = cli(t, { ...setupEnv(config), SETUP_PORT: String(await port()) });
     const deadline = performance.now() + 10000;
-    while (!process.stderr().includes('teams-setup: listening\n')) { assert.equal(performance.now() < deadline, true); await sleep(10); }
+    while (!process.stderr().includes('teams-setup: listening\n')) {
+      assert.ok(process.child.exitCode === null && process.child.signalCode === null,
+        `setup CLI exited before listening (code=${process.child.exitCode}, signal=${process.child.signalCode}): ${process.stderr()}`);
+      assert.equal(performance.now() < deadline, true); await sleep(10);
+    }
     process.child.kill(signal);
     const result = await process.done; assert.equal(result.code, 1); assert.equal(result.signal, null);
     assert.equal(process.stdout().length, 0); assert.equal(process.stderr() === 'teams-setup: listening\nteams-setup: failed\n', true);
