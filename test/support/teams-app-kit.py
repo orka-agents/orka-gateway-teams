@@ -52,6 +52,8 @@ class KitTests(unittest.TestCase):
         self.assertNotIn('@@', readme)
         self.assertIn('az acr import', readme)
         self.assertIn('orka/issues/736', readme)
+        self.assertIn('only when you trust the entire membership', readme)
+        self.assertIn('If you do not trust every member, do not create its Binding', readme)
         self.assertEqual(files['image-digests.txt'].decode(), f'gateway={GATEWAY}\nsetup={SETUP}\n')
         for name in ['manifest.template.json', 'manifest.shared-rooms.template.json']:
             self.assertEqual(files[name], (ROOT / 'examples/teams-app' / name).read_bytes())

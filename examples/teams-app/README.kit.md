@@ -148,11 +148,14 @@ capture and authorization are separate steps.
 Follow the guide to connect the gateway to your own Orka, create each Binding,
 then activate and verify a real request/reply and follow-up.
 
-- **Shared rooms:** create a Binding for each exact verified tenant/conversation
-  (and channel root where required), with `senderPolicy.mode: all`; omit
-  `match.senderId` and `allowedSenderIds`. Teams membership is the access boundary,
-  including guests/federated participants. Review the whole room's audience,
-  Agent access and shared history; the gateway does not query membership.
+- **Shared rooms:** create a Binding only when you trust the entire membership,
+  including guests/federated participants, with Agent access and shared history.
+  If you do not trust every member, do not create its Binding; use a room with a
+  trusted audience instead. For each exact verified tenant/conversation (and
+  channel root where required), use `senderPolicy.mode: all`; omit
+  `match.senderId` and `allowedSenderIds`. Teams membership is the access boundary.
+  The gateway checks the conversation's tenant, not each sender's home tenant,
+  and does not query membership. Adding a member can expose shared history.
   [Shared-room setup and rollback](https://github.com/@@REPOSITORY@@/blob/v@@VERSION@@/docs/shared-rooms.md)
   covers bot mentions, thread identity and Session policy.
 - **Personal chats:** the current Orka model still needs a separate Binding for
