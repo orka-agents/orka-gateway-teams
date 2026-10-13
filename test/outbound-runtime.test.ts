@@ -114,6 +114,41 @@ for (const flag of [undefined, false, true]) test(`SQLite selected runtime inter
   }
 });
 
+for (const flag of [undefined, false, true]) test(`SQLite meeting flag ${flag ?? 'default'} propagates to capability and SAME-App native GET/action with disabled receipt replay`, async t => {
+  const auth = await authFixture(t); const accepted = deferred<EventEnvelope>(); let gets = 0; let posts = 0; let actions = 0; let tokens = 0;
+  const upstream = await httpsFixture(t, async (req, res) => {
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); accepted.resolve(JSON.parse(Buffer.concat(chunks).toString()));
+    res.writeHead(202); res.end('{"status":"accepted","eventId":"meeting-origin","state":"Queued"}');
+  });
+  const provider = await httpsFixture(t, async (req, res) => {
+    assert.equal(req.headers.authorization === 'Bearer meeting-token', true);
+    if (req.method === 'GET') { gets++; assert.equal(req.url, '/v3/conversations/19%3Afixture-personal/pagedMembers');
+      res.end(JSON.stringify({ members: [{ id: receiverConfig.recipientIds[0], name: 'Bot' }, { id: 'user', name: 'Personal user', userPrincipalName: 'private-personal@example.test' }] })); }
+    else { posts++; const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); const serialized = Buffer.concat(chunks).toString();
+      if (serialized.includes('Action.OpenUrl')) actions++; assert.equal(serialized.includes('Nothing scheduled'), true); res.end('{"id":"meeting-runtime-receipt"}'); }
+  });
+  const f = storage(t, upstream.baseUrl, upstream.ca); f.config.outbound!.interimDelivery = true;
+  if (flag !== undefined) f.config.outbound!.meetingDrafts = flag;
+  const client = new Client({ logger: safeSdkLogger }); const agent = new Agent({ ca: provider.ca, rejectUnauthorized: true }); t.after(() => agent.destroy());
+  const dependencies = { ...auth.dependencies, botToken: () => { tokens++; return 'meeting-token'; },
+    providerGet: (url: string, config: Parameters<typeof client.get>[1]) => {
+      assert.equal(url, `${serviceUrl}v3/conversations/19%3Afixture-personal/pagedMembers`);
+      return client.get(url.replace(serviceUrl, provider.baseUrl), { ...config, httpsAgent: agent });
+    }, providerPost: providerWrapper(t, provider.baseUrl, provider.ca, 'meeting-token') };
+  let runtime = f.own(await startIngressRuntime(f.config, dependencies));
+  const caps = async () => (await (await fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/capabilities`, { headers: { Authorization: `Bearer ${f.config.outbound!.bearerToken}` } })).json() as { capabilities: Record<string, boolean> }).capabilities;
+  assert.equal(Object.hasOwn(await caps(), 'meetingDrafts'), flag === true); assert.equal(tokens, 0);
+  assert.equal((await post(runtime.port, auth.token())).status, 200); const event = await accepted.promise; assert.equal(tokens, 0);
+  const body = { ...finalDelivery, kind: 'message', replyTarget: event.replyTarget!, metadata: {
+    'meeting.version': '1', 'meeting.subject': 'Runtime meeting', 'meeting.durationMinutes': '30', 'meeting.attendees': 'everyone', 'meeting.agenda.0': 'Design' } };
+  const receipt = { status: 'delivered', providerMessageId: 'meeting-runtime-receipt' };
+  assert.deepEqual(await (await deliver(runtime, f.config, body)).json(), receipt); assert.equal(gets, flag === true ? 1 : 0); assert.equal(actions, flag === true ? 1 : 0);
+  await runtime.stop(); f.config.outbound!.meetingDrafts = false; f.config.outbound!.interimDelivery = false;
+  runtime = f.own(await startIngressRuntime(f.config, dependencies)); assert.equal(Object.hasOwn(await caps(), 'meetingDrafts'), false);
+  assert.deepEqual(await (await deliver(runtime, f.config, { ...body, deliveryId: 'disabled-meeting-alias' })).json(), receipt);
+  assert.equal(posts, 1); assert.equal(gets, flag === true ? 1 : 0);
+});
+
 test('real registered SDK input -> inbox -> HTTPS Orka -> V1 reply -> SDK HTTPS receipt; concurrent aliases and restart replay one effect', { timeout: 12000 }, async (t) => {
   const auth = await authFixture(t); const event = deferred<EventEnvelope>(); const accepted = deferred<void>(); const release = deferred<void>();
   const providerToken = randomUUID(); let sends = 0; let bytes = 0; let inboundAuthenticated = false;
@@ -394,6 +429,34 @@ test('shutdown aborts API and drains same-App token work before either store clo
   await until(() => refused(runtime.outboundPort!)); assert.equal(stopped, false); assert.ok(await refused(runtime.port));
   token.resolve(randomUUID()); await stopping; await pending; assert.equal(sends, 0);
   const owned = f.reopen(); try { assert.equal(owned.journal.begin(finalDelivery).kind, 'claimed'); } finally { owned.close(); }
+});
+
+for (const phase of ['token', 'GET'] as const) test(`meeting ${phase} shutdown retains both SQLite owners until actual work drains, with no late POST`, { timeout: 7000 }, async t => {
+  const f = storage(t); f.seed(); f.config.outbound!.interimDelivery = true; f.config.outbound!.meetingDrafts = true;
+  const entered = deferred<void>(); const release = deferred<void>(); const cancelled = deferred<void>(); let gets = 0; let posts = 0;
+  const provider = await httpsFixture(t, (_req, res) => { gets++; res.once('close', () => cancelled.resolve()); entered.resolve(); });
+  const client = new Client({ logger: safeSdkLogger }); const agent = new Agent({ ca: provider.ca, rejectUnauthorized: true }); t.after(() => agent.destroy());
+  const runtime = f.own(await startIngressRuntime(f.config, {
+    botToken: async () => { if (phase === 'token') { entered.resolve(); await release.promise; } return 'meeting-drain-token'; },
+    providerGet: async (url, config) => {
+      assert.equal(url, `${serviceUrl}v3/conversations/19%3Afixture-personal/pagedMembers`);
+      try { return await client.get(url.replace(serviceUrl, provider.baseUrl), { ...config, httpsAgent: agent }); }
+      catch { await release.promise; throw new Error('Synthetic GET cancelled'); }
+    }, providerPost: async () => { posts++; throw new Error('No late POST permitted'); },
+  }));
+  const input = { ...finalDelivery, kind: 'message' as const, metadata: { 'meeting.version': '1', 'meeting.subject': 'Drain',
+    'meeting.durationMinutes': '30', 'meeting.attendees': 'everyone', 'meeting.agenda.0': 'Design' } };
+  const pending = deliver(runtime, f.config, input).catch(() => undefined);
+  let stopping: Promise<void> | undefined; let stopped = false;
+  try {
+    await entered.promise; stopping = runtime.stop().then(() => { stopped = true; });
+    await until(() => refused(runtime.outboundPort!)); if (phase === 'GET') await cancelled.promise;
+    assert.equal(stopped, false); assert.equal(posts, 0); assert.equal(gets, phase === 'GET' ? 1 : 0);
+    assert.throws(() => openIngressStore(f.config.dbPath, f.config.scope), { code: 'busy' });
+    assert.throws(() => openDeliveryJournal(f.config.outbound!.dbPath, journalScope), { code: 'busy' });
+  } finally { release.resolve(); await stopping; await pending; }
+  assert.equal(posts, 0); assert.equal(gets, phase === 'GET' ? 1 : 0);
+  const owned = f.reopen(); try { assert.equal(owned.journal.begin(input).kind, 'claimed'); } finally { owned.close(); }
 });
 
 test('provider acceptance followed by caller disconnect becomes unknown, survives restart and never sends again', { timeout: 10000 }, async (t) => {

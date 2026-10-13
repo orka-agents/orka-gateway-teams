@@ -10,13 +10,18 @@ import { formatDelivery } from '../teams/format.js';
 import type { OutgoingTeamsMessage } from '../teams/format.js';
 import type { DeliveryContext, DeliveryDispatcher, DeliveryResponse, DispatcherOptions } from './types.js';
 import { snapshotDelivery } from './validate.js';
+import { decodeMeetingDraft } from '../teams/meeting-draft.js';
+import { formatMeetingDraft, meetingLink } from '../teams/meeting-card.js';
+import type { MeetingUnavailable, MeetingAudience } from '../teams/meeting-card.js';
+import { resolveMeetingAttendees } from './meeting-roster.js';
 
 const retryable: DeliveryResponse = Object.freeze({ status: 'retryableError', message: 'Delivery is temporarily unavailable.' });
 const nonRetryable: DeliveryResponse = Object.freeze({ status: 'nonRetryableError', message: 'Delivery cannot be completed safely.' });
 
 export function createDeliveryDispatcher(options: DispatcherOptions): DeliveryDispatcher {
-  const { journal, sender, getRoute, correlation, interimDelivery } = options;
-  if (interimDelivery !== undefined && typeof interimDelivery !== 'boolean') throw new ConfigurationError();
+  const { journal, sender, getRoute, correlation, interimDelivery, meetingDrafts } = options;
+  if ((interimDelivery !== undefined && typeof interimDelivery !== 'boolean') ||
+      (meetingDrafts !== undefined && typeof meetingDrafts !== 'boolean') || (meetingDrafts === true && interimDelivery !== true)) throw new ConfigurationError();
   const scope = validateScope(options.scope);
   const services = new Set(options.serviceUrls); const recipients = new Set(options.recipientIds);
   const work = new Set<Promise<DeliveryResponse>>(); const controllers = new Set<AbortController>();
@@ -66,6 +71,11 @@ export function createDeliveryDispatcher(options: DispatcherOptions): DeliveryDi
         return finish({ kind: 'rejected' });
       }
     } catch { return finish({ kind: 'rejected' }); }
+    let draft;
+    try {
+      draft = decodeMeetingDraft(request.metadata);
+      if (draft && request.kind !== 'message') return finish({ kind: 'rejected' });
+    } catch { return finish({ kind: 'rejected' }); }
     const shared = route.conversation.conversationType !== 'personal';
     let continuation = false;
     if (shared && correlation) {
@@ -81,11 +91,35 @@ export function createDeliveryDispatcher(options: DispatcherOptions): DeliveryDi
     }
     let message: OutgoingTeamsMessage;
     try {
-      message = formatDelivery(request, shared ? {
+      const presentation = shared ? {
         ...(route.requester?.displayName === undefined ? {} : { requesterDisplayName: route.requester.displayName }),
         continuation,
         ...(route.conversation.conversationType === 'channel' ? { replyToId: route.threadId } : {}),
-      } : undefined);
+      } : undefined;
+      if (draft) {
+        let reason: MeetingUnavailable | undefined;
+        let audience: MeetingAudience = { labels: [], count: 0 }; let url: string | undefined;
+        if (meetingDrafts !== true) reason = 'disabled';
+        else if (route.conversation.conversationType === 'channel') reason = 'channel';
+        else if (!sender.getMembers) reason = 'roster';
+        else {
+          if (!active()) return finish({ kind: 'retryable' });
+          let roster;
+          try { roster = await sender.getMembers(route, { signal, deadline }); }
+          catch { return finish({ kind: 'retryable' }); }
+          if (!active() || roster.kind === 'retryable') return finish({ kind: 'retryable' });
+          if (roster.kind !== 'members') reason = 'roster';
+          else {
+            const selected = resolveMeetingAttendees(draft, route, roster.members);
+            if (selected.kind !== 'attendees') reason = 'attendees';
+            else {
+              audience = selected.audience; url = meetingLink(draft, selected.upns);
+              if (url === undefined) reason = 'link-too-long';
+            }
+          }
+        }
+        message = formatMeetingDraft(draft, audience, url, presentation, reason);
+      } else message = formatDelivery(request, presentation);
     } catch { return finish({ kind: 'rejected' }); }
     // The budget starts before snapshot/SQLite/formatting. Do not rely solely
     // on a timer getting a turn after potentially blocking synchronous work.

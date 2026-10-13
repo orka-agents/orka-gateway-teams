@@ -10,14 +10,18 @@ import { MAX_ADAPTER_RESPONSE_BYTES } from '../protocol/types.js';
 import { MAX_OUTGOING_MESSAGE_BYTES } from '../teams/format.js';
 import type { OutgoingTeamsMessage } from '../teams/format.js';
 import type { DeliveryContext, ProviderResult, ProviderSender } from './types.js';
+import { decodeMeetingMembers, MAX_ROSTER_BYTES } from './meeting-roster.js';
+import type { MembersResult } from './meeting-roster.js';
 
 // Trusted library I/O seam. Production always uses the fresh public SDK client.
 export type ProviderPost = (url: string, body: Buffer, config: RequestConfig<Buffer>) => Promise<{ status: number; data: unknown }>;
-export function createProviderSender(acquireToken: () => Promise<string | undefined>, options: { ca?: string | Buffer; post?: ProviderPost } = {}): ProviderSender {
+export type ProviderGet = (url: string, config: RequestConfig) => Promise<{ status: number; data: unknown }>;
+export function createProviderSender(acquireToken: () => Promise<string | undefined>, options: { ca?: string | Buffer; post?: ProviderPost; get?: ProviderGet } = {}): ProviderSender {
   const ca = Buffer.isBuffer(options.ca) ? Buffer.from(options.ca) : options.ca;
   const agent = new Agent({ rejectUnauthorized: true, ...(ca === undefined ? {} : { ca }) });
   const client = new Client({ logger: safeSdkLogger });
   const post: ProviderPost = options.post ?? ((url, body, config) => client.post(url, body, config));
+  const get: ProviderGet = options.get ?? ((url, config) => client.get(url, config));
   const work = new Set<Promise<unknown>>();
   const io = new Set<Promise<unknown>>();
   const aborts = new Set<() => void>();
@@ -103,8 +107,53 @@ export function createProviderSender(acquireToken: () => Promise<string | undefi
     return result;
   }
 
+  function getMembers(route: Readonly<ReplyRoute>, context: DeliveryContext = {}): Promise<MembersResult> {
+    const deadline = Math.min(performance.now() + 9000, context.deadline ?? Infinity);
+    let url: string;
+    try {
+      if (route.conversation.conversationType !== 'personal' && route.conversation.conversationType !== 'groupChat') throw new Error();
+      const base = httpsBase(route.serviceUrl); const conversationId = identity(route.conversation.id);
+      if (conversationId === '.' || conversationId === '..') throw new Error();
+      url = `${base}v3/conversations/${encodeURIComponent(conversationId)}/pagedMembers`;
+    } catch { return Promise.resolve({ kind: 'unavailable' }); }
+    if (stopped || context.signal?.aborted || !Number.isFinite(deadline) || performance.now() >= deadline || !tlsVerificationEnabled()) return Promise.resolve({ kind: 'retryable' });
+    const result = new Promise<MembersResult>((resolve) => {
+      const controller = new AbortController(); let finished = false;
+      const finish = (outcome: MembersResult) => {
+        if (finished) return;
+        finished = true; tokenWaiters.delete(onToken); clearTimeout(timer); aborts.delete(abort); context.signal?.removeEventListener('abort', abort);
+        resolve(outcome);
+      };
+      // GET has no provider effect, even after handoff. Actual work still drains.
+      const abort = () => { finish({ kind: 'retryable' }); controller.abort(); };
+      const timer = setTimeout(abort, Math.max(1, Math.ceil(deadline - performance.now())));
+      aborts.add(abort); context.signal?.addEventListener('abort', abort, { once: true });
+      const onToken = (value: string | undefined) => {
+        if (finished) return;
+        if (stopped || context.signal?.aborted || performance.now() >= deadline || !tlsVerificationEnabled() ||
+            typeof value !== 'string' || !value || value.length > 8192 || !/^[A-Za-z0-9._~+/-]+=*$/u.test(value)) { finish({ kind: 'retryable' }); return; }
+        const config: RequestConfig = { token: value, headers: { Accept: 'application/json' }, httpsAgent: agent,
+          maxRedirects: 0, proxy: false, responseType: 'arraybuffer', decompress: false, maxContentLength: MAX_ROSTER_BYTES,
+          maxBodyLength: 0, validateStatus: () => true, signal: controller.signal, timeout: Math.max(1, Math.ceil(deadline - performance.now())) };
+        try {
+          const pending = get(url, config).then(response => {
+            if (!finished) finish(decodeMeetingMembers(response));
+          }, (error: unknown) => {
+            // Axios's raw length rejection is a bad roster, not a retry loop.
+            const tooLarge = error !== null && typeof error === 'object' && 'code' in error && error.code === 'ERR_BAD_RESPONSE';
+            finish({ kind: tooLarge ? 'unavailable' : 'retryable' });
+          }).catch(() => finish({ kind: 'retryable' }));
+          io.add(pending); void pending.then(() => io.delete(pending));
+        } catch { finish({ kind: 'retryable' }); }
+      };
+      tokenWaiters.add(onToken); token();
+    });
+    work.add(result); void result.then(() => work.delete(result));
+    return result;
+  }
+
   return {
-    send,
+    send, getMembers,
     stop() {
       if (!stopping) {
         stopped = true;

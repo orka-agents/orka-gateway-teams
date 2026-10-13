@@ -3,6 +3,7 @@ import type { DeliveryJournalPort, JournalScope } from '../delivery/types.js';
 import type { SessionCorrelationPort } from '../delivery/session-correlation.js';
 import type { ReplyRoute } from '../ingress/types.js';
 import type { OutgoingTeamsMessage } from '../teams/format.js';
+import type { MembersResult } from './meeting-roster.js';
 
 export interface DeliveryResponse {
   status: 'delivered' | 'retryableError' | 'nonRetryableError';
@@ -12,11 +13,13 @@ export interface DeliveryResponse {
 export interface DeliveryContext { signal?: AbortSignal; deadline?: number }
 export type ProviderResult = { kind: 'delivered'; providerMessageId: string } | { kind: 'retryable' | 'unknown' };
 export interface ProviderSender {
+  getMembers?(route: Readonly<ReplyRoute>, context?: DeliveryContext): Promise<MembersResult>;
   send(route: Readonly<ReplyRoute>, message: Readonly<OutgoingTeamsMessage>, context?: DeliveryContext): Promise<ProviderResult>;
   stop(): Promise<void>;
 }
 export interface DispatcherOptions {
   interimDelivery?: boolean;
+  meetingDrafts?: boolean;
   journal: DeliveryJournalPort;
   correlation?: SessionCorrelationPort;
   scope: Readonly<JournalScope>;

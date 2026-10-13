@@ -50,14 +50,18 @@ message sends, while retaining historical receipt replay.
 
 ## Tool availability and delivery semantics
 
-On the supporting Orka build, `reply_in_conversation` is a content-only native AI
-worker/ACP broker tool for an authenticated gateway-origin Task whose tool and
+On the supporting Orka build, `reply_in_conversation` is a native AI worker/ACP
+broker tool for an authenticated gateway-origin Task whose tool and
 transaction policies permit it. Native bootstrap must establish durable origin;
 ordinary/delegated/container/compatibility-proxy Tasks do not gain the tool merely
 from a prompt or gateway flag. ACP freezes policy before session creation: built-in
 providers retain their defaults, while external profiles must explicitly include
 the tool and match their registered/conformed policy. Existing frozen sessions are
 not silently upgraded. Explicit denials and closed tool lists still apply.
+
+Content-only calls retain these semantics. [Optional structured meeting drafts](meeting-drafts.md)
+require the newer typed Orka contract plus the separate default-off meeting flag;
+their roster lookup, privacy and no-action rules do not apply to ordinary prose.
 
 Tool success means durable controller admission, **not Teams delivery**. It does
 not finish or suspend the Task, write final/canonical Session history, or release
@@ -117,6 +121,7 @@ synthetic final replies, new wire fields, polling or a second answer queue.
 
 ## Disable and roll back safely
 
+For structured drafts, also follow the [meeting withdrawal/old-reader constraints](meeting-drafts.md#withdrawal-and-qualification).
 Pause new work first. **Settle or abandon outstanding message deliveries using the
 supporting controller before disabling or rolling back**. Then set
 `INTERIM_DELIVERY_ENABLED=false` (or omit it) through a clean gateway owner

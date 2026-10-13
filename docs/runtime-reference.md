@@ -225,6 +225,7 @@ Add these variables to the existing serve configuration and use the same `npm st
 |---|---|
 | `OUTBOUND_ENABLED` | Exactly `true` to enable; absent or `false` means ingress-only |
 | `INTERIM_DELIVERY_ENABLED` | Optional exact `true` / `false`, omitted defaults off; `true` requires full mode and a supporting controller. See [rollout and withdrawal](interim-delivery.md) |
+| `MEETING_DRAFTS_ENABLED` | Optional exact `true` / `false`, omitted defaults off; `true` requires outbound plus interim and the supporting Orka controller/worker/CRDs first. See [meeting drafts and privacy](meeting-drafts.md) |
 | `DELIVERY_DB` | Absolute, separately provisioned journal path |
 | `CORRELATION_DB` | Optional SQLite-only separate evidence path; explicit `init-correlation`, never initialized by serve. Omitted/missing main means no continuation label; existing corrupt/busy/foreign-scope storage fails startup |
 | `ORKA_OUTBOUND_BEARER_TOKEN` | Required Orka-to-adapter bearer, **different** from `ORKA_BEARER_TOKEN` |
@@ -232,7 +233,8 @@ Add these variables to the existing serve configuration and use the same `npm st
 | `OUTBOUND_PORT` | `3979`; integer 1–65535 |
 
 All outbound storage/bearer/listener fields must be absent when outbound is disabled.
-`INTERIM_DELIVERY_ENABLED=false` may be supplied without outbound; `true` is rejected. Invalid booleans, partial config,
+`INTERIM_DELIVERY_ENABLED=false` and `MEETING_DRAFTS_ENABLED=false` may be supplied
+without outbound; `true` requires the corresponding prerequisites. Invalid booleans, partial config,
 identical directional tokens and path collisions (including canonical aliases and
 ownership/SQLite sidecars) fail closed, not silently fall back to ingress-only.
 Bearers are nonempty RFC6750-shaped values bounded at 8192 characters; do not log
@@ -279,6 +281,10 @@ With `INTERIM_DELIVERY_ENABLED=true`, the capabilities object additionally conta
 `interimDelivery: true`. Omitted/false settings omit this field entirely for older
 strict-controller compatibility. New messages are refused while off, but saved
 message receipts replay even after withdrawal. See [interim semantics](interim-delivery.md).
+With `MEETING_DRAFTS_ENABLED=true`, `meetingDrafts: true` is additionally advertised;
+omitted/false settings omit it. [Structured meeting drafts](meeting-drafts.md) use
+private current-chat roster GETs and the same claim/receipt lifecycle, not calendar
+or Graph access. Settle/abandon pending drafts before capability withdrawal or old readers.
 
 - `POST /v1/deliveries`: strict V1 `DeliveryRequest` (`final`, `error`, or opt-in
   `message`), uncompressed UTF-8 JSON only.
