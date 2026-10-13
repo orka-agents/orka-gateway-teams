@@ -154,7 +154,8 @@ setup images to GHCR with `GITHUB_TOKEN`, then attaches
 Setup derives from the exact gateway digest. The release owner must ensure both
 GHCR packages are public before advertising installation. No deployment assets
 or tenant configuration are changed by publishing. Address dependency advisories
-before tagging; the first proposed release is `v0.1.0`.
+before tagging; the first proposed release is `v0.1.0`. Only stable
+`vMAJOR.MINOR.PATCH` tags are accepted; prerelease tags fail before publication.
 
 Release checks require Python 3, Docker and actionlint in addition to Node 24:
 

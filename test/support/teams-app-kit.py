@@ -115,7 +115,7 @@ class KitTests(unittest.TestCase):
                 self.assertIsNone(archive.testzip())
 
     def test_invalid_version_and_digest_refused_before_output(self):
-        for version in ['../../escape', '0.1.0;echo', 'v01.0.0', 'v0.1', '0.1.0\n', '0.1.0-' + 'x' * 100]:
+        for version in ['../../escape', '0.1.0;echo', 'v01.0.0', 'v0.1', '0.1.0\n', 'v0.2.0-rc.1', '0.1.0-' + 'x' * 100]:
             with self.subTest(version=version):
                 self.assertNotEqual(self.build(version=version).returncode, 0)
                 self.assertFalse(self.output.exists())

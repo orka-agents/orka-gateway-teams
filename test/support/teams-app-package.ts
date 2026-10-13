@@ -118,6 +118,7 @@ for (const scopes of [['personal'], ['groupChat'], ['team'], ['personal', 'group
   test(`Teams shared-room profile rejects incomplete or extra scopes: ${scopes.join(',')}`, () => {
     const f = fixture();
     try {
+      f.manifest.supportsChannelFeatures = 'tier1';
       f.manifest.bots[0].scopes = scopes;
       const result = f.run(undefined, 'shared-rooms'); assert.equal(result.status, 1);
       assert.equal(result.stdout, '');
@@ -131,6 +132,7 @@ for (const profile of ['personal', 'shared-rooms']) {
   test(`Teams ${profile} profile rejects object-shaped scopes rather than treating keys as scopes`, () => {
     const f = fixture();
     try {
+      if (profile === 'shared-rooms') f.manifest.supportsChannelFeatures = 'tier1';
       f.manifest.bots[0].scopes = profile === 'personal' ? { personal: true } : { personal: true, groupChat: true, team: true };
       const result = f.run(undefined, profile); assert.equal(result.status, 1);
       assert.equal(result.stdout, '');

@@ -9,14 +9,14 @@ import tarfile
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = re.compile(r'v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([a-zA-Z0-9]+(?:[.-][a-zA-Z0-9]+)*))?')
+VERSION = re.compile(r'v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)')
 IMAGE = re.compile(r'ghcr\.io/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+@sha256:[0-9a-f]{64}')
 REPOSITORY = re.compile(r'[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+')
 
 
 def release_version(value):
     if len(value) > 64 or not VERSION.fullmatch(value):
-        raise ValueError('expected bounded release version, for example v0.1.0')
+        raise ValueError('expected bounded stable release version, for example v0.1.0')
     return value.removeprefix('v')
 
 
