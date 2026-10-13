@@ -57,6 +57,19 @@ test('raw complete roster validation refuses continuation, excess bounds, malfor
   for (status of [408, 429, 500, 503]) assert.equal((await sender.getMembers!(saved)).kind, 'retryable');
 });
 
+test('native chunked roster overflow is permanent, but an oversized transient server response still retries', async t => {
+  let status = 200;
+  const tls = await httpsFixture(t, (_req, res) => {
+    res.writeHead(status, { 'Transfer-Encoding': 'chunked' });
+    res.end(JSON.stringify({ members }).padEnd(256 * 1024 + 1));
+  });
+  const sender = createProviderSender(async () => 'token', { ca: tls.ca }); t.after(() => sender.stop());
+  const saved = { ...route, serviceUrl: tls.baseUrl };
+  assert.deepEqual(await sender.getMembers!(saved), { kind: 'unavailable' });
+  status = 500;
+  assert.deepEqual(await sender.getMembers!(saved), { kind: 'retryable' });
+});
+
 test('untrusted TLS and unsafe/channel routes never reach fixture GET', async t => {
   let calls = 0; let tokens = 0;
   const tls = await httpsFixture(t, (_req, res) => { calls++; res.end(JSON.stringify({ members })); });

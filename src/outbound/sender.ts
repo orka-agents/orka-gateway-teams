@@ -1,4 +1,6 @@
-import { Agent } from 'node:https';
+import { Agent, request as httpsRequest } from 'node:https';
+import type { RequestOptions } from 'node:https';
+import type { IncomingMessage } from 'node:http';
 import { Client } from '@microsoft/teams.common/http';
 import type { RequestConfig } from '@microsoft/teams.common/http';
 import { identity } from '../delivery/identity.js';
@@ -132,16 +134,27 @@ export function createProviderSender(acquireToken: () => Promise<string | undefi
         if (finished) return;
         if (stopped || context.signal?.aborted || performance.now() >= deadline || !tlsVerificationEnabled() ||
             typeof value !== 'string' || !value || value.length > 8192 || !/^[A-Za-z0-9._~+/-]+=*$/u.test(value)) { finish({ kind: 'retryable' }); return; }
+        let receivedBytes = 0; let responseStatus: number | undefined;
         const config: RequestConfig = { token: value, headers: { Accept: 'application/json' }, httpsAgent: agent,
           maxRedirects: 0, proxy: false, responseType: 'arraybuffer', decompress: false, maxContentLength: MAX_ROSTER_BYTES,
+          // Axios uses the same error code for overflow and aborted bodies. Count
+          // native bytes without retaining them or relying on private error text.
+          // Our deadline/abort owns connect and body lifetime; custom transport
+          // must not rely on Axios's native-only connect-phase timeout.
+          transport: { request: (requestOptions: RequestOptions, callback: (response: IncomingMessage) => void) =>
+            httpsRequest(requestOptions, response => {
+              responseStatus = response.statusCode;
+              response.on('data', (chunk: Buffer) => { receivedBytes += chunk.length; });
+              callback(response);
+            }) },
           maxBodyLength: 0, validateStatus: () => true, signal: controller.signal, timeout: Math.max(1, Math.ceil(deadline - performance.now())) };
         try {
           const pending = get(url, config).then(response => {
             if (!finished) finish(decodeMeetingMembers(response));
-          }, (error: unknown) => {
-            // Axios's raw length rejection is a bad roster, not a retry loop.
-            const tooLarge = error !== null && typeof error === 'object' && 'code' in error && error.code === 'ERR_BAD_RESPONSE';
-            finish({ kind: tooLarge ? 'unavailable' : 'retryable' });
+          }, () => {
+            const permanentOverflow = receivedBytes > MAX_ROSTER_BYTES && responseStatus !== undefined &&
+              responseStatus !== 408 && responseStatus !== 429 && responseStatus < 500;
+            finish({ kind: permanentOverflow ? 'unavailable' : 'retryable' });
           }).catch(() => finish({ kind: 'retryable' }));
           io.add(pending); void pending.then(() => io.delete(pending));
         } catch { finish({ kind: 'retryable' }); }

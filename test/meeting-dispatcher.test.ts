@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { Client } from '@microsoft/teams.common/http';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { request as httpsRequest } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -57,6 +58,36 @@ test('native roster to measured action, same durable receipt replay zero GET/POS
     for (const sentinel of ['private-roster', 'private-email', 'Roster Person', 'teams.microsoft.com/l/meeting/new']) assert.equal(bytes.includes(Buffer.from(sentinel)), false);
   }
   assert.equal(JSON.stringify(response).includes('private'), false);
+});
+
+test('native mid-body roster disconnect retries the original claim without settling a no-action card', async t => {
+  let gets = 0; let posts = 0; let action = false;
+  let broken: import('node:http').ServerResponse | undefined;
+  const tls = await httpsFixture(t, async (req, res) => {
+    if (req.method === 'GET') {
+      gets++;
+      if (gets === 1) { broken = res; res.writeHead(200, { 'Content-Length': '1000' }); res.write('{"members":['); }
+      else res.end(JSON.stringify({ members }));
+    } else {
+      posts++; const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      action = Buffer.concat(chunks).includes(Buffer.from('Action.OpenUrl')); res.end('{"id":"provider-fixture"}');
+    }
+  });
+  const client = new Client({ logger: safeSdkLogger });
+  const sender = createProviderSender(async () => 'token', { ca: tls.ca,
+    get: (url, config) => client.get(url.replace(route.serviceUrl, tls.baseUrl), { ...config, transport: {
+      // Observe bytes without Axios's progress transform changing the error code.
+      request: (options: import('node:https').RequestOptions, callback: (response: import('node:http').IncomingMessage) => void) =>
+        (config.transport ?? { request: httpsRequest }).request(options, (response: import('node:http').IncomingMessage) => {
+          response.once('data', () => broken?.destroy()); callback(response);
+        }),
+    } }),
+    post: (url, body, config) => client.post(url.replace(route.serviceUrl, tls.baseUrl), body, config) });
+  const f = fixture(t, sender);
+  assert.equal((await f.dispatcher.deliver(input)).status, 'retryableError'); assert.equal(posts, 0);
+  assert.deepEqual(await f.dispatcher.deliver(input), success); assert.equal(gets, 2); assert.equal(posts, 1); assert.equal(action, true);
+  assert.deepEqual(await f.dispatcher.deliver({ ...input, deliveryId: 'recovered-alias' }), success);
+  assert.equal(gets, 2); assert.equal(posts, 1);
 });
 
 for (const state of ['disabled', 'channel', 'roster', 'missing', 'ambiguous', 'outsider', 'overflow'] as const) test(`${state} produces a visible complete no-action card under the same claim`, async t => {

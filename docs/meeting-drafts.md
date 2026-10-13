@@ -60,8 +60,10 @@ The tool keeps its required ordinary `content` and may add a closed `meetingDraf
 
 Draft strings must be well-formed Unicode without Cc controls. Unknown properties,
 email/UPN names, destinations, URLs, cards and directory/member IDs are not allowed.
-Oversized/invalid fields are rejected, never sanitized or truncated. Tool success
-means durable Orka admission, not Teams delivery or meeting creation. Existing
+Orka applies its existing trim/redaction policy before persisting the projection,
+checking both raw and transformed byte bounds. Invalid/oversized fields are
+rejected, never truncated; the gateway does not further normalize draft fields.
+Tool success means durable Orka admission, not Teams delivery or meeting creation. Existing
 policy, per-Task quota, ordering and final/error semantics still apply.
 
 The controller derives these stable metadata keys, not arbitrary model metadata:
@@ -69,12 +71,12 @@ The controller derives these stable metadata keys, not arbitrary model metadata:
 | Key | Value |
 | --- | --- |
 | `meeting.version` | `1` |
-| `meeting.subject` | Exact subject |
+| `meeting.subject` | Controller-canonical subject |
 | `meeting.durationMinutes` | Canonical decimal duration, including the default |
 | `meeting.attendees` | `everyone` or `named` |
 | `meeting.agenda.0` through `.4` | Contiguous agenda items starting at zero |
 | `meeting.name.0` through `.9` | Contiguous names for named mode only |
-| `meeting.preferredWindow` | Optional exact preference |
+| `meeting.preferredWindow` | Optional controller-canonical preference |
 | `meeting.suggestedStart` | Optional explicit-offset timestamp |
 
 The gateway independently decodes this projection, refusing unknown `meeting.*`
@@ -96,8 +98,10 @@ redirects, environment proxies and hidden retries are disabled. One response is
 bounded to **256 KiB and 1000 records**. An unexpected continuation token,
 duplicate record identity or malformed page cannot prove a complete chat roster.
 
-The installed bot and non-person/bot accounts are excluded. Personal chat must
-prove exactly one current person. `everyone` requires a usable UPN for every
+The installed bot and explicitly identified non-person/bot accounts are excluded.
+An unmarked app record without a usable UPN is not guessed to be a bot from its ID
+or silently dropped: an `everyone` draft becomes no-action. This can affect chats
+with additional installed apps. Personal chat must prove exactly one current person. `everyone` requires a usable UPN for every
 selected person. Named mode requires each requested name to uniquely match a full
 current display name (case-insensitive, surrounding whitespace ignored); no
 partial/fuzzy/directory match is used. Duplicate selected UPNs are deduplicated.
