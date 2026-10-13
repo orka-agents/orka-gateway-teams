@@ -12,12 +12,16 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
-def manifest_bytes(path, profile='personal'):
+def manifest_bytes(path, bot_id, profile='personal'):
     raw = path.read_bytes()
     if len(raw) > 65536:
         raise ValueError('manifest too large')
     value = json.loads(raw)
     expected = {'$schema', 'manifestVersion', 'version', 'id', 'developer', 'name', 'description', 'icons', 'accentColor', 'bots'}
+    if profile == 'shared-rooms':
+        expected.add('supportsChannelFeatures')
+        if value.get('supportsChannelFeatures') != 'tier1':
+            raise ValueError('shared rooms require tier1 channel features')
     if set(value) != expected or 'REQUIRED_' in raw.decode('utf-8'):
         raise ValueError('use the completed manifest template for the selected profile')
     if value['manifestVersion'] != '1.30' or value['icons'] != {'color': 'color.png', 'outline': 'outline.png'}:
@@ -29,7 +33,8 @@ def manifest_bytes(path, profile='personal'):
     bot = value['bots'][0]
     if not isinstance(bot['scopes'], list) or sorted(bot['scopes']) != sorted(scopes):
         raise ValueError('the selected profile scopes are required')
-    uuid.UUID(bot['botId'])
+    if uuid.UUID(bot['botId']) != uuid.UUID(bot_id):
+        raise ValueError('explicit bot ID must match the reviewed manifest')
     if set(bot) != {'botId', 'scopes', 'isNotificationOnly', 'supportsFiles', 'supportsCalling', 'supportsVideo'}:
         raise ValueError('unexpected bot settings')
     if any(bot[key] is not False for key in ('isNotificationOnly', 'supportsFiles', 'supportsCalling', 'supportsVideo')):
@@ -69,12 +74,13 @@ def main():
     parser = QuietArgumentParser(description=__doc__)
     parser.add_argument('--profile', choices=('personal', 'shared-rooms'), default='personal',
                         help='required manifest scopes: personal (default), or personal + groupChat + team')
+    parser.add_argument('--bot-id', required=True, help='registered bot app UUID; must match the completed manifest')
     parser.add_argument('--manifest', required=True, type=Path)
     parser.add_argument('--color', required=True, type=Path)
     parser.add_argument('--outline', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args()
-    files = {'manifest.json': manifest_bytes(args.manifest, args.profile), 'color.png': png_bytes(args.color, 192),
+    files = {'manifest.json': manifest_bytes(args.manifest, args.bot_id, args.profile), 'color.png': png_bytes(args.color, 192),
              'outline.png': png_bytes(args.outline, 32, outline=True)}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     created_output = False

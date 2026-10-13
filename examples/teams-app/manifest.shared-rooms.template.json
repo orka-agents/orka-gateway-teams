@@ -1,6 +1,7 @@
 {
   "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.30/MicrosoftTeams.schema.json",
   "manifestVersion": "1.30",
+  "supportsChannelFeatures": "tier1",
   "version": "1.0.0",
   "id": "REQUIRED_TEAMS_PACKAGE_GUID",
   "developer": {
@@ -15,7 +16,7 @@
   },
   "description": {
     "short": "Mention an operator-managed Orka agent in an authorized group chat or channel.",
-    "full": "Send personal text requests or mention Orka in an authorized group chat or channel. Room participants share conversation context. Access is limited to explicitly authorized senders and conversations. Requires a shared-room-capable gateway. Calling and file transfer are not supported."
+    "full": "Send personal text requests or mention Orka in an authorized group chat or channel. Room participants share conversation context. Shared-room access follows conversation membership in explicitly authorized rooms. Requires a shared-room-capable gateway. Calling and file transfer are not supported."
   },
   "icons": {
     "color": "color.png",

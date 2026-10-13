@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Validate version and image names
+        id: names
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 -B - <<'PY'
+          import importlib.util
+          import os
+          spec = importlib.util.spec_from_file_location('kit', 'scripts/build-teams-app-kit.py')
+          kit = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(kit)
+          tag = os.environ['TAG']
+          if not tag.startswith('v'):
+              raise ValueError('release tag must start with v')
+          version = kit.release_version(tag)
+          image = 'ghcr.io/' + os.environ['GITHUB_REPOSITORY'].lower()
+          kit.validate_images(image + '@sha256:' + '0' * 64, image + '-setup@sha256:' + '0' * 64)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'version={version}\ngateway={image}\nsetup={image}-setup\n')
+          PY
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.2.0'
+          cache: npm
+      - name: Check source and packaging before publication
+        run: |
+          npm ci --ignore-scripts
+          npm audit --omit=dev
+          npm run check
+          npm run test:app-package
+          npm run test:app-kit
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push gateway
+        id: gateway
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.names.outputs.gateway }}:${{ github.ref_name }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.names.outputs.version }}
+      - name: Build and push setup from gateway digest
+        id: setup
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: deploy/aca
+          file: deploy/aca/Dockerfile.setup
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.names.outputs.setup }}:${{ github.ref_name }}
+          build-args: |
+            GATEWAY_IMAGE=${{ steps.names.outputs.gateway }}@${{ steps.gateway.outputs.digest }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.names.outputs.version }}
+      - name: Record digests and build kit
+        env:
+          VERSION: ${{ steps.names.outputs.version }}
+          GATEWAY_IMAGE: ${{ steps.names.outputs.gateway }}@${{ steps.gateway.outputs.digest }}
+          SETUP_IMAGE: ${{ steps.names.outputs.setup }}@${{ steps.setup.outputs.digest }}
+        run: |
+          mkdir -p bin/release
+          python3 scripts/build-teams-app-kit.py --version "$VERSION" \
+            --gateway-image "$GATEWAY_IMAGE" --setup-image "$SETUP_IMAGE" \
+            --repository "$GITHUB_REPOSITORY" \
+            --output "bin/release/orka-teams-app-kit-$VERSION.tar.gz"
+          printf 'gateway=%s\nsetup=%s\n' "$GATEWAY_IMAGE" "$SETUP_IMAGE" | tee bin/release/image-digests.txt
+          {
+            printf '## Release images (linux/amd64)\n\n```text\n'
+            cat bin/release/image-digests.txt
+            printf '```\n\nDownload the Teams app kit and follow its README for your own bot and Orka cluster.\n'
+            printf '\nGHCR is the published registry. Ensure both packages are publicly readable before installation; see the kit for team-owned ACR imports.\n'
+          } > bin/release/release-notes.md
+          cat bin/release/release-notes.md >> "$GITHUB_STEP_SUMMARY"
+          tar -tzf "bin/release/orka-teams-app-kit-$VERSION.tar.gz"
+      - name: Attach kit and publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.names.outputs.version }}
+        run: |
+          # Keep a failed asset upload unpublished. Existing releases are never overwritten.
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            --title "$TAG" --notes-file bin/release/release-notes.md \
+            "bin/release/orka-teams-app-kit-$VERSION.tar.gz" bin/release/image-digests.txt
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false

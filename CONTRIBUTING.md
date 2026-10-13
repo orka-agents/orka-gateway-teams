@@ -136,13 +136,45 @@ gate requiring Python 3; it does not add Python to the default runtime/test path
 checks PNG headers rather than decoding/reviewing artwork, and refuses overwrite.
 Full manifest validation uses the Developer Portal or the documented optional,
 pinned JavaScript validators; no runtime dependencies are added. Keep PNG/ZIP,
-legal metadata and live configuration out of source. The default package profile
+legal metadata and live configuration out of source. The release kit builder
+generates generic icons into its archive, not into source; operators review or
+replace them. `--bot-id` is required and must match the completed manifest. The default package profile
 and `manifest.template.json` remain personal-only. The explicit `--profile
 shared-rooms` option requires exactly personal/groupChat/team scopes and uses the
 separate shared-room template; it grants no RSC permissions and alone does not
 authorize shared intake. See [shared-room runtime and rollout](docs/shared-rooms.md). Preserve default-profile rejection of shared-room manifests,
 byte-for-byte packaging, fixed error diagnostics, and all existing capability and
 output-ownership checks when extending the optional packaging tests.
+
+## Release tooling
+
+The tag-only `.github/workflows/release.yml` publishes linux/amd64 gateway and
+setup images to GHCR with `GITHUB_TOKEN`, then attaches
+`orka-teams-app-kit-<version>.tar.gz` and `image-digests.txt` to the release.
+Setup derives from the exact gateway digest. The release owner must ensure both
+GHCR packages are public before advertising installation. No deployment assets
+or tenant configuration are changed by publishing. Address dependency advisories
+before tagging; the first proposed release is `v0.1.0`.
+
+Release checks require Python 3, Docker and actionlint in addition to Node 24:
+
+```sh
+npm run check
+npm run test:app-package
+npm run test:app-kit
+actionlint .github/workflows/release.yml
+```
+
+The kit builder accepts only bounded versions and digest-pinned GHCR references;
+`--repository` chooses the release-tag-specific documentation links (defaults to
+this repository). It refuses overwrite and archives only public templates,
+helpers, generated icons, instructions, digest references and license. Optional
+packaging tests remain separate from runtime tests and require no credentials.
+For a local build dry run, build the root `Dockerfile`, then
+`deploy/aca/Dockerfile.setup` with `deploy/aca` as context and `GATEWAY_IMAGE` set
+to the immutable local gateway image ID. A local image ID is **not** a published
+registry digest. Validate both extracted kit profiles against the v1.30 schema;
+local validation is not Developer Portal or live deployment acceptance.
 
 ## Setup capture boundaries
 

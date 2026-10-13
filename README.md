@@ -63,6 +63,22 @@ for operator review; it does not authorize the sender or configure the Binding.
 handover procedure. Do not repeat first-install initialization, delete stores to
 make startup succeed, or replace an active storage owner.
 
+## Install from a release
+
+Download `orka-teams-app-kit-<version>.tar.gz` from
+[GitHub Releases](https://github.com/orka-agents/orka-gateway-teams/releases) and
+follow its `README.md`. It contains both manifest profiles, packaging/validation
+helpers, generic icons, and the release's GHCR image digests. Register your own
+single-tenant Azure Bot and configure the gateway against your own Orka cluster;
+complete the app placeholders, validate, then upload your ZIP as a custom app.
+Upload before starting timed setup capture. If custom upload is blocked, follow
+your tenant's approved process—never work around policy.
+
+A published app points at one bot and cluster, so tenant-wide catalog publishing
+is not the intended path for sharing this kit. Shared access follows conversation
+membership through exact-room Bindings; personal chats retain the per-conversation
+Binding limitation ([Orka #736](https://github.com/orka-agents/orka/issues/736)).
+
 ## Using the chat
 
 Once the operator has enabled request/reply, open the installed app's personal chat
