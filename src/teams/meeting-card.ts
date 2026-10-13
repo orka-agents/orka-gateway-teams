@@ -49,7 +49,9 @@ export function formatMeetingDraft(draft: MeetingDraft, audience: MeetingAudienc
       // Fixed bounded fallback, independent of user/roster labels and URL.
       fallbackText: 'Meeting draft. Nothing scheduled. Review the agenda, duration and time suggestions in Teams.' + (unavailable ? ' No meeting link is available.' : ''),
       body: [...body, ...(audience.count ? [block(audienceText)] : []),
-        block('Nothing scheduled. Open in Teams to choose and confirm the final time and attendees. Duration and window are suggestions.', true),
+        block(link === undefined
+          ? 'Nothing scheduled. This draft has no meeting link. Duration and window are suggestions.'
+          : 'Nothing scheduled. Open in Teams to choose and confirm the final time and attendees. Duration and window are suggestions.', true),
         ...(unavailable ? [block(explanations[unavailable], true)] : [])],
       ...(link === undefined ? {} : { actions: [{ type: 'Action.OpenUrl', title: 'Open in Teams', url: link }] }) };
     return { type: 'message', ...(presentation?.replyToId === undefined ? {} : { replyToId: presentation.replyToId }),
