@@ -149,7 +149,7 @@ curl --fail --silent --show-error --location \
 node scripts/validate-teams-app.mjs \
   --manifest bin/teams-operator/manifest.json \
   --schema bin/teams-operator/schema.json --tools-dir bin/teams-validator
-python3 scripts/package-teams-app.py \
+python3 scripts/package-teams-app.py --bot-id "$BOT_APP_ID" \
   --manifest bin/teams-operator/manifest.json \
   --color bin/teams-operator/color.png --outline bin/teams-operator/outline.png \
   --output bin/teams-operator/teams-personal.zip
@@ -161,6 +161,9 @@ checks are a narrow selected-profile preflight (personal by default), not full
 schema validation. It packages exactly root `manifest.json`, `color.png`,
 `outline.png`, and refuses to
 overwrite an existing ZIP. Use a new output name for a revised artifact.
+`--bot-id` is required and must match the bot ID in the completed manifest;
+older invocations without this explicit ID now fail. The helper never fills
+placeholders or rewrites the reviewed manifest.
 
 In Teams desktop/web, use **Apps → Manage your apps → Upload an app → Upload a
 custom app**, select the ZIP, then **Add → Open**. Confirm the personal chat is
@@ -178,7 +181,7 @@ fill its placeholders, provide reviewed icons, and perform the same full manifes
 validation before packaging:
 
 ```sh
-python3 scripts/package-teams-app.py --profile shared-rooms \
+python3 scripts/package-teams-app.py --bot-id "$BOT_APP_ID" --profile shared-rooms \
   --manifest bin/teams-rooms-operator/manifest.json \
   --color bin/teams-rooms-operator/color.png \
   --outline bin/teams-rooms-operator/outline.png \
@@ -188,7 +191,9 @@ python3 scripts/package-teams-app.py --profile shared-rooms \
 `--profile personal` is equivalent to omitting the option. `--profile shared-rooms`
 requires all three scopes, in any order, without duplicates; it does not rewrite
 or widen the supplied manifest. A shared-room manifest is rejected by the default
-profile. Both profiles reject RSC authorization and keep files, calling, video,
+profile. The shared template declares root `supportsChannelFeatures: "tier1"` for
+Developer Portal channel installation; the packager requires it for shared rooms
+and rejects it for personal packages. Both profiles reject RSC authorization and keep files, calling, video,
 and notification-only operation disabled. Packaging still includes only the
 reviewed manifest and two icons, with no overwrite or upload.
 

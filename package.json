@@ -11,6 +11,7 @@
     "test:container": "node --import tsx test/support/container-smoke.ts",
     "test:deployment": "node --import tsx test/support/deployment-smoke.ts",
     "test:app-package": "node --import tsx --test test/support/teams-app-package.ts",
+    "test:app-kit": "python3 -B test/support/teams-app-kit.py",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/ingress/main.js serve",

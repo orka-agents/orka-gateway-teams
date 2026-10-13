@@ -35,7 +35,7 @@ function fixture(source = template) {
   return { directory, manifest, output, run(failureMode?: 'write' | 'verify' | 'interrupt-write' | 'interrupt-verify', profile?: string) {
     writeFileSync(join(directory, 'manifest.json'), JSON.stringify(manifest));
     return spawnSync('python3', [...(failureMode ? [fault, script, failureMode] : [script]), '--manifest', join(directory, 'manifest.json'), '--color', join(directory, 'color.png'),
-      '--outline', join(directory, 'outline.png'), '--output', output, ...(profile === undefined ? [] : ['--profile', profile])],
+      '--outline', join(directory, 'outline.png'), '--output', output, '--bot-id', '22222222-2222-4222-8222-222222222222', ...(profile === undefined ? [] : ['--profile', profile])],
       { encoding: 'utf8', timeout: 15000 });
   }, close() { rmSync(directory, { recursive: true, force: true }); } };
 }
@@ -45,7 +45,7 @@ for (const invalid of ['unknown-option', 'missing-value', 'missing-required'] as
     const f = fixture();
     try {
       const args = [script, '--manifest', join(f.directory, 'manifest.json'), '--color', join(f.directory, 'color.png'),
-        '--outline', join(f.directory, 'outline.png'), '--output', f.output];
+        '--outline', join(f.directory, 'outline.png'), '--bot-id', '22222222-2222-4222-8222-222222222222', '--output', f.output];
       if (invalid === 'unknown-option') args.push('--unrecognized', 'SYNTHETIC_OPERATOR_ARGUMENT');
       if (invalid === 'missing-value') args.pop();
       if (invalid === 'missing-required') args.splice(3, 4);
@@ -79,6 +79,7 @@ test('Teams package shared-room scopes require explicit profile selection and pr
   const f = fixture();
   try {
     f.manifest.bots[0].scopes = ['personal', 'groupChat', 'team'];
+    f.manifest.supportsChannelFeatures = 'tier1';
     assert.equal(f.run().status, 1);
     assert.throws(() => readFileSync(f.output));
     assert.equal(f.run(undefined, 'personal').status, 1);
@@ -107,6 +108,7 @@ test('Teams package shared-room scope order does not change profile eligibility'
   const f = fixture();
   try {
     f.manifest.bots[0].scopes = ['team', 'personal', 'groupChat'];
+    f.manifest.supportsChannelFeatures = 'tier1';
     assert.equal(f.run(undefined, 'shared-rooms').status, 0);
   } finally { f.close(); }
 });
@@ -116,6 +118,7 @@ for (const scopes of [['personal'], ['groupChat'], ['team'], ['personal', 'group
   test(`Teams shared-room profile rejects incomplete or extra scopes: ${scopes.join(',')}`, () => {
     const f = fixture();
     try {
+      f.manifest.supportsChannelFeatures = 'tier1';
       f.manifest.bots[0].scopes = scopes;
       const result = f.run(undefined, 'shared-rooms'); assert.equal(result.status, 1);
       assert.equal(result.stdout, '');
@@ -129,6 +132,7 @@ for (const profile of ['personal', 'shared-rooms']) {
   test(`Teams ${profile} profile rejects object-shaped scopes rather than treating keys as scopes`, () => {
     const f = fixture();
     try {
+      if (profile === 'shared-rooms') f.manifest.supportsChannelFeatures = 'tier1';
       f.manifest.bots[0].scopes = profile === 'personal' ? { personal: true } : { personal: true, groupChat: true, team: true };
       const result = f.run(undefined, profile); assert.equal(result.status, 1);
       assert.equal(result.stdout, '');
@@ -143,6 +147,7 @@ for (const invalid of ['rsc', 'files', 'calling', 'video', 'notification-only', 
     const f = fixture();
     try {
       f.manifest.bots[0].scopes = ['personal', 'groupChat', 'team'];
+      f.manifest.supportsChannelFeatures = 'tier1';
       if (invalid === 'rsc') f.manifest.authorization = { permissions: { resourceSpecific: [
         { name: 'ChannelMessage.Read.Group', type: 'Application' },
       ] } };
@@ -197,6 +202,42 @@ for (const mode of ['write', 'verify', 'interrupt-write', 'interrupt-verify'] as
     } finally { f.close(); }
   });
 }
+for (const botId of [undefined, 'SYNTHETIC_INVALID_BOT', '33333333-3333-4333-8333-333333333333']) {
+  test(`Teams package requires explicit matching bot ID: ${botId ?? 'omitted'}`, () => {
+    const f = fixture();
+    try {
+      writeFileSync(join(f.directory, 'manifest.json'), JSON.stringify(f.manifest));
+      const result = spawnSync('python3', [script, '--manifest', join(f.directory, 'manifest.json'),
+        '--color', join(f.directory, 'color.png'), '--outline', join(f.directory, 'outline.png'), '--output', f.output,
+        ...(botId === undefined ? [] : ['--bot-id', botId])], { encoding: 'utf8', timeout: 15000 });
+      assert.equal(result.status, botId === undefined ? 2 : 1);
+      assert.equal(result.stdout, '');
+      assert.equal(result.stderr, '{"packaged": false, "reason": "invalid input or output unavailable"}\n');
+      assert.throws(() => readFileSync(f.output));
+    } finally { f.close(); }
+  });
+}
+
+for (const declaration of [undefined, 'tier2', true]) {
+  test(`Shared package requires channel tier1 declaration: ${declaration}`, () => {
+    const f = fixture();
+    try {
+      f.manifest.bots[0].scopes = ['personal', 'groupChat', 'team'];
+      if (declaration !== undefined) f.manifest.supportsChannelFeatures = declaration;
+      assert.equal(f.run(undefined, 'shared-rooms').status, 1);
+      assert.throws(() => readFileSync(f.output));
+    } finally { f.close(); }
+  });
+}
+test('Personal package rejects a channel features declaration', () => {
+  const f = fixture();
+  try {
+    f.manifest.supportsChannelFeatures = 'tier1';
+    assert.equal(f.run().status, 1);
+    assert.throws(() => readFileSync(f.output));
+  } finally { f.close(); }
+});
+
 test('Teams package never overwrites an existing output artifact', () => {
   const f = fixture();
   try {
