@@ -27,7 +27,7 @@ export async function startOutboundServer(config: OutboundServerConfig, dispatch
       typeof config.bearerToken !== 'string' || !config.bearerToken || config.bearerToken.length > 8192 || !/^[A-Za-z0-9._~+/-]+=*$/u.test(config.bearerToken)) throw new ConfigurationError();
   // Omit the additive field when off: older strict V1 controllers reject even false.
   const capabilities = { ...baselineCapabilities, capabilities: { ...baselineCapabilities.capabilities,
-    ...(interimDelivery === true ? { interimDelivery: true } : {}), ...(meetingDrafts === true ? { meetingDrafts: true } : {}) } };
+    ...(interimDelivery === true ? { interimDelivery: true } : {}), ...(meetingDrafts === true ? { extensions: ['meetingDraft.v1'] } : {}) } };
   const scope = validateScope(inputScope); const expected = digest(config.bearerToken);
   const starts = new WeakMap<Socket, number>(); const work = new Set<Promise<void>>(); const controllers = new Set<AbortController>();
   let active = 0; let stopping = false; let closing: Promise<void> | undefined; let bound = false;

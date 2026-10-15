@@ -281,8 +281,9 @@ With `INTERIM_DELIVERY_ENABLED=true`, the capabilities object additionally conta
 `interimDelivery: true`. Omitted/false settings omit this field entirely for older
 strict-controller compatibility. New messages are refused while off, but saved
 message receipts replay even after withdrawal. See [interim semantics](interim-delivery.md).
-With `MEETING_DRAFTS_ENABLED=true`, `meetingDrafts: true` is additionally advertised;
-omitted/false settings omit it. [Structured meeting drafts](meeting-drafts.md) use
+With `MEETING_DRAFTS_ENABLED=true`, `capabilities.extensions: ["meetingDraft.v1"]`
+is additionally advertised; omitted/false settings omit `extensions` entirely.
+The legacy `capabilities.meetingDrafts` boolean is never advertised. [Structured meeting drafts](meeting-drafts.md) use
 private current-chat roster GETs and the same claim/receipt lifecycle, not calendar
 or Graph access. Settle/abandon pending drafts before capability withdrawal or old readers.
 
