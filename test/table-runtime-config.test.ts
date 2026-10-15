@@ -39,6 +39,15 @@ test('Table closed outbound snapshots preserve explicit interim capability and r
   }
 });
 
+test('Table meeting flag survives closed snapshots and rejects missing interim or malformed configuration', () => {
+  for (const flag of [true, false]) {
+    const config = parseRuntimeConfig({ ...environment(), INTERIM_DELIVERY_ENABLED: 'true', MEETING_DRAFTS_ENABLED: String(flag) }, 'serve'); assert.ok('storage' in config);
+    assert.equal(config.outbound?.meetingDrafts, flag); assert.equal(snapshotTableServeConfig(config).outbound?.meetingDrafts, flag);
+    for (const value of [null, 'true', 1]) assert.throws(() => snapshotTableServeConfig({ ...config, outbound: { ...config.outbound!, meetingDrafts: value } } as never), ConfigurationError);
+  }
+  assert.throws(() => parseRuntimeConfig({ ...environment(), MEETING_DRAFTS_ENABLED: 'true' }, 'serve'), ConfigurationError);
+});
+
 test('Table selection has full scope, explicit identities and budgets but no SQLite paths', () => {
   const result = parseRuntimeConfig(environment(), 'serve'); assert.ok('storage' in result);
   assert.equal(result.storage.backend, 'table-v2'); assert.equal('dbPath' in result, false); assert.equal('dbPath' in result.outbound!, false);

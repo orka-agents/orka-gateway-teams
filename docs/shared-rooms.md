@@ -3,7 +3,9 @@
 The runtime accepts explicitly invoked text requests in `groupChat` and `channel`
 conversations and returns **final replies or errors** as one Adaptive Card.
 [Bounded interim updates/questions](interim-delivery.md) are separately opt-in and
-require a supporting controller. No token streaming, active-Task answer routing,
+require a supporting controller. [Meeting drafts](meeting-drafts.md) are another
+separate opt-in: current group-chat attendees are resolved privately; channels
+receive a no-action card preserving the thread root. No token streaming, active-Task answer routing,
 approval buttons, files or attachment extraction is provided. Existing personal
 chats and their sender identities remain unchanged.
 
@@ -24,7 +26,8 @@ omit `match.senderId` and `allowedSenderIds`; no per-person AAD ID list is neede
 Keep the bot recipient and service URL restrictions.
 
 `all` is Orka's explicit trusted-context opt-in, not its default. Teams controls
-who can post in the room; Orka and the gateway do not query membership. Review the
+who can post in the room; intake authorization does not query membership. The
+optional meeting-draft lookup is only for attendees, never sender authorization. Review the
 room's audience, Agent access and retained shared Session history before enabling
 it. Adding a member can give them access to that shared conversation.
 

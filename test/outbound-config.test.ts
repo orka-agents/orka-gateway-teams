@@ -27,6 +27,19 @@ test('interim capability is explicit full-mode only, accepts exact booleans and 
   assert.equal('outbound' in parseConfig({ ...only, INTERIM_DELIVERY_ENABLED: 'false' }, 'serve'), false);
 });
 
+test('meeting capability is exact optional boolean and requires outbound plus interim', () => {
+  const env = environment(); assert.equal(Object.hasOwn(parseConfig(env, 'serve').outbound!, 'meetingDrafts'), false);
+  for (const value of ['true', 'false']) {
+    const result = parseConfig({ ...env, INTERIM_DELIVERY_ENABLED: 'true', MEETING_DRAFTS_ENABLED: value }, 'serve');
+    assert.equal(result.outbound?.meetingDrafts, value === 'true');
+  }
+  for (const value of ['', 'TRUE', '1', ' false']) assert.throws(() => parseConfig({ ...env, INTERIM_DELIVERY_ENABLED: 'true', MEETING_DRAFTS_ENABLED: value }, 'serve'), ConfigurationError);
+  for (const interim of [undefined, 'false']) assert.throws(() => parseConfig({ ...env, INTERIM_DELIVERY_ENABLED: interim, MEETING_DRAFTS_ENABLED: 'true' }, 'serve'), ConfigurationError);
+  assert.throws(() => parseConfig({ ...env, OUTBOUND_ENABLED: 'false', MEETING_DRAFTS_ENABLED: 'true' }, 'serve'), ConfigurationError);
+  const direct = parseConfig({ ...env, INTERIM_DELIVERY_ENABLED: 'true' }, 'serve');
+  for (const flag of [null, 'true', 1]) assert.throws(() => validateOutboundConfig({ ...direct.outbound!, meetingDrafts: flag } as never, direct.dbPath, direct.bearerToken, direct.receiver), ConfigurationError);
+});
+
 test('outbound is explicit, complete and independent; absent/false preserves ingress-only shape', () => {
   const env = environment(); const full = parseConfig(env, 'serve');
   assert.ok(full.outbound?.bearerToken === env.ORKA_OUTBOUND_BEARER_TOKEN);

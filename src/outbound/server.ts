@@ -10,7 +10,7 @@ import { MAX_HTTP_BODY_BYTES } from '../protocol/types.js';
 import type { DeliveryDispatcher, DeliveryResponse } from './types.js';
 import { decodeDelivery } from './validate.js';
 
-export interface OutboundServerConfig { host: string; port: number; bearerToken: string; interimDelivery?: boolean }
+export interface OutboundServerConfig { host: string; port: number; bearerToken: string; interimDelivery?: boolean; meetingDrafts?: boolean }
 export interface OutboundServer { port: number; failed: Promise<never>; stop(): Promise<void> }
 const DEADLINE_MS = 10000;
 const retryable: DeliveryResponse = Object.freeze({ status: 'retryableError', message: 'Delivery is temporarily unavailable.' });
@@ -21,12 +21,13 @@ class HttpFailure extends Error { constructor(readonly status: number) { super('
 
 /** Separate bearer boundary; never registers a route on the Teams SDK listener. */
 export async function startOutboundServer(config: OutboundServerConfig, dispatcher: DeliveryDispatcher, inputScope: Readonly<JournalScope>, isReady: () => boolean): Promise<OutboundServer> {
-  const interimDelivery = config.interimDelivery;
-  if ((interimDelivery !== undefined && typeof interimDelivery !== 'boolean') || !tlsVerificationEnabled() || !isIP(config.host) || !Number.isInteger(config.port) || config.port < 0 || config.port > 65535 ||
+  const interimDelivery = config.interimDelivery; const meetingDrafts = config.meetingDrafts;
+  if ((meetingDrafts !== undefined && typeof meetingDrafts !== 'boolean') || (meetingDrafts === true && interimDelivery !== true) ||
+      (interimDelivery !== undefined && typeof interimDelivery !== 'boolean') || !tlsVerificationEnabled() || !isIP(config.host) || !Number.isInteger(config.port) || config.port < 0 || config.port > 65535 ||
       typeof config.bearerToken !== 'string' || !config.bearerToken || config.bearerToken.length > 8192 || !/^[A-Za-z0-9._~+/-]+=*$/u.test(config.bearerToken)) throw new ConfigurationError();
   // Omit the additive field when off: older strict V1 controllers reject even false.
   const capabilities = { ...baselineCapabilities, capabilities: { ...baselineCapabilities.capabilities,
-    ...(interimDelivery === true ? { interimDelivery: true } : {}) } };
+    ...(interimDelivery === true ? { interimDelivery: true } : {}), ...(meetingDrafts === true ? { meetingDrafts: true } : {}) } };
   const scope = validateScope(inputScope); const expected = digest(config.bearerToken);
   const starts = new WeakMap<Socket, number>(); const work = new Set<Promise<void>>(); const controllers = new Set<AbortController>();
   let active = 0; let stopping = false; let closing: Promise<void> | undefined; let bound = false;

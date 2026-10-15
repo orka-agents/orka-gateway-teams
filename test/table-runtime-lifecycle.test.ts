@@ -5,6 +5,8 @@ import type { IncomingMessage } from 'node:http';
 import { setImmediate as turn } from 'node:timers/promises';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
+import { Client } from '@microsoft/teams.common/http';
+import { safeSdkLogger } from '../src/ingress/logger.js';
 import { startIngressRuntime } from '../src/ingress/main.js';
 import type { IngressRuntime, IngressRuntimeDependencies } from '../src/ingress/main.js';
 import { ConfigurationError } from '../src/ingress/config.js';
@@ -240,6 +242,88 @@ test('production-selected Table interim on/off: shared roots and prior-origin ev
     f.config.outbound!.interimDelivery = true; runtime = await f.start(dependencies);
   }
   await runtime.stop(); await runtime.done; await f.drained(); assert.equal(f.identity.calls.bot, 0);
+});
+
+test('selected Table meeting capability reaches receiver and GET, private addresses never persist, disabled replay never looks up members', async t => {
+  const f = await fixture(t); f.config.receiver = { ...receiverConfig }; f.config.outbound!.interimDelivery = true; f.config.outbound!.meetingDrafts = true;
+  const auth = await authFixture(t); const events: EventEnvelope[] = []; let gets = 0; let posts = 0; let action = false;
+  const upstream = await httpsFixture(t, async (req, res) => {
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); events.push(JSON.parse(Buffer.concat(chunks).toString()));
+    res.writeHead(202); res.end('{"status":"accepted","eventId":"meeting-table-origin","state":"Queued"}');
+  });
+  const native = https.request;
+  t.mock.method(https, 'request', (url: URL, options: https.RequestOptions, callback: (res: IncomingMessage) => void) =>
+    url.hostname === 'orka.example.invalid' ? native(new URL(url.pathname + url.search, upstream.baseUrl), { ...options, ca: upstream.ca, servername: 'localhost' }, callback) : native(url, options, callback));
+  syncBuiltinESMExports(); t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const provider = await httpsFixture(t, async (req, res) => {
+    assert.equal(req.headers.authorization === 'Bearer meeting-table-token', true);
+    if (req.method === 'GET') {
+      gets++; assert.equal(req.url, '/v3/conversations/19%3Afixture-personal/pagedMembers');
+      res.end(JSON.stringify({ members: [{ id: 'one', name: 'User', userPrincipalName: 'private-table-roster@example.test', email: 'private-table-email@example.test' }] }));
+    } else {
+      posts++; assert.equal(req.method, 'POST'); assert.equal(req.url, '/v3/conversations/19%3Afixture-personal/activities');
+      const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); const bytes = Buffer.concat(chunks);
+      action = bytes.includes(Buffer.from('Action.OpenUrl')) && bytes.includes(Buffer.from('private-table-roster%40example.test'));
+      assert.equal(bytes.includes(Buffer.from('private-table-email')), false); res.end('{"id":"meeting-table-receipt"}');
+    }
+  });
+  const client = new Client({ logger: safeSdkLogger }); const agent = new https.Agent({ ca: provider.ca, rejectUnauthorized: true }); t.after(() => agent.destroy());
+  const serviceUrl = receiverConfig.serviceUrls[0]!;
+  const dependencies = { ...auth.dependencies, botToken: 'meeting-table-token', providerGet: (url: string, config: Parameters<typeof client.get>[1]) => {
+    assert.equal(url, `${serviceUrl}v3/conversations/19%3Afixture-personal/pagedMembers`);
+    return client.get(url.replace(serviceUrl, provider.baseUrl), { ...config, httpsAgent: agent });
+  }, providerPost: (url: string, bytes: Buffer, config: Parameters<typeof client.post<Buffer>>[2]) => {
+    assert.equal(url, `${serviceUrl}v3/conversations/19%3Afixture-personal/activities`);
+    return client.post(url.replace(serviceUrl, provider.baseUrl), bytes, { ...config, httpsAgent: agent });
+  } };
+  let runtime = await f.start(dependencies);
+  const deliver = (body: unknown) => fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/deliveries`, { method: 'POST', headers: { Authorization: `Bearer ${f.config.outbound!.bearerToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const caps = async () => (await (await fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/capabilities`, { headers: { Authorization: `Bearer ${f.config.outbound!.bearerToken}` } })).json() as { capabilities: Record<string, boolean> }).capabilities;
+  assert.equal((await caps()).meetingDrafts, true); assert.equal(gets, 0);
+  assert.equal((await post(runtime.port, auth.token())).status, 200); await eventually(() => events.length === 1); assert.equal(gets, 0);
+  const body = { ...finalDelivery, kind: 'message', replyTarget: events[0]!.replyTarget!, metadata: { 'meeting.version': '1', 'meeting.subject': 'Table meeting', 'meeting.durationMinutes': '30', 'meeting.attendees': 'everyone', 'meeting.agenda.0': 'Design' } };
+  const receipt = { status: 'delivered', providerMessageId: 'meeting-table-receipt' }; assert.deepEqual(await (await deliver(body)).json(), receipt);
+  assert.equal(gets, 1); assert.equal(posts, 1); assert.equal(action, true); await runtime.stop(); await runtime.done; await f.drained();
+  const persisted = JSON.stringify([...f.tables.inbox.rows.values(), ...f.tables.delivery.rows.values()]);
+  for (const sentinel of ['private-table-roster', 'private-table-email', 'teams.microsoft.com/l/meeting/new']) {
+    assert.equal(persisted.includes(sentinel), false);
+    for (const row of [...f.tables.inbox.rows.values(), ...f.tables.delivery.rows.values()]) if (typeof row.B0 === 'string') assert.equal(Buffer.from(row.B0, 'base64').includes(Buffer.from(sentinel)), false);
+  }
+  f.config.outbound!.meetingDrafts = false; f.config.outbound!.interimDelivery = false; runtime = await f.start(dependencies);
+  assert.equal(Object.hasOwn(await caps(), 'meetingDrafts'), false); assert.deepEqual(await (await deliver({ ...body, deliveryId: 'table-meeting-alias' })).json(), receipt);
+  assert.equal(gets, 1); assert.equal(posts, 1); await runtime.stop(); await runtime.done; await f.drained();
+});
+
+test('meeting native GET actual-work drain precedes both Table handle closes and prevents a late POST', { timeout: 7000 }, async t => {
+  const f = await fixture(t); f.config.receiver = { ...receiverConfig }; f.config.outbound!.interimDelivery = true; f.config.outbound!.meetingDrafts = true;
+  const auth = await authFixture(t); const events: EventEnvelope[] = []; const entered = deferred(); const cancelled = deferred(); const release = deferred(); let posts = 0;
+  const upstream = await httpsFixture(t, async (req, res) => {
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); events.push(JSON.parse(Buffer.concat(chunks).toString()));
+    res.writeHead(202); res.end('{"status":"accepted","eventId":"table-meeting-drain","state":"Queued"}');
+  });
+  const native = https.request;
+  t.mock.method(https, 'request', (url: URL, options: https.RequestOptions, callback: (res: IncomingMessage) => void) =>
+    url.hostname === 'orka.example.invalid' ? native(new URL(url.pathname + url.search, upstream.baseUrl), { ...options, ca: upstream.ca, servername: 'localhost' }, callback) : native(url, options, callback));
+  syncBuiltinESMExports(); t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const provider = await httpsFixture(t, (req, res) => { assert.equal(req.method, 'GET'); res.once('close', () => cancelled.resolve()); entered.resolve(); });
+  const client = new Client({ logger: safeSdkLogger }); const agent = new https.Agent({ ca: provider.ca, rejectUnauthorized: true }); t.after(() => agent.destroy());
+  const runtime = await f.start({ ...auth.dependencies, botToken: 'meeting-drain-token', providerGet: async (url, config) => {
+    try { return await client.get(url.replace(receiverConfig.serviceUrls[0]!, provider.baseUrl), { ...config, httpsAgent: agent }); }
+    catch { await release.promise; throw new Error('Synthetic GET cancelled'); }
+  }, providerPost: async () => { posts++; throw new Error('No late POST permitted'); } });
+  assert.equal((await post(runtime.port, auth.token())).status, 200); await eventually(() => events.length === 1);
+  const body = { ...finalDelivery, kind: 'message', replyTarget: events[0]!.replyTarget!, metadata: { 'meeting.version': '1', 'meeting.subject': 'Drain',
+    'meeting.durationMinutes': '30', 'meeting.attendees': 'everyone', 'meeting.agenda.0': 'Design' } };
+  const pending = fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/deliveries`, { method: 'POST', headers: {
+    Authorization: `Bearer ${f.config.outbound!.bearerToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(() => undefined);
+  let stopping: Promise<void> | undefined; let stopped = false;
+  try {
+    await entered.promise; const before = [f.observed.inboxCloses.length, f.observed.deliveryCloses.length];
+    stopping = runtime.stop().then(() => { stopped = true; }); await cancelled.promise;
+    assert.equal(stopped, false); assert.equal(posts, 0);
+    assert.deepEqual([f.observed.inboxCloses.length, f.observed.deliveryCloses.length], before);
+  } finally { release.resolve(); await stopping; await pending; }
+  await runtime.done; await f.drained(); assert.equal(stopped, true); assert.equal(posts, 0);
 });
 
 test('production-selected Table shared runtime uses the existing journal correlation port across restart and alias replay', async (t) => {

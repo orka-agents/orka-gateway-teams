@@ -92,13 +92,16 @@ export function parseServeSettings(env: NodeJS.ProcessEnv, scope: Readonly<Ingre
     maxRecords: number(env.INGRESS_MAX_RECORDS, 100000), replayWindowMs: number(env.INGRESS_REPLAY_WINDOW_MS, 86400000) });
   const enabled = env.OUTBOUND_ENABLED;
   const interim = env.INTERIM_DELIVERY_ENABLED;
+  const meeting = env.MEETING_DRAFTS_ENABLED;
   if ((enabled !== undefined && !['true', 'false'].includes(enabled)) ||
-      (interim !== undefined && !['true', 'false'].includes(interim)) || (interim === 'true' && enabled !== 'true')) fail();
+      (interim !== undefined && !['true', 'false'].includes(interim)) || (interim === 'true' && enabled !== 'true') ||
+      (meeting !== undefined && !['true', 'false'].includes(meeting)) || (meeting === 'true' && (enabled !== 'true' || interim !== 'true'))) fail();
   let outbound: OutboundServerConfig | undefined;
   if (enabled === 'true') {
     outbound = validateOutboundServerConfig({ bearerToken: secret(env.ORKA_OUTBOUND_BEARER_TOKEN),
       host: env.OUTBOUND_HOST ?? '127.0.0.1', port: number(env.OUTBOUND_PORT, 3979, 1, 65535),
-      ...(interim === undefined ? {} : { interimDelivery: interim === 'true' }) }, bearerToken, receiver);
+      ...(interim === undefined ? {} : { interimDelivery: interim === 'true' }),
+      ...(meeting === undefined ? {} : { meetingDrafts: meeting === 'true' }) }, bearerToken, receiver);
   } else if (['ORKA_OUTBOUND_BEARER_TOKEN', 'OUTBOUND_HOST', 'OUTBOUND_PORT'].some((key) => env[key] !== undefined)) fail();
   return { scope, receiver, bearerToken, policy, ...(outbound === undefined ? {} : { outbound }),
     ...(env.ORKA_CA_FILE === undefined ? {} : { caFile: absolutePath(env.ORKA_CA_FILE) }) };
@@ -134,10 +137,11 @@ export function validateOutboundServerConfig(input: OutboundServerConfig, ingres
     if (!/^[A-Za-z0-9._~+/-]+=*$/u.test(bearerToken) || bearerToken === ingressToken || !isIP(input.host) ||
         !Number.isInteger(input.port) || input.port < 0 || input.port > 65535 ||
         (input.port !== 0 && input.port === receiver.port && input.host === receiver.host)) fail();
-    const interimDelivery = input.interimDelivery;
-    if (interimDelivery !== undefined && typeof interimDelivery !== 'boolean') fail();
+    const interimDelivery = input.interimDelivery; const meetingDrafts = input.meetingDrafts;
+    if ((interimDelivery !== undefined && typeof interimDelivery !== 'boolean') ||
+        (meetingDrafts !== undefined && typeof meetingDrafts !== 'boolean') || (meetingDrafts === true && interimDelivery !== true)) fail();
     return Object.freeze({ bearerToken, host: input.host, port: input.port,
-      ...(interimDelivery === undefined ? {} : { interimDelivery }) });
+      ...(interimDelivery === undefined ? {} : { interimDelivery }), ...(meetingDrafts === undefined ? {} : { meetingDrafts }) });
   } catch { throw new ConfigurationError(); }
 }
 

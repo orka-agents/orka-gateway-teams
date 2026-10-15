@@ -12,7 +12,7 @@ import type { SessionCorrelationPort } from '../delivery/session-correlation.js'
 import type { DeliveryJournalPort } from '../delivery/types.js';
 import { createDeliveryDispatcher } from '../outbound/dispatcher.js';
 import { createProviderSender } from '../outbound/sender.js';
-import type { ProviderPost } from '../outbound/sender.js';
+import type { ProviderGet, ProviderPost } from '../outbound/sender.js';
 import type { DeliveryDispatcher } from '../outbound/types.js';
 import { convertActivity } from '../teams/convert.js';
 import { createStrictAuth } from './auth.js';
@@ -24,10 +24,10 @@ import type { AdmissionResult, IngressStore, ReplyRoute } from './types.js';
 import type { EventEnvelope } from '../protocol/types.js';
 
 export interface ReceiverDependencies { sdkCloud?: CloudEnvironment; fetchKeys?: (url: string, options: RequestInit) => Promise<Response>;
-  botToken?: Token; providerPost?: ProviderPost; certificateNetwork?: INetworkModule; managedIdentity?: ManagedIdentityDependencies }
+  botToken?: Token; providerPost?: ProviderPost; providerGet?: ProviderGet; certificateNetwork?: INetworkModule; managedIdentity?: ManagedIdentityDependencies }
 export interface AdmissionSink { readonly scope: IngressStore['scope'];
   admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>): AdmissionResult | Promise<AdmissionResult> }
-export interface ReceiverOutbound { interimDelivery?: boolean; journal: DeliveryJournalPort; correlation?: SessionCorrelationPort; getRoute: (key: string) => ReplyRoute | undefined | Promise<ReplyRoute | undefined> }
+export interface ReceiverOutbound { interimDelivery?: boolean; meetingDrafts?: boolean; journal: DeliveryJournalPort; correlation?: SessionCorrelationPort; getRoute: (key: string) => ReplyRoute | undefined | Promise<ReplyRoute | undefined> }
 export interface Receiver { port: number; stop(): Promise<void>; failed: Promise<never>; outbound?: DeliveryDispatcher }
 export interface PreparedReceiver { start(sink: AdmissionSink, outbound?: ReceiverOutbound, signal?: AbortSignal): Promise<Receiver> }
 
@@ -138,9 +138,11 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
           const text: unknown = value?.toString();
           return typeof text === 'string' ? text : undefined;
         } catch { return undefined; }
-      }, dependencies.providerPost === undefined ? {} : { post: dependencies.providerPost });
+      }, { ...(dependencies.providerPost === undefined ? {} : { post: dependencies.providerPost }),
+        ...(dependencies.providerGet === undefined ? {} : { get: dependencies.providerGet }) });
       dispatcher = createDeliveryDispatcher({ journal: outbound.journal, getRoute: outbound.getRoute,
         ...(outbound.interimDelivery === undefined ? {} : { interimDelivery: outbound.interimDelivery }),
+        ...(outbound.meetingDrafts === undefined ? {} : { meetingDrafts: outbound.meetingDrafts }),
         ...(outbound.correlation === undefined ? {} : { correlation: outbound.correlation }),
         scope: { appId: config.appId, tenantId: config.tenantId }, serviceUrls: config.serviceUrls, recipientIds: config.recipientIds, sender });
     }

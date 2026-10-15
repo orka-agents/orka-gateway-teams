@@ -153,6 +153,7 @@ export async function startIngressRuntime(config: RuntimeServeConfig, dependenci
       admit: (event, route) => ready ? ownedStore.admit(event, route) : { kind: 'full' } },
       journal === undefined ? undefined : { journal, getRoute: (key) => ownedStore.getRoute(key),
         ...(outbound?.interimDelivery === undefined ? {} : { interimDelivery: outbound.interimDelivery }),
+        ...(outbound?.meetingDrafts === undefined ? {} : { meetingDrafts: outbound.meetingDrafts }),
         ...(correlation === undefined ? {} : { correlation }) }, abort.signal);
     phase = 'startup'; assertStarting();
     if (outbound) { phase = 'outbound-listener'; api = await startOutboundServer(outbound, receiver.outbound!, journalScope, () => ready); }
