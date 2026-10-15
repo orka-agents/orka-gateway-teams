@@ -12,6 +12,16 @@ needed for development/tests. Running serve requires explicit configured bot cre
 federation) and directional Orka secrets;
 see [configuration and provisioning](docs/runtime-reference.md#run-durable-ingress).
 
+## Contributor License Agreement
+
+This project welcomes contributions and suggestions. Most contributions require you to agree to a
+Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us
+the rights to use your contribution. For details, visit [Contributor License Agreements](https://cla.opensource.microsoft.com).
+
+When you submit a pull request, a CLA bot will automatically determine whether you need to provide
+a CLA and decorate the PR appropriately (for example, status check or comment). Simply follow the
+instructions provided by the bot. You will only need to do this once across all repos using our CLA.
+
 ## Development and checks
 
 Use Node 24 LTS and npm. From the repository root:
