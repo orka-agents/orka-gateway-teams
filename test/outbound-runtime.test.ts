@@ -136,15 +136,19 @@ for (const flag of [undefined, false, true]) test(`SQLite meeting flag ${flag ??
       return client.get(url.replace(serviceUrl, provider.baseUrl), { ...config, httpsAgent: agent });
     }, providerPost: providerWrapper(t, provider.baseUrl, provider.ca, 'meeting-token') };
   let runtime = f.own(await startIngressRuntime(f.config, dependencies));
-  const caps = async () => (await (await fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/capabilities`, { headers: { Authorization: `Bearer ${f.config.outbound!.bearerToken}` } })).json() as { capabilities: Record<string, boolean> }).capabilities;
-  assert.equal(Object.hasOwn(await caps(), 'meetingDrafts'), flag === true); assert.equal(tokens, 0);
+  const caps = async () => (await (await fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/capabilities`, { headers: { Authorization: `Bearer ${f.config.outbound!.bearerToken}` } })).json() as { capabilities: Record<string, boolean | string[]> }).capabilities;
+  const advertised = await caps();
+  if (flag === true) assert.deepEqual(advertised.extensions, ['meetingDraft.v1']);
+  else assert.equal(Object.hasOwn(advertised, 'extensions'), false);
+  assert.equal(Object.hasOwn(advertised, 'meetingDrafts'), false); assert.equal(tokens, 0);
   assert.equal((await post(runtime.port, auth.token())).status, 200); const event = await accepted.promise; assert.equal(tokens, 0);
   const body = { ...finalDelivery, kind: 'message', replyTarget: event.replyTarget!, metadata: {
     'meeting.version': '1', 'meeting.subject': 'Runtime meeting', 'meeting.durationMinutes': '30', 'meeting.attendees': 'everyone', 'meeting.agenda.0': 'Design' } };
   const receipt = { status: 'delivered', providerMessageId: 'meeting-runtime-receipt' };
   assert.deepEqual(await (await deliver(runtime, f.config, body)).json(), receipt); assert.equal(gets, flag === true ? 1 : 0); assert.equal(actions, flag === true ? 1 : 0);
   await runtime.stop(); f.config.outbound!.meetingDrafts = false; f.config.outbound!.interimDelivery = false;
-  runtime = f.own(await startIngressRuntime(f.config, dependencies)); assert.equal(Object.hasOwn(await caps(), 'meetingDrafts'), false);
+  runtime = f.own(await startIngressRuntime(f.config, dependencies));
+  const withdrawn = await caps(); assert.equal(Object.hasOwn(withdrawn, 'extensions'), false); assert.equal(Object.hasOwn(withdrawn, 'meetingDrafts'), false);
   assert.deepEqual(await (await deliver(runtime, f.config, { ...body, deliveryId: 'disabled-meeting-alias' })).json(), receipt);
   assert.equal(posts, 1); assert.equal(gets, flag === true ? 1 : 0);
 });

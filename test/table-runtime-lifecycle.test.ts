@@ -278,8 +278,9 @@ test('selected Table meeting capability reaches receiver and GET, private addres
   } };
   let runtime = await f.start(dependencies);
   const deliver = (body: unknown) => fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/deliveries`, { method: 'POST', headers: { Authorization: `Bearer ${f.config.outbound!.bearerToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const caps = async () => (await (await fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/capabilities`, { headers: { Authorization: `Bearer ${f.config.outbound!.bearerToken}` } })).json() as { capabilities: Record<string, boolean> }).capabilities;
-  assert.equal((await caps()).meetingDrafts, true); assert.equal(gets, 0);
+  const caps = async () => (await (await fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/capabilities`, { headers: { Authorization: `Bearer ${f.config.outbound!.bearerToken}` } })).json() as { capabilities: Record<string, boolean | string[]> }).capabilities;
+  const advertised = await caps(); assert.deepEqual(advertised.extensions, ['meetingDraft.v1']);
+  assert.equal(Object.hasOwn(advertised, 'meetingDrafts'), false); assert.equal(gets, 0);
   assert.equal((await post(runtime.port, auth.token())).status, 200); await eventually(() => events.length === 1); assert.equal(gets, 0);
   const body = { ...finalDelivery, kind: 'message', replyTarget: events[0]!.replyTarget!, metadata: { 'meeting.version': '1', 'meeting.subject': 'Table meeting', 'meeting.durationMinutes': '30', 'meeting.attendees': 'everyone', 'meeting.agenda.0': 'Design' } };
   const receipt = { status: 'delivered', providerMessageId: 'meeting-table-receipt' }; assert.deepEqual(await (await deliver(body)).json(), receipt);
@@ -290,7 +291,8 @@ test('selected Table meeting capability reaches receiver and GET, private addres
     for (const row of [...f.tables.inbox.rows.values(), ...f.tables.delivery.rows.values()]) if (typeof row.B0 === 'string') assert.equal(Buffer.from(row.B0, 'base64').includes(Buffer.from(sentinel)), false);
   }
   f.config.outbound!.meetingDrafts = false; f.config.outbound!.interimDelivery = false; runtime = await f.start(dependencies);
-  assert.equal(Object.hasOwn(await caps(), 'meetingDrafts'), false); assert.deepEqual(await (await deliver({ ...body, deliveryId: 'table-meeting-alias' })).json(), receipt);
+  const withdrawn = await caps(); assert.equal(Object.hasOwn(withdrawn, 'extensions'), false); assert.equal(Object.hasOwn(withdrawn, 'meetingDrafts'), false);
+  assert.deepEqual(await (await deliver({ ...body, deliveryId: 'table-meeting-alias' })).json(), receipt);
   assert.equal(gets, 1); assert.equal(posts, 1); await runtime.stop(); await runtime.done; await f.drained();
 });
 
