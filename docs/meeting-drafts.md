@@ -30,8 +30,9 @@ Older strict controllers reject unknown capability fields, even `false`.
    same scope, store IDs, partitions, routes, journals and correlation history;
    never reinitialize/reset stores to enable the feature.
 4. Confirm the authenticated `/v1/capabilities` response adds
-   `capabilities.meetingDrafts: true` and the controller's **current ready
-   observation** includes it. Omitted/false settings omit the field entirely.
+   `capabilities.extensions: ["meetingDraft.v1"]` and the controller's **current ready
+   observation** includes that extension. Omitted/false settings omit `extensions`
+   entirely; the legacy `capabilities.meetingDrafts` boolean is never advertised.
    Local listener readiness is not controller readiness or tool availability.
 
 Default deployment assets stay off; the ACA renderer's closed profile has no
@@ -156,7 +157,7 @@ permission.
 
 Pause new draft intake and **settle or explicitly abandon pending drafts with the
 supporting controller before withdrawing capability or downgrading**. The
-controller rechecks `meetingDrafts` at dispatch. Then cleanly replace the gateway
+controller rechecks the `meetingDraft.v1` extension at dispatch. Then cleanly replace the gateway
 with the flag false/omitted and confirm the controller observes its withdrawal.
 Never run old readers/dispatchers against pending meeting metadata. Preserve
 historical journals and routes; unchanged storage schemas are not downgrade proof.
