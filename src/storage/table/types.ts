@@ -28,6 +28,23 @@ export type ExitReceipt = CleanReleaseExit | OperatorRecoveryExit;
 export interface MetadataV2 extends Omit<Metadata, 'operation' | 'release'> {
   operation: Metadata['operation'] | 'recover'; exit: ExitReceipt | undefined;
 }
+export interface LeaseValue {
+  schema: 1; durationMs: 120000; skewMs: 5000; handoffMs: 1000;
+  sequence: number; invocation: string; expiresAt: number;
+}
+export interface MetadataV3 extends MetadataV2 { lease: LeaseValue | undefined }
+export interface StoredRecordV3 extends Omit<StoredRecord, 'value'> { value: MetadataV3 | DataRecord }
+export interface PlannerViewV3 extends Omit<PlannerView, 'records'> { records: readonly (StoredRecordV3 | undefined)[] }
+export interface OwnedAuditVisitorV3 extends Omit<OwnedAuditVisitor, 'record'> {
+  record(this: void, pass: 1 | 2, record: Readonly<StoredRecordV3>): undefined;
+}
+/** Trusted library clock/scheduler seam; never runtime environment configuration. */
+export interface LeaseClock {
+  wallNow(): number; monotonicNow(): number;
+  setTimer(callback: () => void, delayMs: number): () => void;
+}
+export interface LeaseAuthority { allowed(): boolean; revalidate(): Promise<boolean>; readonly lost: AbortSignal }
+export interface TableLeaseDependencies extends TableDependencies { leaseClock?: LeaseClock }
 export type RecordValueV2 = MetadataV2 | DataRecord;
 export interface StoredRecordV2 extends Omit<StoredRecord, 'value'> { value: RecordValueV2 }
 export interface PlannerViewV2 extends Omit<PlannerView, 'records'> { records: readonly (StoredRecordV2 | undefined)[] }
