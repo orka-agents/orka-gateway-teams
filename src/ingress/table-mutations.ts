@@ -94,7 +94,7 @@ export function operationPlan(index: InboxIndex, bound: BoundTable, view: Planne
   const selected = c.operation === 'claim' ? index.firstDue(time!, next, clock.seal ? { seal: clock.seal } : undefined) :
     'claim' in c ? index.eventById(c.claim.eventId) : index.eventByOrder(prior.handoffClockArm!.order);
   const effective = (event: EventSummary) => projectEvent(event, next,
-    clock.seal?.generation === event.generation ? clock.seal : index.sealByGeneration(event.generation));
+    clock.seal?.generation === event.generation ? clock.seal : index.sealByGeneration(event.generation), index.uncertainRestart);
   const actions: DataAction[] = []; let outcome: boolean | 'claimed' | undefined;
   let saved: OrdinaryInboxResult;
   const base = { schema: 1 as const, epoch, basis: basis(prior), clock: { time: time! }, postStateDigest: '' };

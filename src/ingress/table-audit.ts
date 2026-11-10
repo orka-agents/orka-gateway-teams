@@ -42,7 +42,7 @@ class InboxAuditResult implements AuditedInbox {
  * Owned-job credits cover fresh serialization, header copies and all callbacks.
  * Store normal-open MUST refuse every retained arm, even a valid sealed arm. */
 export function auditInbox(kernel: TableKernelV2 | TableKernelV3, binding: TableBinding, budget: OwnedAuditBudget,
-  maxIndexBytes: number, options?: OwnedAuditOptions): Promise<AuditedInbox> {
+  maxIndexBytes: number, options?: OwnedAuditOptions, uncertainRestart = false): Promise<AuditedInbox> {
   // Snapshot only immutable scalar/string sources at the external boundary.
   // Their pre-job lifetime belongs to the private caller's input reservation;
   // no caller object, backing buffer or newly serialized binding is queued.
@@ -56,7 +56,7 @@ export function auditInbox(kernel: TableKernelV2 | TableKernelV3, binding: Table
     // Descriptor/native-brand validation is synchronous, before any admission.
     // The private async frame receives only snapshots, never original arguments.
     const config = auditConfig<2>({ passes: 2, record() {}, endPass() {}, finalize() {} }, budget, options);
-    return runAudit(kernel, snapshot, new InboxIndex(maxIndexBytes), { maxPages: config.maxPages, maxPageBytes: config.maxPageBytes,
+    return runAudit(kernel, snapshot, new InboxIndex(maxIndexBytes, uncertainRestart), { maxPages: config.maxPages, maxPageBytes: config.maxPageBytes,
       maxDurationMs: config.maxDurationMs, maxTrackingBytes: config.maxTrackingBytes, signal: config.signal, requestTimeoutMs: config.requestTimeoutMs });
   } catch { return Promise.reject(new TableError('invalid-input')); }
 }
@@ -177,7 +177,7 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
         if (arm.ownerEpoch !== h.state.restartEpoch || !event || event.state !== 'forwarding' ||
             event.generation !== arm.generation || event.attemptId !== arm.attemptId || event.attemptEpoch !== arm.ownerEpoch) throw new TableError('corrupt');
       }
-      validateResult({ binding: bound!, metadata: h.metadata, state: h.state, graph: index,
+      validateResult({ binding: bound!, metadata: h.metadata, state: h.state, graph: index, uncertainRestart: index.uncertainRestart,
         postDataDigest: digest(['orka-recovery-data-end-v2', fold, count]), dataRowCount: count });
       if (x && x.kind !== 'clean-release' && x.auditId !== undefined &&
           (result.operation === 'operator-recovery' || result.operation === 'lease-expiry')) {

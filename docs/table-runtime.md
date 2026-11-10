@@ -142,7 +142,12 @@ then closes both stores and finally storage identity. Teams checks authority aga
 after bot-token acquisition, and Orka immediately before native request creation.
 An already handed-off POST can finish remotely after loss; stale settlement is
 refused. An old uncertain delivery remains unknown and an armed inbox interval
-stays non-forwardable. Neither is resent by a successor. This is not remote
+stays non-forwardable. In V3, every older-epoch physical `forwarding` row also
+projects as blocked/uncertain, even after its handoff arm was finalized. This
+applies uniformly after expiry, clean restart, manual recovery and V2-to-V3
+upgrade. Its retained body and row version are not rewritten; it still counts
+against the body budget. Fresh pending events remain eligible. V2 and SQLite
+keep their existing restart behavior. No uncertain V3 attempt is resent by a successor. This is not remote
 exactly-once or cancellation of a remote effect.
 
 To convert existing stores, stop and inhibit old runtime admission. Use ordinary

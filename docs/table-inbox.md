@@ -11,7 +11,12 @@ audited expiry on the same inbox semantics. `table-v3` selects it together with
 the V3 delivery journal; `table-v2` retains nonexpiring ownership. Explicit audited
 upgrade/recovery commands are described in the runtime guide. There is no automatic
 initialization/adoption, V1 migration, pruning, downgrade or HA promise. An armed
-crash interval stays blocked after expiry; a successor does not resend it. Final
+crash interval stays blocked after expiry; a successor does not resend it.
+V3 also projects each older-epoch physical `forwarding` row as blocked with the
+computed reason `forwarding-uncertain`, even if its arm was already cleared.
+This includes V2-era rows retained through upgrade and V3 manual recovery.
+Terminal outcomes, deadlines and seals retain precedence. Physical row/body bytes
+and versions stay unchanged, and retained uncertain bodies keep their budget charge. Final
 Orka handoff checks the combined runtime authority after serialization. The runtime
 does not provision Azure resources or establish live identity/timing qualification.
 

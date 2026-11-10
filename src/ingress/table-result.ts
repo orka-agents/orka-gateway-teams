@@ -14,7 +14,7 @@ import type { AdmissionResult } from './types.js';
  * This predicate is retained-decision consistency, not historical authentication or Ready. */
 export interface ResultValidationContext {
   binding: Readonly<BoundTable>; metadata: Readonly<MetadataV2>; state: Readonly<InboxState>;
-  graph: InboxGraph; postDataDigest: string; dataRowCount: number;
+  graph: InboxGraph; postDataDigest: string; dataRowCount: number; uncertainRestart?: boolean;
 }
 function boundary<T>(code: 'invalid-input' | 'corrupt', work: () => T): T {
   try { return work(); } catch { throw new TableError(code); }
@@ -137,15 +137,15 @@ export function stateDigest(binding: Readonly<BoundTable>, stateBytes: Uint8Arra
   });
 }
 function same(a: unknown, b: unknown): boolean { return encode(a).equals(encode(b)); }
-function effective(event: EventSummary, state: Readonly<InboxState>, graph: InboxGraph) {
-  return projectEvent(event, state, graph.sealByGeneration(event.generation));
+function effective(event: EventSummary, state: Readonly<InboxState>, graph: InboxGraph, uncertainRestart: boolean) {
+  return projectEvent(event, state, graph.sealByGeneration(event.generation), uncertainRestart);
 }
-function firstDue(state: Readonly<InboxState>, graph: InboxGraph, time: number, selected?: EventSummary): EventSummary | undefined {
+function firstDue(state: Readonly<InboxState>, graph: InboxGraph, time: number, uncertainRestart: boolean, selected?: EventSummary): EventSummary | undefined {
   for (let order = 1; order <= state.records; order++) {
     const row = graph.eventByOrder(order); if (!row) fail();
     // Only selection's effective preclaim state is known. No historical UUID/body is invented.
     const event = selected?.order === order ? { ...row, state: 'pending' as const } : row;
-    if (effective(event, state, graph).state === 'pending' && event.nextAttempt <= time) return event;
+    if (effective(event, state, graph, uncertainRestart).state === 'pending' && event.nextAttempt <= time) return event;
   }
   return undefined;
 }
@@ -159,7 +159,7 @@ function armed(arm: HandoffClockArm | null, id: string, epoch: number, graph: In
   if (!event || event.state !== 'forwarding' || event.generation !== arm.generation || event.attemptId !== arm.attemptId || event.attemptEpoch !== epoch) fail();
   return event;
 }
-function ordinaryResult(result: OrdinaryInboxResult, state: Readonly<InboxState>, graph: InboxGraph, dataRowCount: number): void {
+function ordinaryResult(result: OrdinaryInboxResult, state: Readonly<InboxState>, graph: InboxGraph, dataRowCount: number, uncertainRestart: boolean): void {
   if (result.epoch !== state.restartEpoch) fail();
   if (result.operation === 'initialize') {
     if (result.epoch !== 1 || dataRowCount !== 0 || !same(state, initialState())) fail(); return;
@@ -195,13 +195,13 @@ function ordinaryResult(result: OrdinaryInboxResult, state: Readonly<InboxState>
     }
     case 'claim': {
       const d = result.decision;
-      if (d.kind === 'empty') { if (firstDue(state, graph, result.clock.time)) fail(); }
+      if (d.kind === 'empty') { if (firstDue(state, graph, result.clock.time, uncertainRestart)) fail(); }
       else {
         const event = graph.eventById(d.eventId);
         if (!matches(event, d, result.epoch) || event.state !== 'forwarding' || !state.handoffClockArm) fail();
         integer(event.attempt - 1, 0, Number.MAX_SAFE_INTEGER - 1);
         if (armed(state.handoffClockArm, state.handoffClockArm.id, result.epoch, graph).externalEventId !== d.eventId ||
-            firstDue(state, graph, result.clock.time, event)?.externalEventId !== d.eventId) fail();
+            firstDue(state, graph, result.clock.time, uncertainRestart, event)?.externalEventId !== d.eventId) fail();
         expected.handoffClockArm = state.handoffClockArm;
       }
       break;
@@ -209,9 +209,9 @@ function ordinaryResult(result: OrdinaryInboxResult, state: Readonly<InboxState>
     case 'complete': case 'retry': case 'block': {
       const d = result.decision; const event = graph.eventById(d.claim.eventId);
       if (!d.applied) {
-        if (matches(event, d.claim, result.epoch) && effective(event, state, graph).state === 'forwarding') fail();
+        if (matches(event, d.claim, result.epoch) && effective(event, state, graph, uncertainRestart).state === 'forwarding') fail();
       } else {
-        if (!matches(event, d.claim, result.epoch) || effective({ ...event, state: 'forwarding', reason: null, receipt: null }, state, graph).state !== 'forwarding') fail();
+        if (!matches(event, d.claim, result.epoch) || effective({ ...event, state: 'forwarding', reason: null, receipt: null }, state, graph, uncertainRestart).state !== 'forwarding') fail();
         if (result.operation === 'complete') {
           if (event.state !== 'terminal' || !same(event.receipt, result.decision.receipt) || event.reason !== null) fail(); expected.bodies--;
         } else if (result.operation === 'retry') {
@@ -224,9 +224,9 @@ function ordinaryResult(result: OrdinaryInboxResult, state: Readonly<InboxState>
     case 'revalidate': case 'handoff-finalize': {
       const d = result.decision; const event = armed(prior.arm, d.armId, result.epoch, graph);
       if (result.operation === 'revalidate') {
-        if (result.decision.eligible !== (effective(event, state, graph).state === 'forwarding')) fail();
+        if (result.decision.eligible !== (effective(event, state, graph, uncertainRestart).state === 'forwarding')) fail();
       } else {
-        if (result.decision.sampling === 'captured' && result.decision.domainEligible !== (effective(event, state, graph).state === 'forwarding')) fail();
+        if (result.decision.sampling === 'captured' && result.decision.domainEligible !== (effective(event, state, graph, uncertainRestart).state === 'forwarding')) fail();
         expected.handoffClockArm = null;
       }
       break;
@@ -249,7 +249,7 @@ function recoveryConsistency(result: InboxRecoveryResult, context: ResultValidat
     if (seal.reason === 'clock-uncertain' && (seal.observation !== null || seal.watermark !== d.watermark || seal.epoch !== result.oldEpoch)) fail();
     for (let order = d.generation; order <= seal.lastOrder; order++) {
       const event = graph.eventByOrder(order); if (!event || event.generation !== d.generation) fail();
-      const projected = projectEvent(event, state, seal);
+      const projected = projectEvent(event, state, seal, context.uncertainRestart);
       if (event.state === 'terminal' || event.state === 'blocked') {
         if (projected.state !== event.state || projected.reason !== event.reason) fail();
       } else if (projected.state !== 'blocked' || projected.reason !== (event.deadline <= seal.watermark ? 'deadline' : seal.reason)) fail();
@@ -277,6 +277,6 @@ export function validateResult(context: ResultValidationContext): void {
     if (result.operation === 'operator-recovery' || result.operation === 'lease-expiry') { recoveryConsistency(result, context, physical); return; }
     if (result.epoch > metadata.epoch || result.postStateDigest !== stateDigest(binding, metadata.state)) fail();
     // An older retained operator Exit is not a commitment to this new ordinary state.
-    ordinaryResult(result, physical, graph, dataRowCount);
+    ordinaryResult(result, physical, graph, dataRowCount, context.uncertainRestart ?? false);
   });
 }

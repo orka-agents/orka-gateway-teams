@@ -73,5 +73,5 @@ export type InboxRecoveryResult = ({ operation: 'operator-recovery' } | { operat
 export type InboxResult = OrdinaryInboxResult | InboxRecoveryResult;
 /** Body-free projection, not a forwarding grant. Only old forwarding loses its effective ID. */
 export interface EffectiveEventState {
-  state: EventPayload['state']; reason: ExplicitBlockReason | SealReason | 'deadline' | null; attemptId: string | null;
+  state: EventPayload['state']; reason: ExplicitBlockReason | SealReason | 'deadline' | 'forwarding-uncertain' | null; attemptId: string | null;
 }
