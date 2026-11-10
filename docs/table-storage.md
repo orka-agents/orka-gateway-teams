@@ -46,7 +46,8 @@ Conflicting or unavailable proof remains `unresolved`; there is no blind upgrade
 retry, reset or downgrade. Inspect uncertain state before any further operator
 action. Calls drain actual token/native work, including after cancellation.
 Upgrade one partition at a time; partial conversion does not authorize mixed-format
-serving. Runtime activation and upgrade commands remain separate work.
+serving. Runtime selection and the explicit `upgrade-ingress` / `upgrade-delivery`
+commands are described in the [runtime guide](table-runtime.md).
 
 ## Library contract
 
@@ -232,9 +233,10 @@ invalid metadata, audit, ETag and seal shapes before token acquisition; ordinary
 owner writes cannot emit transition operations or reserved audit rows. Lost
 acknowledgments require exact readback or remain uncertain, never blind retries.
 
-These APIs neither migrate V2 nor enable mixed-format serving. Format upgrade
-and runtime activation are separate work. The synthetic native HTTPS tests do not
-qualify ACA clocks, provider sends or live crash recovery.
+These APIs neither migrate V2 nor enable mixed-format serving. Use the separate
+explicit upgrade commands and runtime selector described in the runtime guide.
+The synthetic native HTTPS tests do not qualify ACA clocks, provider sends or
+live crash recovery.
 
 Existing call and cleanup limits, including 300000 ms, remain accepted. If a
 single request, token wait or reconciliation outlasts authority, the handle loses
