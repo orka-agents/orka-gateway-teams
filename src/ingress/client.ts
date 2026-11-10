@@ -22,7 +22,7 @@ export function createOrkaClient(inputScope: Readonly<IngressScope>, options: { 
         const finish = (result: OrkaPostResult) => {
           if (settled) return;
           settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort);
-          if (req) {
+          if (req && !req.closed) {
             // Runtime drains this promise before releasing either store. A
             // logical abort is not proof the native request/socket has closed.
             req.once('close', () => resolve(result)); req.destroy();

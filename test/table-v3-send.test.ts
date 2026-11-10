@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import https from 'node:https';
 import { syncBuiltinESMExports } from 'node:module';
+import { setImmediate as turn } from 'node:timers/promises';
 import test from 'node:test';
 import { createTableDeliveryJournalV3 } from '../src/delivery/table-journal.js';
 import { createDeliveryDispatcher } from '../src/outbound/dispatcher.js';
@@ -63,6 +64,22 @@ test('Orka cancellation settles only after its actual native request closes', as
   const client = createOrkaClient({ ...scope, orkaBaseUrl: remote.baseUrl }, { bearerToken: 'synthetic', ca: remote.ca });
   const abort = new AbortController(); const result = client.post(expectedEvent, abort.signal);
   await entered.promise; abort.abort(); await result; assert.equal(closed, true);
+});
+
+test('Orka 101 closes before cancellation: already-drained requests still settle', async t => {
+  const closed = deferred();
+  const remote = await httpsFixture(t, (req, res) => {
+    req.resume(); res.writeHead(101, { Connection: 'Upgrade', Upgrade: 'fixture' }); res.end();
+  });
+  const native = https.request;
+  t.mock.method(https, 'request', (...args: Parameters<typeof https.request>) => {
+    const req = native(...args); req.once('close', () => closed.resolve()); return req;
+  });
+  syncBuiltinESMExports(); t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const client = createOrkaClient({ ...scope, orkaBaseUrl: remote.baseUrl }, { bearerToken: 'synthetic', ca: remote.ca });
+  const abort = new AbortController(); const result = client.post(expectedEvent, abort.signal);
+  await closed.promise; abort.abort();
+  assert.deepEqual(await Promise.race([result, turn().then(() => ({ kind: 'stuck-after-native-drain' }))]), { kind: 'retry' });
 });
 
 test('Orka native handoff checks authority after event serialization, not only relay readiness', async t => {
