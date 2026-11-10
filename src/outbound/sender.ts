@@ -94,6 +94,7 @@ export function createProviderSender(acquireToken: () => Promise<string | undefi
         // Uncertainty begins at SDK handoff, not a guessed socket write boundary.
         // No inherited retry interceptors; withConfig receives a fresh config
         // and string token so it cannot start hidden token acquisition.
+        if (context.authority && !context.authority.allowed()) { finish({ kind: 'retryable' }); return; }
         handedOff = true;
         try {
           const pending = post(url, body, config).then((response) => {
@@ -134,6 +135,7 @@ export function createProviderSender(acquireToken: () => Promise<string | undefi
         if (finished) return;
         if (stopped || context.signal?.aborted || performance.now() >= deadline || !tlsVerificationEnabled() ||
             typeof value !== 'string' || !value || value.length > 8192 || !/^[A-Za-z0-9._~+/-]+=*$/u.test(value)) { finish({ kind: 'retryable' }); return; }
+        if (context.authority && !context.authority.allowed()) { finish({ kind: 'retryable' }); return; }
         let receivedBytes = 0; let responseStatus: number | undefined;
         const config: RequestConfig = { token: value, headers: { Accept: 'application/json' }, httpsAgent: agent,
           maxRedirects: 0, proxy: false, responseType: 'arraybuffer', decompress: false, maxContentLength: MAX_ROSTER_BYTES,

@@ -58,7 +58,7 @@ async function recoverIngress(mode: 2 | 3 | 'expiry', binding: TableBinding, dep
     safeOptions = { ...(config.signal ? { signal: config.signal } : {}), requestTimeoutMs: config.requestTimeoutMs };
   } catch { throw new TableError('invalid-input'); }
   let first: InboxIndex;
-  try { first = new InboxIndex(maxIndexBytes); } catch { throw new TableError('invalid-input'); }
+  try { first = new InboxIndex(maxIndexBytes, mode !== 2); } catch { throw new TableError('invalid-input'); }
   const initial = createInboxAuditProjection(snapshot, first);
   // First audit determines the disposition. The storage API requires state/seal
   // before its own inspection, so its subsequent complete audit must independently
@@ -103,7 +103,7 @@ async function recoverIngress(mode: 2 | 3 | 'expiry', binding: TableBinding, dep
     // values from the second index budget while the disposition remains live.
     header = undefined;
     initial.dispose();
-    const second = new InboxIndex(maxIndexBytes - 60 * 1024);
+    const second = new InboxIndex(maxIndexBytes - 60 * 1024, mode !== 2);
     const check = createInboxAuditProjection(snapshot, second);
     let transport: ReturnType<typeof createTableOperatorReclaimerV2>;
     try { transport = expirer ?? (mode === 2 ? createTableOperatorReclaimerV2 : createTableOperatorReclaimerV3)(snapshot, dependencies, fence); }
@@ -129,7 +129,7 @@ async function recoverIngress(mode: 2 | 3 | 'expiry', binding: TableBinding, dep
             postStateDigest: stateDigest(bound, state, 'operator-recovery'), postDataDigest: summary.postDataDigest,
             dataRowCount: summary.dataRowCount });
           const domainDispositionDigest = digest(['orka-inbox-recovery-v2', bound.bytes.toString('base64'), result.toString('base64')]);
-          validateResult({ binding: bound,
+          validateResult({ binding: bound, uncertainRestart: mode !== 2,
             metadata: { ...check.result().header.metadata, epoch: fence.epoch, owner: '', operation: mode === 'expiry' ? 'lease-expiry' : 'recover', state, result,
               exit: { oldOwner: fence.owner, oldEpoch: fence.epoch, invocation: summary.auditId,
                 originalMDigest: fence.mDigest, planDigest: fence.mDigest, domainDispositionDigest,

@@ -3,7 +3,7 @@ import { MAX_ADAPTER_RESPONSE_BYTES } from '../protocol/types.js';
 import { decode, encode, integer, invalid, validateEvent, validateReceipt, validateScope } from './codec.js';
 import type { IngressScope, OrkaClient, OrkaPostResult } from './types.js';
 
-export function createOrkaClient(inputScope: Readonly<IngressScope>, options: { bearerToken: string; ca?: string | Buffer; timeoutMs?: number }): OrkaClient {
+export function createOrkaClient(inputScope: Readonly<IngressScope>, options: { bearerToken: string; ca?: string | Buffer; timeoutMs?: number; authority?: import('../storage/table/types.js').LeaseAuthority }): OrkaClient {
   const scope = validateScope(inputScope);
   const timeoutMs = integer(options.timeoutMs ?? 5000, 1, 2147483647);
   const bearer = options.bearerToken;
@@ -22,7 +22,11 @@ export function createOrkaClient(inputScope: Readonly<IngressScope>, options: { 
         const finish = (result: OrkaPostResult) => {
           if (settled) return;
           settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort);
-          resolve(result); req?.destroy();
+          if (req && !req.closed) {
+            // Runtime drains this promise before releasing either store. A
+            // logical abort is not proof the native request/socket has closed.
+            req.once('close', () => resolve(result)); req.destroy();
+          } else resolve(result);
         };
         const abort = () => finish({ kind: 'retry' });
         // Absolute deadline, starting before DNS/TLS/request creation. Socket
@@ -30,6 +34,7 @@ export function createOrkaClient(inputScope: Readonly<IngressScope>, options: { 
         const timer = setTimeout(abort, timeoutMs);
         signal?.addEventListener('abort', abort, { once: true });
         try {
+          if (options.authority && !options.authority.allowed()) { abort(); return; }
           req = request(url, { method: 'POST', agent: false, ...(ca === undefined ? {} : { ca }), rejectUnauthorized: true,
             maxHeaderSize: 16 * 1024,
             headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json', 'content-length': body.length, accept: 'application/json' },

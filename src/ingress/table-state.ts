@@ -25,7 +25,7 @@ export function advanceClock(state: Readonly<InboxState>, time: number, epoch: n
 /** Structurally decoded inputs only. These local cross-reference fences are not a complete
  * graph audit. Missing seals cannot enable active rows; terminal/explicit rows need no seal
  * to remain ineligible. A supplied seal must match, even for those sticky physical states. */
-export function projectEvent(event: Readonly<Omit<EventPayload, 'body'>>, state: Readonly<InboxState>, seal?: Readonly<SealPayload>): EffectiveEventState {
+export function projectEvent(event: Readonly<Omit<EventPayload, 'body'>>, state: Readonly<InboxState>, seal?: Readonly<SealPayload>, uncertainRestart = false): EffectiveEventState {
   if (event.order > state.records || event.received > state.lastNow || event.attemptEpoch > state.restartEpoch) {
     throw new TableError('corrupt');
   }
@@ -38,6 +38,11 @@ export function projectEvent(event: Readonly<Omit<EventPayload, 'body'>>, state:
   // Frozen seal watermark wins over all later clocks, including subsequent generations.
   if (event.deadline <= (seal?.watermark ?? state.lastNow)) return { ...physical, state: 'blocked', reason: 'deadline' };
   if (seal) return { ...physical, state: 'blocked', reason: seal.reason };
-  if (event.state === 'forwarding' && event.attemptEpoch < state.restartEpoch) return { ...physical, state: 'pending', attemptId: null };
+  if (event.state === 'forwarding' && event.attemptEpoch < state.restartEpoch) {
+    // V3 cannot infer the remote outcome from an unarmed, expired or cleanly
+    // released owner. Retain the physical row, but never offer its attempt again.
+    return uncertainRestart ? { ...physical, state: 'blocked', reason: 'forwarding-uncertain', attemptId: null } :
+      { ...physical, state: 'pending', attemptId: null };
+  }
   return physical;
 }

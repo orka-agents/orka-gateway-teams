@@ -5,21 +5,21 @@ and separate GET-only V2/V3 foreign-owner envelope inspectors.
 `src/delivery/table-journal.ts` implements explicit V1/V2/V3 delivery libraries on that kernel.
 `src/ingress/table-store.ts` implements the [inbox](table-inbox.md), with a
 body-free two-pass domain audit and durable handoff arm. The compiled CLI ships
-[explicit Table V2 runtime selection](table-runtime.md) and purpose-specific
+[explicit Table V2/V3 runtime selection](table-runtime.md) and purpose-specific
 storage identity; SQLite remains the default. This page describes the underlying
 library APIs (including the library-only foreign-owner inspector), not provisioning
-or hosting instructions. The runtime has no Azure provisioning, renewable lease,
-automatic takeover, migration, deletion or pruning. A separate library-only V3
-kernel and explicit V3 domain factories provide renewable ownership and audited expiry, but no runtime selects them. An explicit audited V2 operator
-reclaim command is described in [Table runtime](table-runtime.md#manual-owner-reclaim).
+or hosting instructions. The runtime has no Azure provisioning, automatic format
+migration, deletion or pruning. Explicit V3 selection connects renewable ownership,
+audited expiry and final external-send fences. Explicit audited V2/V3 operator
+reclaim is described in [Table runtime](table-runtime.md#manual-owner-reclaim).
 
 ## Audited V2-to-V3 upgrade library
 
 `src/storage/table/upgrade.ts` exports `upgradeTableIngressV2(binding, dependencies,
 budget, maxIndexBytes, upgradeAttestationDigest, options?)` and
 `upgradeTableDeliveryV2(binding, dependencies, budget, upgradeAttestationDigest,
-options?)`. They are explicit one-way library operations, not CLI commands or
-runtime migration. No ownership, listener or provider-send permission is granted.
+options?)`. Explicit `upgrade-ingress` / `upgrade-delivery` commands call these
+one-way operations; normal serving never migrates. No ownership, listener or provider-send permission is granted.
 
 The caller retains a private statement that the stable stores/scope and one-way
 conversion were reviewed and old runtimes will not be admitted during conversion;
@@ -46,7 +46,8 @@ Conflicting or unavailable proof remains `unresolved`; there is no blind upgrade
 retry, reset or downgrade. Inspect uncertain state before any further operator
 action. Calls drain actual token/native work, including after cancellation.
 Upgrade one partition at a time; partial conversion does not authorize mixed-format
-serving. Runtime activation and upgrade commands remain separate work.
+serving. Runtime selection and the explicit `upgrade-ingress` / `upgrade-delivery`
+commands are described in the [runtime guide](table-runtime.md).
 
 ## Library contract
 
@@ -137,15 +138,15 @@ multiple rows, any continuation (including empty or row-only), malformed replies
 `TableNotFound`, unknown or contradictory error classifications fail closed. This
 compatibility path is fixture-tested, not live Azure exact-key qualification.
 
-## Library-only V3 lease kernel
+## V3 lease kernel
 
 `createTableKernelV3(binding, dependencies, limits?)` pins metadata format 3.
 It never adopts V1/V2 data, upgrades a store or takes over an occupied owner,
 including an expired one. The explicit `createTableIngressStoreV3` and
 `createTableDeliveryJournalV3` libraries add domain-aware expiry before acquire.
-The CLI remains unchanged: there is no V3 serve, upgrade or reclaim command.
-Do not use these dormant libraries for production serving: final external POST
-fences are not integrated yet.
+The CLI selects these through `table-v3`, with separate upgrade/reclaim commands.
+Runtime composes both domain authorities and checks at actual external handoff;
+see [timing prerequisites and remaining live qualification](table-runtime.md#v3-timing-upgrade-and-failure-boundaries).
 
 V3 keeps V1 data envelopes and the V2 initialization identity and existing Exits,
 and adds closed `lease-expiry` and `format-upgrade` Exits with separate audit evidence.
@@ -205,7 +206,7 @@ header from the current kernel fence before publishing it; its data index retain
 the exact audited row versions. V1/V2 and GET-only foreign inspection retain
 exact-M behavior.
 
-### Dormant V3 domain expiry and recovery
+### V3 domain expiry and recovery
 
 The V3 domain factories accept the corresponding V2 factory inputs and expose
 `leaseAuthority()`. An occupied startup waits once for the initially observed
@@ -232,9 +233,10 @@ invalid metadata, audit, ETag and seal shapes before token acquisition; ordinary
 owner writes cannot emit transition operations or reserved audit rows. Lost
 acknowledgments require exact readback or remain uncertain, never blind retries.
 
-These APIs neither migrate V2 nor enable mixed-format serving. Format upgrade
-and runtime activation are separate work. The synthetic native HTTPS tests do not
-qualify ACA clocks, provider sends or live crash recovery.
+These APIs neither migrate V2 nor enable mixed-format serving. Use the separate
+explicit upgrade commands and runtime selector described in the runtime guide.
+The synthetic native HTTPS tests do not qualify ACA clocks, provider sends or
+live crash recovery.
 
 Existing call and cleanup limits, including 300000 ms, remain accepted. If a
 single request, token wait or reconciliation outlasts authority, the handle loses

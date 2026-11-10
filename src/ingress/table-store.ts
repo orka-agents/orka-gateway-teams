@@ -163,7 +163,7 @@ class TableIngressStore implements IngressPort {
       if (initialize) await this.genesis();
       else {
         this.audited = await auditInbox(this.kernel, this.binding, this.config.audit, this.config.maxIndexBytes,
-          { requestTimeoutMs: this.config.kernel.callTimeoutMs });
+          { requestTimeoutMs: this.config.kernel.callTimeoutMs }, this.format === 3);
         this.index = this.audited.index;
         this.epoch = this.audited.header.metadata.epoch;
         if (this.audited.header.state.handoffClockArm) corrupt();
@@ -202,7 +202,7 @@ class TableIngressStore implements IngressPort {
       currentGeneration: state.currentGeneration, arm: state.handoffClockArm };
   }
   private async genesis(): Promise<void> {
-    const index = new InboxIndex(this.config.maxIndexBytes); this.index = index;
+    const index = new InboxIndex(this.config.maxIndexBytes, this.format === 3); this.index = index;
     await this.kernel.auditOwned({ passes: 2,
       record: (pass, row): undefined => {
         if (row.row !== 'M' || row.value.kind !== 'metadata') corrupt();
@@ -347,7 +347,7 @@ class TableIngressStore implements IngressPort {
       const prior = this.index!.state(); const arm = prior.handoffClockArm; if (!arm || !frame.claim || arm.attemptId !== frame.claim.attemptId || arm.ownerEpoch !== this.epoch) return false;
       const event = this.index!.eventByOrder(arm.order); if (!event || event.externalEventId !== frame.claim.eventId || event.attempt !== frame.claim.attempt) return false;
       const clock = time === undefined ? { state: prior } : advanceClock(prior, time, this.epoch);
-      return projectEvent(event, clock.state, clock.seal?.generation === event.generation ? clock.seal : this.index!.sealByGeneration(event.generation)).state === 'forwarding';
+      return projectEvent(event, clock.state, clock.seal?.generation === event.generation ? clock.seal : this.index!.sealByGeneration(event.generation), this.format === 3).state === 'forwarding';
     });
   }
   private take(frame: Frame): boolean {

@@ -1,25 +1,34 @@
 import https from 'node:https';
 import type { IncomingMessage } from 'node:http';
-import { createTableDeliveryJournal, createTableDeliveryJournalV2 } from '../../src/delivery/table-journal.js';
+import { createTableDeliveryJournal, createTableDeliveryJournalV2, createTableDeliveryJournalV3 } from '../../src/delivery/table-journal.js';
 import { DeliveryJournalError } from '../../src/delivery/types.js';
 import { fixtureProviderSender, providerServiceUrl } from './table-delivery-provider.js';
 import { createDeliveryDispatcher } from '../../src/outbound/dispatcher.js';
 import { finalDelivery } from '../fixtures/outgoing.js';
 
-interface Config { format: 1 | 2; tableUrl: string; tableCA: string; providerUrl: string; providerCA: string; mode: 'claim' | 'deliver' | 'replay' }
+import { processClock, pauseAfterPost } from './table-process-clock.js';
+interface Config { format: 1 | 2 | 3; clockFile?: string; pauseAtPost?: boolean; fresh?: boolean; tableUrl: string; tableCA: string; providerUrl: string; providerCA: string; mode: 'claim' | 'deliver' | 'replay' | 'held-deliver' }
 process.once('message', (input: Config) => { void run(input); });
 async function run(config: Config) {
-  const scope = { appId: 'App', tenantId: 'Tenant' }; const request = { ...finalDelivery, accountId: 'Tenant' };
-  const create = config.format === 2 ? createTableDeliveryJournalV2 : createTableDeliveryJournal;
+  if (config.pauseAtPost) pauseAfterPost(config.providerUrl);
+  const scope = { appId: 'App', tenantId: 'Tenant' }; const request = { ...finalDelivery, accountId: 'Tenant', ...(config.fresh ? { idempotencyId: 'fresh-operation', deliveryId: 'fresh-delivery' } : {}) };
+  const create = config.format === 3 ? createTableDeliveryJournalV3 : config.format === 2 ? createTableDeliveryJournalV2 : createTableDeliveryJournal;
   const journal = create({ account: 'Example123', table: 'Journal', storeId: 'stable', kind: 'delivery', scope }, {
+    ...(config.clockFile ? { leaseClock: processClock(config.clockFile) } : {}),
     token: async () => 'synthetic.private.table.canary',
     request: ((url: URL, options: https.RequestOptions, callback: (response: IncomingMessage) => void) =>
       https.request(new URL(url.pathname + url.search, config.tableUrl), { ...options, hostname: '127.0.0.1', servername: 'localhost', ca: config.tableCA }, callback)) as typeof https.request,
   });
-  const sender = fixtureProviderSender(config.providerUrl, config.providerCA, async () => 'synthetic.provider.token');
+  const sender = fixtureProviderSender(config.providerUrl, config.providerCA, async () => {
+    if (config.mode === 'held-deliver') {
+      const resume = new Promise<void>(resolve => process.once('message', () => resolve()));
+      process.send?.({ kind: 'claimed' }); await resume;
+    }
+    return 'synthetic.provider.token';
+  });
   const route = { serviceUrl: providerServiceUrl, channelId: 'msteams' as const, bot: { id: 'bot-fixture', role: 'bot' as const },
     conversation: { id: request.contextId, tenantId: scope.tenantId, conversationType: 'personal' as const } };
-  const dispatcher = createDeliveryDispatcher({ journal, sender, scope, getRoute: () => route, serviceUrls: [providerServiceUrl], recipientIds: [route.bot.id] });
+  const dispatcher = createDeliveryDispatcher({ journal, sender, scope, ...(config.format === 3 ? { authority: journal.leaseAuthority() } : {}), getRoute: () => route, serviceUrls: [providerServiceUrl], recipientIds: [route.bot.id] });
   try {
     await journal.open();
     const result = config.mode === 'claim' ? await journal.begin(request) : await dispatcher.deliver(request);

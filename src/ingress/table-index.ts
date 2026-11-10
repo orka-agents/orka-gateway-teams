@@ -68,7 +68,7 @@ export class InboxIndex implements InboxGraph {
   #credits: (undefined | { token: IndexWorkingCredit; bytes: number })[] = [undefined, undefined, undefined, undefined, undefined];
   #state: Buffer | undefined; #stateLength = 0;
   #prepared: Staged | undefined;
-  constructor(maxIndexBytes: number) {
+  constructor(maxIndexBytes: number, readonly uncertainRestart = false) {
     integer(maxIndexBytes, 1, 1024 * 1024 * 1024); this.maxIndexBytes = maxIndexBytes;
   }
   #alive(): void { if (this.#life === 'new' || this.#life === 'disposed' || this.#life === 'retired') bad(); }
@@ -270,7 +270,7 @@ export class InboxIndex implements InboxGraph {
       for (; next <= last; next++) {
         const e = graph.eventByOrder(next);
         if (!e || e.order !== next || e.generation !== generation || e.received < received || e.received < priorWatermark) bad();
-        projectEvent(e, state, seal); received = e.received; if (e.state !== 'terminal') bodies++;
+        projectEvent(e, state, seal, this.uncertainRestart); received = e.received; if (e.state !== 'terminal') bodies++;
       }
       if (seal) priorWatermark = seal.watermark;
     }
@@ -291,7 +291,7 @@ export class InboxIndex implements InboxGraph {
     for (let order = 1; order <= s.records; order++) {
       const e = overlay?.event?.order === order ? overlay.event : this.eventByOrder(order); if (!e) bad();
       const seal = overlay?.seal?.generation === e.generation ? overlay.seal : this.sealByGeneration(e.generation);
-      if (projectEvent(e, s, seal).state === 'pending' && e.nextAttempt <= time) {
+      if (projectEvent(e, s, seal, this.uncertainRestart).state === 'pending' && e.nextAttempt <= time) {
         // Explicit copy through a bounded slot strips even caller overlay extras.
         const slot = indexBuffer(4096); writeSummary(slot, e); return readEvent(slot, 0);
       }

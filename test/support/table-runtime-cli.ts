@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { FixtureHooks } from './ingress-https.js';
 import type { EventEnvelope } from '../../src/protocol/types.js';
-import { createTableKernelV2 } from '../../src/storage/table/index.js';
+import { createTableKernelV2, createTableKernelV3 } from '../../src/storage/table/index.js';
 import { activity, authFixture, post, recipientId, scope, serviceUrl } from './ingress-auth.js';
 import { httpsFixture } from './ingress-https.js';
 import { runtimeIdentity, runtimeTableService, storageClientId } from './table-runtime.js';
@@ -116,7 +116,7 @@ export function hasTableCanary(rows: readonly Record<string, unknown>[], canarie
 
 /** Same qualification for a private fresh tsc output and the actual compiled image.
  * Docker is selected only by the explicit support-file runner, never npm test. */
-export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promise<void> {
+export async function qualifyTableCli(t: CliFixtureHooks, image?: string, backend: 'table-v2' | 'table-v3' = 'table-v2'): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), 'teams-table-cli-'));
   const fixtureDir = join(directory, 'fixture'); const work = join(directory, 'work');
   const runs: ProcessRun[] = []; let fixtureOwners = 0;
@@ -279,6 +279,17 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
   const initializedInbox = JSON.stringify([...tables.inbox.rows]);
   await finished(launch('init-delivery', common), 0, 'initialized');
   assert.equal(JSON.stringify([...tables.inbox.rows]) === initializedInbox, true, 'delivery init does not rewrite ingress');
+  if (backend === 'table-v3') {
+    tables.inbox.controls.allowUpgrade = true; tables.delivery.controls.allowUpgrade = true;
+    const upgrade = { ...common, GATEWAY_STORAGE_BACKEND: backend, TABLE_UPGRADE_ATTESTATION_DIGEST: 'b'.repeat(64) };
+    await finished(launch('upgrade-ingress', upgrade), 0, 'upgraded (ingress)');
+    const mixed = launch('serve', { ...serving, GATEWAY_STORAGE_BACKEND: backend });
+    await finished(mixed, 1, 'lease-format-unsupported (delivery): corrupt');
+    assert.equal(mixed.output().includes('teams-ingress: listening'), false, 'half-upgraded runtime never listens');
+    await finished(launch('upgrade-delivery', upgrade), 0, 'upgraded (delivery)');
+    assert.equal(tables.inbox.rows.get('M')?.V, 3); assert.equal(tables.delivery.rows.get('M')?.V, 3);
+    common.GATEWAY_STORAGE_BACKEND = backend; serving.GATEWAY_STORAGE_BACKEND = backend;
+  }
   const recoveryEnv = { ...common, TABLE_RECOVERY_EXPECTED_OWNER: '22222222-2222-4222-8222-222222222222',
     TABLE_RECOVERY_EXPECTED_EPOCH: '1', TABLE_RECOVERY_ATTESTATION_DIGEST: 'a'.repeat(64) };
   const beforeRecovery = JSON.stringify([...tables.delivery.rows]);
@@ -295,7 +306,7 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
     const binding = kind === 'ingress' ? { kind, account: common.TABLE_ACCOUNT, table: common.TABLE_NAME,
       storeId: common.TABLE_INGRESS_STORE_ID, scope } : { kind, account: common.TABLE_ACCOUNT, table: common.TABLE_NAME,
       storeId: common.TABLE_DELIVERY_STORE_ID, scope: { appId: scope.appId, tenantId: scope.tenantId } };
-    const previous = createTableKernelV2(binding, { token: async () => syntheticToken, request: tables.request }); fixtureOwners++;
+    const previous = (backend === 'table-v3' ? createTableKernelV3 : createTableKernelV2)(binding, { token: async () => syntheticToken, request: tables.request }); fixtureOwners++;
     await previous.acquire();
     const before = rows.get('M')!;
     assert.notEqual(before.Owner, '', 'public owner handle acquired the initialized store');
@@ -322,8 +333,10 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string): Promi
   assert.equal(payloads(tables.inbox.rows, 'event').length, 0); await stop(denied); sdkWrongKey = false;
 
   const running = await start(); assert.equal(identity.calls.bot, 0);
-  const occupied = launch('serve', serving); await finished(occupied, 1, 'store-owned-requires-operator-recovery (ingress): occupied');
-  assert.equal(occupied.output().includes('teams-ingress: listening'), false, 'occupied writer cannot listen');
+  if (backend === 'table-v2') {
+    const occupied = launch('serve', serving); await finished(occupied, 1, 'store-owned-requires-operator-recovery (ingress): occupied');
+    assert.equal(occupied.output().includes('teams-ingress: listening'), false, 'occupied writer cannot listen');
+  }
   assert.equal((await post(ingressPort, auth.token({ aud: 'wrong-audience' }))).status, 401);
   assert.equal((await post(ingressPort, incomingToken)).status, 200);
   await until(() => !!saved && payloads(tables.inbox.rows, 'event').some(row => row.state === 'terminal' && row.receipt?.eventId === orkaReceipt), 'persisted Orka receipt');

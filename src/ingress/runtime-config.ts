@@ -10,12 +10,13 @@ import type { OwnedAuditBudget } from '../storage/table/types.js';
 import type { OutboundServerConfig } from '../outbound/server.js';
 import type { IngressScope } from './types.js';
 
+type TableBackend = 'table-v2' | 'table-v3';
 export type TableInitConfig = {
-  storage: { backend: 'table-v2'; account: string; table: string; storeId: string; identity: StorageIdentityConfig };
+  storage: { backend: TableBackend; account: string; table: string; storeId: string; identity: StorageIdentityConfig };
   scope: Readonly<IngressScope>;
 } & ({ kind: 'ingress'; audit: OwnedAuditBudget; maxIndexBytes: number } | { kind: 'delivery' });
 export interface TableServeConfig extends Omit<ServeConfig, 'dbPath' | 'outbound'> {
-  storage: { backend: 'table-v2'; account: string; table: string; ingressStoreId: string; deliveryStoreId?: string;
+  storage: { backend: TableBackend; account: string; table: string; ingressStoreId: string; deliveryStoreId?: string;
     identity: StorageIdentityConfig; audit: OwnedAuditBudget; maxIndexBytes: number };
   outbound?: OutboundServerConfig;
 }
@@ -23,11 +24,27 @@ export type RuntimeServeConfig = ServeConfig | TableServeConfig;
 export interface TableRecoveryConfig {
   target: TableInitConfig; expectedOwner: string; expectedEpoch: number; attestationDigest: string; audit: OwnedAuditBudget;
 }
+export interface TableUpgradeConfig { target: TableInitConfig; attestationDigest: string; audit: OwnedAuditBudget }
+export function parseTableUpgradeConfig(env: NodeJS.ProcessEnv, kind: 'ingress' | 'delivery'): TableUpgradeConfig {
+  try {
+    const captured = { ...env };
+    if (captured.GATEWAY_STORAGE_BACKEND !== 'table-v3' || recoveryKeys.some(k => captured[k] !== undefined)) throw new ConfigurationError();
+    const attestationDigest = hex(captured.TABLE_UPGRADE_ATTESTATION_DIGEST);
+    delete captured.TABLE_UPGRADE_ATTESTATION_DIGEST;
+    const target = parseRuntimeConfig(captured, kind === 'ingress' ? 'init' : 'init-delivery');
+    if (!('storage' in target)) throw new ConfigurationError();
+    const a = auditConfig<2>({ passes: 2, record() {}, endPass() {}, finalize() {} }, {
+      maxPages: requiredNumber(captured.TABLE_AUDIT_MAX_PAGES), maxPageBytes: requiredNumber(captured.TABLE_AUDIT_MAX_BYTES),
+      maxDurationMs: requiredNumber(captured.TABLE_AUDIT_MAX_DURATION_MS), maxTrackingBytes: requiredNumber(captured.TABLE_AUDIT_MAX_TRACKING_BYTES) });
+    return Object.freeze({ target, attestationDigest, audit: Object.freeze({ maxPages: a.maxPages, maxPageBytes: a.maxPageBytes,
+      maxDurationMs: a.maxDurationMs, maxTrackingBytes: a.maxTrackingBytes }) });
+  } catch { throw new ConfigurationError(); }
+}
 const recoveryKeys = ['TABLE_RECOVERY_EXPECTED_OWNER', 'TABLE_RECOVERY_EXPECTED_EPOCH', 'TABLE_RECOVERY_ATTESTATION_DIGEST'] as const;
 export function parseTableRecoveryConfig(env: NodeJS.ProcessEnv, kind: 'ingress' | 'delivery'): TableRecoveryConfig {
   try {
     const captured = { ...env };
-    if (captured.GATEWAY_STORAGE_BACKEND !== 'table-v2') throw new ConfigurationError();
+    if (!['table-v2', 'table-v3'].includes(captured.GATEWAY_STORAGE_BACKEND!)) throw new ConfigurationError();
     const expectedOwner = uuid(captured.TABLE_RECOVERY_EXPECTED_OWNER);
     const expectedEpoch = requiredNumber(captured.TABLE_RECOVERY_EXPECTED_EPOCH);
     const attestationDigest = hex(captured.TABLE_RECOVERY_ATTESTATION_DIGEST);
@@ -44,10 +61,11 @@ export function parseRuntimeConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'init-
 export function parseRuntimeConfig(env: NodeJS.ProcessEnv, mode: 'serve'): RuntimeServeConfig;
 export function parseRuntimeConfig(env: NodeJS.ProcessEnv, mode: 'init' | 'init-delivery' | 'serve'): InitConfig | TableInitConfig | RuntimeServeConfig {
   try {
-    if (recoveryKeys.some(key => env[key] !== undefined)) throw new ConfigurationError();
-    if (parseStorageBackend(env) === 'sqlite') return parseSqliteConfig(env, mode);
+    if (recoveryKeys.some(key => env[key] !== undefined) || env.TABLE_UPGRADE_ATTESTATION_DIGEST !== undefined) throw new ConfigurationError();
+    const backend = parseStorageBackend(env);
+    if (backend === 'sqlite') return parseSqliteConfig(env, mode);
     const scope = parseScopeConfig(env);
-    const storage = { backend: 'table-v2' as const, account: env.TABLE_ACCOUNT!, table: env.TABLE_NAME!,
+    const storage = { backend, account: env.TABLE_ACCOUNT!, table: env.TABLE_NAME!,
       identity: storageIdentity({ host: env.TABLE_MANAGED_IDENTITY_HOST, clientId: env.TABLE_MANAGED_IDENTITY_CLIENT_ID }) };
     if (mode === 'init-delivery') return snapshotTableInitConfig({ kind: 'delivery', scope,
       storage: { ...storage, storeId: env.TABLE_DELIVERY_STORE_ID! } });
@@ -82,7 +100,7 @@ export function snapshotTableServeConfig(input: TableServeConfig): TableServeCon
     const policy = Object.freeze(validatePolicy(auditFields(value.policy, ['maxPending', 'maxRecords', 'replayWindowMs'])));
     const caFile = value.caFile;
     if (caFile !== undefined && (typeof caFile !== 'string' || !isAbsolute(caFile) || caFile.length > 4096 || /\p{Cc}|[\uD800-\uDFFF]/u.test(caFile))) throw new ConfigurationError();
-    return Object.freeze({ scope, receiver, bearerToken, policy, storage: Object.freeze({ backend: 'table-v2',
+    return Object.freeze({ scope, receiver, bearerToken, policy, storage: Object.freeze({ backend: s.backend as TableBackend,
       account: binding.account, table: binding.table, ingressStoreId: s.ingressStoreId as string,
       ...(outbound === undefined ? {} : { deliveryStoreId: s.deliveryStoreId as string }),
       identity: storageIdentity(s.identity), ...budgets(s) }),
@@ -97,7 +115,7 @@ export function snapshotTableInitConfig(input: TableInitConfig): TableInitConfig
     const scope = captureScope(value.scope); const kind = value.kind;
     if (kind !== 'ingress' && kind !== 'delivery') throw new ConfigurationError();
     const binding = resource(s, s.storeId, kind, scope);
-    const storage = Object.freeze({ backend: 'table-v2' as const, account: binding.account, table: binding.table,
+    const storage = Object.freeze({ backend: s.backend as TableBackend, account: binding.account, table: binding.table,
       storeId: s.storeId as string, identity: storageIdentity(s.identity) });
     if (kind === 'ingress') return Object.freeze({ storage, scope, kind, ...budgets(value) });
     if (value.audit !== undefined || value.maxIndexBytes !== undefined) throw new ConfigurationError();
@@ -117,7 +135,7 @@ function storageIdentity(input: unknown): StorageIdentityConfig {
   return Object.freeze({ host, clientId: clientId.toLowerCase() });
 }
 function resource(s: Record<string, unknown>, storeId: unknown, kind: 'ingress' | 'delivery', scope: Readonly<IngressScope>) {
-  if (s.backend !== 'table-v2') throw new ConfigurationError();
+  if (s.backend !== 'table-v2' && s.backend !== 'table-v3') throw new ConfigurationError();
   return bindTable({ account: s.account as string, table: s.table as string, storeId: storeId as string,
     ...(kind === 'ingress' ? { kind, scope } : { kind, scope: { appId: scope.appId, tenantId: scope.tenantId } }) });
 }

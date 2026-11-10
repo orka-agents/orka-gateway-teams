@@ -1,17 +1,24 @@
-# Table inbox — V2 contract
+# Table inbox — V2/V3 contract
 
 `createTableIngressStore` in `src/ingress/table-store.ts` implements the asynchronous
 `IngressPort` on the explicitly V2 [Table kernel](table-storage.md). The compiled
-CLI supports [explicit Table V2 runtime selection](table-runtime.md), including a
+CLI supports [explicit Table V2/V3 runtime selection](table-runtime.md), including a
 purpose-specific storage identity provider. SQLite remains the default; its
 synchronous APIs, schemas and relay behavior are unchanged.
 
-There is no automatic initialization/adoption, V1 migration, lease, pruning,
-operator recovery command, HA promise or Azure hosting integration. The Table
-delivery journal has explicit V1 and V2 factories; the selected runtime uses V2,
-which validates retained recovery commitments at startup only. Crash recovery
-remains separate work. The runtime does not provision Azure resources or establish
-live identity/service qualification.
+The explicit `createTableIngressStoreV3` factory adds renewable authority and
+audited expiry on the same inbox semantics. `table-v3` selects it together with
+the V3 delivery journal; `table-v2` retains nonexpiring ownership. Explicit audited
+upgrade/recovery commands are described in the runtime guide. There is no automatic
+initialization/adoption, V1 migration, pruning, downgrade or HA promise. An armed
+crash interval stays blocked after expiry; a successor does not resend it.
+V3 also projects each older-epoch physical `forwarding` row as blocked with the
+computed reason `forwarding-uncertain`, even if its arm was already cleared.
+This includes V2-era rows retained through upgrade and V3 manual recovery.
+Terminal outcomes, deadlines and seals retain precedence. Physical row/body bytes
+and versions stay unchanged, and retained uncertain bodies keep their budget charge. Final
+Orka handoff checks the combined runtime authority after serialization. The runtime
+does not provision Azure resources or establish live identity/timing qualification.
 
 ## Construction and lifecycle
 

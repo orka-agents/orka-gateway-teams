@@ -8,7 +8,7 @@ export const safeSdkLogger: ILogger = Object.freeze({ debug: discard, info: disc
 
 export type IngressLogEvent = 'listening' | 'stopped' | 'initialized' | 'configuration-failed' | 'startup-failed' | 'storage-failed' |
   'store-open-failed' | 'store-owned-requires-operator-recovery' | 'listener-failed' | 'startup-cleanup-failed' |
-  'reclaimed' | 'operator-recovery-failed';
+  'reclaimed' | 'operator-recovery-failed' | 'upgraded' | 'lease-transition-uncertain' | 'lease-owned-busy' | 'lease-authority-lost' | 'lease-format-unsupported';
 export type IngressLogReason = 'invalid-configuration' | 'runtime-failure' | 'missing' | 'occupied' | 'corrupt' | 'incomplete' |
   'unresolved' | 'unavailable' | 'cancelled' | 'ingress' | 'outbound' | 'owner-or-epoch-mismatch' | 'already-unowned' |
   'audit-or-storage-failed' | 'outcome-uncertain';

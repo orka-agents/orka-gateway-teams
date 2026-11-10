@@ -19,7 +19,7 @@ const retryable: DeliveryResponse = Object.freeze({ status: 'retryableError', me
 const nonRetryable: DeliveryResponse = Object.freeze({ status: 'nonRetryableError', message: 'Delivery cannot be completed safely.' });
 
 export function createDeliveryDispatcher(options: DispatcherOptions): DeliveryDispatcher {
-  const { journal, sender, getRoute, correlation, interimDelivery, meetingDrafts } = options;
+  const { journal, sender, getRoute, correlation, interimDelivery, meetingDrafts, authority } = options;
   if ((interimDelivery !== undefined && typeof interimDelivery !== 'boolean') ||
       (meetingDrafts !== undefined && typeof meetingDrafts !== 'boolean') || (meetingDrafts === true && interimDelivery !== true)) throw new ConfigurationError();
   const scope = validateScope(options.scope);
@@ -47,7 +47,7 @@ export function createDeliveryDispatcher(options: DispatcherOptions): DeliveryDi
   async function dispatch(input: Readonly<DeliveryRequest>, signal: AbortSignal, deadline: number, retire: () => void): Promise<DeliveryResponse> {
     let request: DeliveryRequest;
     try { request = snapshotDelivery(input, scope); } catch { return nonRetryable; }
-    const active = () => !stopped && healthy && !signal.aborted && Number.isFinite(deadline) && performance.now() < deadline;
+    const active = () => !stopped && healthy && !signal.aborted && Number.isFinite(deadline) && performance.now() < deadline && (authority?.allowed() ?? true);
     if (!active()) return retryable;
     let begun: BeginDeliveryResult;
     try { begun = await journal.begin(request); } catch { poison(); return retryable; }
@@ -105,7 +105,7 @@ export function createDeliveryDispatcher(options: DispatcherOptions): DeliveryDi
         else {
           if (!active()) return finish({ kind: 'retryable' });
           let roster;
-          try { roster = await sender.getMembers(route, { signal, deadline }); }
+          try { roster = await sender.getMembers(route, { signal, deadline, ...(authority === undefined ? {} : { authority }) }); }
           catch { return finish({ kind: 'retryable' }); }
           if (!active() || roster.kind === 'retryable') return finish({ kind: 'retryable' });
           if (roster.kind !== 'members') reason = 'roster';
@@ -123,9 +123,9 @@ export function createDeliveryDispatcher(options: DispatcherOptions): DeliveryDi
     } catch { return finish({ kind: 'rejected' }); }
     // The budget starts before snapshot/SQLite/formatting. Do not rely solely
     // on a timer getting a turn after potentially blocking synchronous work.
-    if (!active()) return finish({ kind: 'retryable' });
+    if (!active() || (authority && !await authority.revalidate()) || !active()) return finish({ kind: 'retryable' });
     let outcome: DeliveryOutcome;
-    try { outcome = validateOutcome(await sender.send(route, message, { signal, deadline })); }
+    try { outcome = validateOutcome(await sender.send(route, message, { signal, deadline, ...(authority === undefined ? {} : { authority }) })); }
     catch { outcome = { kind: 'unknown' }; }
     // A confirmed receipt is not discarded because the caller disconnected.
     // It still must be durably settled before any delivered response escapes.

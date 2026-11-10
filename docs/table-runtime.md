@@ -1,12 +1,16 @@
-# Select the Table V2 runtime
+# Select the Table runtime
 
-The normal compiled CLI supports **explicit `table-v2` selection** for the V2
-inbox and, when enabled, V2 delivery journal. SQLite remains the default, with
+The compiled CLI supports explicit `table-v2` (nonexpiring ownership) and
+`table-v3` (renewable, fenced ownership) for both the inbox and enabled delivery
+journal. A selector applies to both domains; mixed V2/V3 serving is refused. SQLite remains the default, with
 unchanged synchronous library APIs. This guide covers runtime selection; see
 [Table storage](table-storage.md) and [inbox semantics](table-inbox.md) for the
 persisted formats, bounds and failure rules.
 
-Runtime selection is not provisioning, migration or HA. Explicit operator reclaim is a separate, audited command; `serve` never takes over an occupied owner. The separate
+Runtime selection is not provisioning or an HA qualification. V2 `serve` never
+takes over an occupied owner. V3 `serve` can audit and clear safely expired
+ownership before acquiring; it never upgrades formats. Explicit operator reclaim
+and one-way upgrade are separate audited commands. The separate
 [ACA operator guide](aca-deployment.md) and [live report](live-validation.md)
 record the evaluated identity/init/serve/personal-chat path without expanding those guarantees.
 The physical Azure primary account/table and authorized UAMI access must already
@@ -22,7 +26,7 @@ or secret manager, not argv, committed files or logs.
 
 | Variable | Requirement / meaning |
 | --- | --- |
-| `GATEWAY_STORAGE_BACKEND` | Omitted or `sqlite` preserves SQLite; exactly `table-v2` selects Table. Empty/unknown values fail. |
+| `GATEWAY_STORAGE_BACKEND` | Omitted or `sqlite` preserves SQLite; exactly `table-v2` or `table-v3` selects that Table format. Empty/unknown values fail. |
 | `TABLE_ACCOUNT`, `TABLE_NAME` | Explicit existing Azure primary account and physical table; resource casing is canonicalized to lowercase. |
 | `TABLE_INGRESS_STORE_ID` | Explicit stable logical inbox identity for `init` / `serve`. |
 | `TABLE_DELIVERY_STORE_ID` | Explicit stable logical delivery identity for `init-delivery` / outbound-enabled `serve`. |
@@ -34,6 +38,7 @@ or secret manager, not argv, committed files or logs.
 | `TABLE_AUDIT_MAX_TRACKING_BYTES` | Required positive integer: inbox audit cursor/hash/row tracking capacity, including growth overlap. Ceiling: 268,435,456 bytes (256 MiB). |
 | `TABLE_MAX_INDEX_BYTES` | Required positive integer: inbox domain index budget. Ceiling: 1,073,741,824 bytes (1 GiB). |
 | `TABLE_RECOVERY_EXPECTED_OWNER`, `TABLE_RECOVERY_EXPECTED_EPOCH` | Recovery commands only: the exact occupied owner UUID and positive epoch independently observed by the operator. Never guess or reuse values from an earlier attempt. |
+| `TABLE_UPGRADE_ATTESTATION_DIGEST` | Upgrade commands only: lowercase SHA-256 digest of the private operator statement reviewing stable store/scope selection, one-way conversion and inhibition of old runtime admission. Not proof of termination. |
 | `TABLE_RECOVERY_ATTESTATION_DIGEST` | Recovery commands only: lowercase SHA-256 digest of an operator-held, private termination attestation. The attestation itself is never sent to Table or logged. |
 
 All commands require the complete existing scope: `TEAMS_APP_ID`,
@@ -76,6 +81,8 @@ the selected backend; mixed SQLite/Table serving is not supported.
 | `node dist/ingress/main.js init` | Inbox ID and all five inbox audit/index values | Initialize only the empty inbox partition, then drain/close. |
 | `node dist/ingress/main.js init-delivery` | Delivery ID | Initialize only the empty delivery partition, then drain/close. |
 | `node dist/ingress/main.js serve` | Inbox ID/budgets, existing receiver/routing/bot credentials and Orka ingress bearer; enabled outbound additionally requires delivery ID and distinct outbound bearer/listener settings | Open/audit existing stores only; both audits complete before either listener. |
+| `node dist/ingress/main.js upgrade-ingress` | Explicit `table-v3`, inbox ID, full scope, storage identity, audit/index budgets and upgrade digest | Audit owner-empty V2, then atomically convert M and append upgrade evidence; no listener or ownership grant. |
+| `node dist/ingress/main.js upgrade-delivery` | Explicit `table-v3`, delivery ID, full scope, storage identity, four audit budgets and upgrade digest | Convert only the owner-empty delivery partition, retaining all history. |
 | `node dist/ingress/main.js recover-ingress` | Inbox ID, full scope, storage identity, audit/index budgets and three `TABLE_RECOVERY_*` values | Independently audit and conditionally reclaim **only** the occupied inbox. Does not listen or initialize. |
 | `node dist/ingress/main.js recover-delivery` | Delivery ID, full scope, storage identity, audit/index budgets and three `TABLE_RECOVERY_*` values | Independently audit and conditionally reclaim **only** the occupied delivery store. Does not listen or initialize. |
 
@@ -101,7 +108,11 @@ messages to an old dispatcher. Do not reinitialize or change store IDs. The Tabl
 marker/operation/alias/receipt formats remain unchanged; shared correlation-reader
 constraints still apply.
 
-Serve refuses missing, occupied, unsupported or incompletely initialized stores.
+Serve refuses missing, unsupported or incompletely initialized stores; it never
+initializes or converts them. V3 handles a live foreign owner with one cancellable
+wait for the initially observed expiry, capped at 135001 monotonic ms. A renewed
+or changed owner returns busy instead of extending the wait. Safely expired,
+unchanged ownership is cleared only after complete domain proof.
 An occupied V2 owner reports `store-owned-requires-operator-recovery: occupied`
 with a fixed ingress/delivery label; it does **not** claim that owner is alive,
 wait for a lease, or retry automatically. `store-open-failed` reports a fixed
@@ -114,9 +125,54 @@ refused initialization may already have committed: nonzero exit is not proof of
 noncommit. Do not automatically retry, delete or roll back storage to get past
 that failure.
 
+### V3 timing, upgrade and failure boundaries
+
+V3 leases last 120000 ms, with renewal due 40000 ms after the last confirmed
+submission. Deployment requires each machine within 5000 ms of UTC and at most
+1000 ms from the final synchronous permission check to native/SDK handoff.
+Owners stop strictly at E−6000 ms or their earlier monotonic cutoff; takeover
+requires wall time strictly after E+5000 ms. Local wall/monotonic divergence
+revokes authority; it does not prove UTC accuracy. Existing call/cleanup deadlines
+are unchanged: overlong work loses authority, not its actual-work drain obligation.
+These assumptions still require a separately supervised ACA run.
+
+Either domain losing authority immediately withdraws readiness and admission,
+aborts both directions, drains native requests, SDK/token work and settlement,
+then closes both stores and finally storage identity. Teams checks authority again
+after bot-token acquisition, and Orka immediately before native request creation.
+An already handed-off POST can finish remotely after loss; stale settlement is
+refused. An old uncertain delivery remains unknown and an armed inbox interval
+stays non-forwardable. In V3, every older-epoch physical `forwarding` row also
+projects as blocked/uncertain, even after its handoff arm was finalized. This
+applies uniformly after expiry, clean restart, manual recovery and V2-to-V3
+upgrade. Its retained body and row version are not rewritten; it still counts
+against the body budget. Fresh pending events remain eligible. V2 and SQLite
+keep their existing restart behavior. No uncertain V3 attempt is resent by a successor. This is not remote
+exactly-once or cancellation of a remote effect.
+
+To convert existing stores, stop and inhibit old runtime admission. Use ordinary
+clean close, or the independently termination-attested recovery below if V2 is
+occupied. Retain the private upgrade-intent statement and set only its digest.
+Run `upgrade-ingress` and `upgrade-delivery` separately with `table-v3`. Remove the
+upgrade digest before `serve`; it is rejected by init/serve/recovery and SQLite.
+Only owner-empty V2 is accepted. Receipts, aliases, Sessions, audits, initialization
+identity and uncertain outcomes are retained. Completing one upgrade does not
+permit mixed-format serving; complete the other, never reset or downgrade.
+A lost ACK reports `lease-transition-uncertain`: inspect M and its transition
+audit, rather than blindly rerunning, reinitializing or reverting. Old decoders
+reject V3 even after clean release. No downgrade is supported.
+
+V3 uses fixed `lease-owned-busy`, `lease-authority-lost`,
+`lease-transition-uncertain` and `lease-format-unsupported` diagnostics (the last
+also covers corrupt closed-format metadata), with only fixed store/reason labels.
+No owner IDs, epochs, payloads or raw SDK errors are printed. V2 diagnostics remain
+unchanged. A failed/uncertain close never reports a successful global stop, even
+if one or both remote releases actually committed.
+
 ### Manual owner reclaim
 
-There is no lease in this release. To recover a stranded V2 owner, first stop
+V2 ownership is nonexpiring. Manual recovery supports either explicitly selected
+format, including a V3 owner whose lease has not expired. First stop
 all old processes and prevent the old revision/Job from restarting; independently
 verify physical termination. Record a private attestation and derive its
 lowercase SHA-256 digest offline. Observe the **exact current** owner and epoch
@@ -219,13 +275,15 @@ or default-credential support is implied.
 
 ## Operational and verification boundary
 
-Support **one writer with controlled clean handover** or explicit, audited
-operator reclaim after verified termination. Occupied ownership, crashes,
-failed audits and unclean releases do not trigger automatic takeover. Replica
-count or ACA single-revision mode is not fencing; rolling revisions can overlap.
-No scale-out, rolling-handover automation, lease, autonomous crash recovery,
-force/reset or migration is provided. The checked-in Kubernetes package remains SQLite/client-secret; this
-feature does not deploy or provision ACA or alter Kubernetes assets. The separate
+V2 supports **one writer with controlled clean handover** or explicit, audited
+operator reclaim after verified termination; its ownership does not expire.
+Explicit V3 `serve` renews leases and can audit/clear safely expired ownership
+before acquisition. Neither a failed audit nor an unclean release is, by itself,
+authority to take over. Live ACA clock/stall/crash qualification remains separate.
+Replica count or ACA single-revision mode is not fencing; rolling revisions can
+overlap. No scale-out, rolling-handover automation, force/reset or automatic
+migration is provided. The checked-in Kubernetes package remains SQLite/client-secret;
+this feature does not deploy or provision ACA or alter Kubernetes assets. The separate
 [ACA profile renderer](aca-deployment.md) prepares operator-owned templates only.
 
 The default offline test compiles the real source entrypoint into private output
