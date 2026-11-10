@@ -216,6 +216,15 @@ export function encodeRecord(binding: BoundTable, value: RecordValue): Record<st
 export function encodeExit(input: ExitReceipt | undefined): Buffer {
   if (input === undefined) return Buffer.alloc(0);
   const v = object(input);
+  if (v.kind === 'format-upgrade') {
+    object(v, ['kind', 'oldOwner', 'oldEpoch', 'invocation', 'originalMDigest', 'planDigest', 'auditDigest', 'previousExit']);
+    const priorBytes = binary(v.previousExit, 1024); const prior = decodeExit(priorBytes);
+    const epoch = integer(v.oldEpoch, 0, Number.MAX_SAFE_INTEGER - 1);
+    if (epoch === 0 ? prior !== undefined || v.oldOwner !== '' : !prior || prior.oldEpoch !== epoch || prior.oldOwner !== v.oldOwner) fail();
+    return bytes(Buffer.from(JSON.stringify({ kind: 'format-upgrade', oldOwner: epoch === 0 ? '' : uuid(v.oldOwner), oldEpoch: epoch,
+      invocation: uuid(v.invocation), originalMDigest: hex(v.originalMDigest), planDigest: hex(v.planDigest),
+      auditDigest: hex(v.auditDigest), previousExit: priorBytes.toString('base64') })), 2048);
+  }
   if (v.kind === 'lease-expiry') {
     object(v, ['kind', 'oldOwner', 'oldEpoch', 'invocation', 'originalMDigest', 'planDigest', 'domainDispositionDigest', 'auditId', 'auditDigest', 'lease', 'observedAt']);
     const l = object(v.lease, ['schema', 'durationMs', 'skewMs', 'handoffMs', 'sequence', 'invocation', 'expiresAt']);
@@ -240,12 +249,12 @@ export function encodeExit(input: ExitReceipt | undefined): Buffer {
       { auditId: uuid(v.auditId), auditDigest: hex(v.auditDigest) }) };
   return bytes(Buffer.from(JSON.stringify(receipt)), 1024);
 }
-export function decodeExit(input: Uint8Array): ExitReceipt | undefined {
+export function decodeExit(input: Uint8Array): import('./types.js').CleanReleaseExit | import('./types.js').OperatorRecoveryExit | undefined {
   try {
     const raw = bytes(input, 1024); if (!raw.length) return undefined;
     const receipt = rawJSON(raw) as ExitReceipt;
     // V2 remains closed to V3 transition evidence, even when owner-empty.
-    if (receipt.kind === 'lease-expiry' || !encodeExit(receipt).equals(raw)) fail(); return receipt;
+    if (receipt.kind === 'lease-expiry' || receipt.kind === 'format-upgrade' || !encodeExit(receipt).equals(raw)) fail(); return receipt;
   } catch { throw new TableError('corrupt'); }
 }
 export function recoveryAuditId(invocation: string): string { return `control_recovery:${uuid(invocation)}`; }
@@ -292,23 +301,27 @@ function decodeModernObject(binding: BoundTable, input: unknown, row: string | u
     const initId = uuid(v.InitId); const initDigest = hex(v.InitDigest);
     if (!binary(v.Binding, 16384).equals(binding.bytes) || initializationDigestV2(binding, initId) !== initDigest ||
         typeof v.Epoch !== 'string' || !/^(?:0|[1-9]\d{0,15})$/u.test(v.Epoch) ||
-        !['initialize', 'acquire', 'mutate', 'barrier', 'release', 'recover', ...(v3 ? ['lease-expiry'] : [])].includes(v.Operation as string)) fail();
-    const rawExit = binary(v.Exit, 1024);
+        !['initialize', 'acquire', 'mutate', 'barrier', 'release', 'recover', ...(v3 ? ['lease-expiry', 'format-upgrade'] : [])].includes(v.Operation as string)) fail();
+    const rawExit = binary(v.Exit, v3 ? 2048 : 1024);
     const exitValue = v3 && rawExit.length ? rawJSON(rawExit) as ExitReceipt : decodeExit(rawExit);
     if (!encodeExit(exitValue).equals(rawExit)) fail();
     const result = metadataV2(binding, { initId, initDigest, owner: v.Owner === '' ? '' : uuid(v.Owner), epoch: integer(Number(v.Epoch), 0, Number.MAX_SAFE_INTEGER),
       invocation: uuid(v.Invocation), operation: v.Operation as MetadataV2['operation'], plan: hex(v.Plan), state: binary(v.State, 65536),
       result: binary(v.Result, 65536), exit: exitValue });
     const exit = result.exit;
+    if (result.operation === 'format-upgrade' && (exit?.kind !== 'format-upgrade' || exit.oldEpoch !== result.epoch ||
+        exit.invocation !== result.invocation || exit.planDigest !== result.plan)) fail();
     if (result.epoch === 0) {
-      if (result.owner || exit || result.state.length || result.result.length || !['initialize', 'barrier'].includes(result.operation)) fail();
+      if (result.owner || (exit && !(v3 && exit.kind === 'format-upgrade' && exit.oldEpoch === 0)) || result.state.length || result.result.length ||
+          !['initialize', 'barrier', ...(v3 ? ['format-upgrade'] : [])].includes(result.operation)) fail();
     } else if (result.owner) {
       if (!['acquire', 'mutate', 'barrier'].includes(result.operation) ||
-          (result.epoch === 1 ? exit !== undefined : !exit || exit.oldEpoch !== result.epoch - 1 || exit.oldOwner === result.owner)) fail();
+          (result.epoch === 1 ? exit !== undefined && !(v3 && exit.kind === 'format-upgrade' && exit.oldEpoch === 0) :
+            !exit || exit.oldEpoch !== result.epoch - 1 || exit.oldOwner === result.owner)) fail();
       if (result.operation === 'acquire' && result.epoch === 1 && (result.state.length || result.result.length)) fail();
     } else {
-      if (!exit || exit.oldEpoch !== result.epoch || !['release', 'recover', 'barrier', ...(v3 ? ['lease-expiry'] : [])].includes(result.operation)) fail();
-      if (result.operation !== 'barrier' && (exit.kind !== (result.operation === 'release' ? 'clean-release' : result.operation === 'lease-expiry' ? 'lease-expiry' : 'operator-recovery') ||
+      if (!exit || exit.oldEpoch !== result.epoch || !['release', 'recover', 'barrier', ...(v3 ? ['lease-expiry', 'format-upgrade'] : [])].includes(result.operation)) fail();
+      if (result.operation !== 'barrier' && (exit.kind !== (result.operation === 'release' ? 'clean-release' : result.operation === 'lease-expiry' ? 'lease-expiry' : result.operation === 'format-upgrade' ? 'format-upgrade' : 'operator-recovery') ||
           exit.invocation !== result.invocation || exit.planDigest !== result.plan)) fail();
     }
     if (result.operation === 'initialize' && (result.invocation !== result.initId || result.plan !== digest(['initialize', result.initId]))) fail();

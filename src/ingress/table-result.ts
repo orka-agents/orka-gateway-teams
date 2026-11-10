@@ -1,4 +1,5 @@
 import { bytes, digest, fail, integer, object, rawJSON } from '../storage/table/codec.js';
+import { domainExit } from '../storage/table/upgrade-codec.js';
 import { TableError } from '../storage/table/types.js';
 import type { BoundTable, MetadataV2 } from '../storage/table/types.js';
 import { encode, identity, validatePolicy, validateReceipt } from './codec.js';
@@ -254,7 +255,7 @@ function recoveryConsistency(result: InboxRecoveryResult, context: ResultValidat
       } else if (projected.state !== 'blocked' || projected.reason !== (event.deadline <= seal.watermark ? 'deadline' : seal.reason)) fail();
     }
   }
-  const x = metadata.exit;
+  const x = domainExit(metadata);
   if (!x) fail();
   // A later clean exit can replace recovery evidence without touching domain bytes.
   // A later inbox recovery cannot: both dispositions must install a new result.

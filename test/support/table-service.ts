@@ -60,13 +60,15 @@ function checkEntity(e: Record<string, unknown>, expectedPartition: string, expe
       ...(metadataFormat === 3 ? ['Lease', 'Lease@odata.type'] : [])];
     if (Object.keys(e).length !== allowed.length || Object.keys(e).some(k => !allowed.includes(k)) || typeof e.Exit !== 'string') return false;
     const exit = Buffer.from(e.Exit, 'base64');
-    if (exit.length > 1024 || exit.toString('base64') !== e.Exit || e['Exit@odata.type'] !== 'Edm.Binary') return false;
+    if (exit.length > (metadataFormat === 3 ? 2048 : 1024) || exit.toString('base64') !== e.Exit || e['Exit@odata.type'] !== 'Edm.Binary') return false;
     if (exit.length) {
       const x = JSON.parse(exit.toString());
       const base = { kind: x.kind, oldOwner: x.oldOwner, oldEpoch: x.oldEpoch, invocation: x.invocation };
       const canonical = x.kind === 'clean-release' ? { ...base, planDigest: x.planDigest } : x.kind === 'operator-recovery' ? { ...base,
         originalMDigest: x.originalMDigest, planDigest: x.planDigest, domainDispositionDigest: x.domainDispositionDigest, operatorAttestationDigest: x.operatorAttestationDigest,
         ...(x.auditId === undefined && x.auditDigest === undefined ? {} : { auditId: x.auditId, auditDigest: x.auditDigest }) } :
+        metadataFormat === 3 && x.kind === 'format-upgrade' ? { ...base, originalMDigest: x.originalMDigest, planDigest: x.planDigest,
+          auditDigest: x.auditDigest, previousExit: x.previousExit } :
         metadataFormat === 3 && x.kind === 'lease-expiry' ? { ...base, originalMDigest: x.originalMDigest, planDigest: x.planDigest,
           domainDispositionDigest: x.domainDispositionDigest, auditId: x.auditId, auditDigest: x.auditDigest, lease: x.lease, observedAt: x.observedAt } : undefined;
       if (x.kind === 'lease-expiry' && (x.lease?.durationMs !== 120000 || x.lease?.skewMs !== 5000 || x.lease?.handoffMs !== 1000 ||
@@ -105,7 +107,7 @@ export async function tableService(t: FixtureHooks, kind: 'delivery' | 'ingress'
     [scope.appId, scope.tenantId] : [scope.appId, scope.tenantId, scope.orkaBaseUrl, scope.gatewayNamespace, scope.gatewayName]]));
   const rows = new Map<string, Record<string, unknown>>(); let version = 0;
   const stats = { requests: 0, writes: 0, reads: 0, pages: 0, tokens: 0, requestCloses: 0, socketCloses: 0, sockets: 0, physicalSocketCloses: 0, bytes: 0, violation: false, lastActions: 0, conditionFailure: '' };
-  const controls: { hook?: (event: ServiceRequest) => Promise<void> | void; request?: TableDependencies['request']; missingCode?: 'ResourceNotFound' } = {};
+  const controls: { hook?: (event: ServiceRequest) => Promise<void> | void; request?: TableDependencies['request']; missingCode?: 'ResourceNotFound'; allowUpgrade?: boolean } = {};
   function error(res: ServerResponse, status: number, code: string) {
     res.writeHead(status, { 'content-type': 'application/json', 'x-ms-error-code': code }); res.end(JSON.stringify({ 'odata.error': { code, message: { lang: 'en-US', value: 'synthetic service error' } } }));
   }
@@ -129,7 +131,7 @@ export async function tableService(t: FixtureHooks, kind: 'delivery' | 'ingress'
           }
         } else actions.push({ method: req.method!, ...(req.headers['if-match'] ? { etag: String(req.headers['if-match']) } : {}), entity: JSON.parse(body.toString()) });
         stats.lastActions = actions.length;
-        if (!actions.length || actions.length > 100 || actions.filter(a => a.entity.RowKey === 'M').length !== 1 || !actions.every(a => checkEntity(a.entity, partition, expectedBinding, metadataFormat))) stats.violation = true;
+        if (!actions.length || actions.length > 100 || actions.filter(a => a.entity.RowKey === 'M').length !== 1 || !actions.every(a => checkEntity(a.entity, partition, expectedBinding, controls.allowUpgrade && a.entity.RowKey === 'M' && (a.entity.V === 2 || a.entity.V === 3) ? a.entity.V : metadataFormat))) stats.violation = true;
         if (['recover', 'lease-expiry'].includes(String(actions[0]?.entity.Operation))) {
           const m = actions[0]!.entity; const receipt = JSON.parse(Buffer.from(String(m.Exit), 'base64').toString());
           const prefix = m.Operation === 'recover' ? 'control_recovery:' : 'control_lease_expiry:';

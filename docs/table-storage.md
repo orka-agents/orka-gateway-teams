@@ -13,6 +13,41 @@ automatic takeover, migration, deletion or pruning. A separate library-only V3
 kernel and explicit V3 domain factories provide renewable ownership and audited expiry, but no runtime selects them. An explicit audited V2 operator
 reclaim command is described in [Table runtime](table-runtime.md#manual-owner-reclaim).
 
+## Audited V2-to-V3 upgrade library
+
+`src/storage/table/upgrade.ts` exports `upgradeTableIngressV2(binding, dependencies,
+budget, maxIndexBytes, upgradeAttestationDigest, options?)` and
+`upgradeTableDeliveryV2(binding, dependencies, budget, upgradeAttestationDigest,
+options?)`. They are explicit one-way library operations, not CLI commands or
+runtime migration. No ownership, listener or provider-send permission is granted.
+
+The caller retains a private statement that the stable stores/scope and one-way
+conversion were reviewed and old runtimes will not be admitted during conversion;
+only its lowercase SHA-256 digest is stored. This is intent, not termination
+proof. Occupied V2 requires the existing independently termination-attested reclaim
+first. Missing stores are not initialized. Each call pins owner-empty V2 internally
+and proves its complete domain twice under the supplied audit budgets.
+
+One exact-ETag batch replaces M with owner-empty, lease-empty V3 at the same epoch
+and appends a canonical `control_format_upgrade:` audit. State, Result,
+initialization identity and all old rows stay unchanged. A typed format-upgrade
+Exit retains the exact prior Exit bytes and the required upgrade-audit link through
+acquisition, crash and failed startup. A missing or rewritten audit prevents domain
+readiness and recovery; acquisition cannot mask that evidence. The audit binds the old
+M digest, prior operation/invocation/plan and complete pre-upgrade data fold. V3
+domain audits check that bridge and retain old recovery commitments; later
+recovery/expiry commitments include the upgrade row too. Epoch-zero kernel stores
+can be converted, but conversion does not establish missing domain initialization.
+
+Only exact new M plus matching audit readback confirms completion. An unchanged
+old M after a submitted write is not proof of cancellation: an exact-ETag,
+V2-encoded barrier must win and be read back before `not-submitted` is returned.
+Conflicting or unavailable proof remains `unresolved`; there is no blind upgrade
+retry, reset or downgrade. Inspect uncertain state before any further operator
+action. Calls drain actual token/native work, including after cancellation.
+Upgrade one partition at a time; partial conversion does not authorize mixed-format
+serving. Runtime activation and upgrade commands remain separate work.
+
 ## Library contract
 
 `createTableKernel(binding, dependencies, limits?)` constructs a handle
@@ -113,7 +148,9 @@ Do not use these dormant libraries for production serving: final external POST
 fences are not integrated yet.
 
 V3 keeps V1 data envelopes and the V2 initialization identity and existing Exits,
-and adds a closed `lease-expiry` Exit with separate expiry audit evidence.
+and adds closed `lease-expiry` and `format-upgrade` Exits with separate audit evidence.
+The format-upgrade Exit contains the canonical prior V2 Exit bytes and is bounded
+to 2048 bytes; prior Exit layouts retain their 1024-byte bounds.
 M adds a canonical Binary `Lease` and an `orka-m-v3` digest over the complete V2
 domain fingerprint plus lease bytes. Owner-empty M has no lease; owned M has
 `{schema:1, durationMs:120000, skewMs:5000, handoffMs:1000, sequence, invocation,
