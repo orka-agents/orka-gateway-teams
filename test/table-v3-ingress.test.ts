@@ -186,6 +186,16 @@ test('exact ingress expiry boundary cannot clear authority until the strict skew
   assert.equal(s.rows.get('M')!.Owner, ''); assert.equal(exit(s).observedAt, 1125001); await assert.rejects(k.close(), code('unresolved'));
 });
 
+test('wall-only jump during the first ingress expiry inspection cannot clear a still-live foreign lease', async t => {
+  const { s, k, dependencies } = await seeded(t); const takerClock = new TestClock(); const before = fence(s); const writes = s.stats.writes;
+  let jumped = false;
+  s.controls.hook = e => { if (!jumped && e.req.method === 'GET' && !e.path.includes("RowKey='")) { jumped = true; takerClock.wall += 125001; } e.reply(); };
+  let failure: unknown; try { await expire(ingressBinding, { ...dependencies, leaseClock: takerClock }, before); } catch (error) { failure = error; }
+  assert.equal(jumped, true); assert.equal(s.stats.writes, writes, 'a wall jump must not authorize any expiry batch');
+  assert.ok(code('unresolved')(failure)); assert.equal(fence(s).owner, before.owner);
+  delete s.controls.hook; await k.close();
+});
+
 test('changed M during ingress foreign proof submits no expiry disposition', async t => {
   const { s, k, clock, dependencies } = await seeded(t); clock.advance(125001, false); const before = fence(s); const writes = s.stats.writes;
   const gate = deferred(); let held = false;

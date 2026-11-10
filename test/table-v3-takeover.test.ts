@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createTableKernelV3, TableError } from '../src/storage/table/index.js';
 import * as recovery from '../src/storage/table/recovery.js';
+import { expiryClock, waitForTableLeaseV3 } from '../src/storage/table/lease-takeover.js';
 import { budget } from './support/owned-audit.js';
 import { deferred, eventually, tableBinding, tableService } from './support/table-service.js';
 import { TestClock } from './support/table-v3.js';
@@ -102,6 +103,29 @@ test('changed M during expiry proof cannot create orphan audit', async t => {
   const before = s.stats.writes; const r = factory(tableBinding, deps, fence);
   await assert.rejects(r.reclaim({ ...visitor, finalize() { const m = s.rows.get('M')!; s.rows.set('M', { ...m, 'odata.etag': 'W/"other"' }); } }, budget(), disposition));
   assert.equal(s.stats.writes, before); assert.equal(s.rows.size, 1); await r.close();
+});
+
+test('takeover waiting rejects a wall-only step without producing an expiry fence or mutation', async t => {
+  const { s, deps, fence } = await setup(t); const clock = new TestClock(); const writes = s.stats.writes;
+  const waiting = waitForTableLeaseV3(tableBinding, { ...deps, leaseClock: clock });
+  const rejected = assert.rejects(waiting, code('unresolved')); await eventually(() => clock.pendingTimers === 1);
+  clock.wall += 5001; clock.advance(125001); await rejected;
+  assert.equal(s.stats.writes, writes); assert.equal(s.rows.get('M')!.Owner, fence.owner); assert.equal(clock.pendingTimers, 0);
+});
+
+test('takeover clock loss during the final token wait forbids a clear and cannot revive after restoration', async t => {
+  const { s, clock, deps, fence, factory } = await setup(t); clock.advance(125001, false);
+  const gate = deferred(); let held = false; let final = false;
+  const r = factory(tableBinding, { ...deps, token: async (scope: any, ctx: any) => {
+    if (final) { held = true; await gate.promise; } return deps.token(scope, ctx);
+  } }, fence);
+  const operation = r.reclaim(visitor, budget(), { ...disposition, complete() { final = true; return disposition.complete(); } });
+  const rejected = assert.rejects(operation, code('unresolved')); await eventually(() => held); const writes = s.stats.writes;
+  clock.wall += 5001; gate.resolve(); await rejected;
+  assert.equal(s.stats.writes, writes); assert.equal(s.rows.get('M')!.Owner, fence.owner); assert.equal(r.transitionOutcome(), 'none');
+  clock.wall -= 5001; await assert.rejects(r.reclaim(visitor, budget(), disposition), code('not-submitted')); await r.close();
+  const guard = expiryClock(clock); clock.wall += 5001; assert.throws(() => guard.safe(1120000), code('unresolved'));
+  clock.wall -= 5001; assert.throws(() => guard.safe(1120000), code('unresolved'));
 });
 
 test('expiry token held across cancellation cannot submit, and close drains the actual token', async t => {

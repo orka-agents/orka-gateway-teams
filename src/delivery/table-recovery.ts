@@ -69,37 +69,41 @@ async function reclaim(binding: TableBinding, dependencies: TableLeaseDependenci
   const auditBudget = { maxPages: config.maxPages, maxPageBytes: config.maxPageBytes,
     maxDurationMs: config.maxDurationMs, maxTrackingBytes: config.maxTrackingBytes };
   const auditOptions = { ...(config.signal ? { signal: config.signal } : {}), requestTimeoutMs: config.requestTimeoutMs };
-  const inspector = (format === 2 ? createTableForeignInspectorV2 : createTableForeignInspectorV3)(binding, dependencies, expected);
-  const proof = validator(bound, config.maxTrackingBytes, expected, format);
-  try { await inspector.inspect(proof.visitor, auditBudget, auditOptions); }
-  finally { await inspector.close(); }
-  const { state, result } = proof.check();
-  const b = bound.bytes.toString('base64'); let h = digest(['orka-recovery-data-v2', b]); let count = 0;
-  for (const record of proof.records) if (record.row !== 'M') {
-    h = digest(['orka-recovery-row-v2', h, record.row, record.value.digest]); count++;
-  }
-  const preData = digest(['orka-recovery-data-end-v2', h, count]);
-  const dispositionDigest = deliveryRecoveryDigest(bound, state, result, preData, count);
-  const reclaimer = format === 2 ? createTableOperatorReclaimerV2(binding, dependencies, expected) :
-    attestation === undefined ? createTableLeaseExpirerV3(binding, dependencies, expected) : createTableOperatorReclaimerV3(binding, dependencies, expected);
-  let index = 0; let finished = false; let failure: unknown;
+  // Keep the same paired clock sample across both domain inspections and CAS.
+  const expirer = format === 3 && attestation === undefined ? createTableLeaseExpirerV3(binding, dependencies, expected) : undefined;
   try {
-    await reclaimer.reclaim({ passes: 2,
-      record(pass, record): undefined {
-        const position = pass === 1 ? index : index - proof.records.length;
-        same(proof.records[position], record); index++;
-      },
-      endPass(pass): undefined { if (index !== proof.records.length * pass) corrupt(); },
-      finalize(): undefined { if (index !== proof.records.length * 2) corrupt(); finished = true; },
-    }, auditBudget, {
-      state, dispositionDigest, ...(attestation === undefined ? {} : { operatorAttestationDigest: attestation }),
-      complete(summary) {
-        if (!finished || summary.dataRowCount !== count + 1) corrupt();
-        return { result, domainDispositionDigest: deliveryRecoveryDigest(bound, state, result,
-          summary.postDataDigest, summary.dataRowCount) };
-      },
-    }, auditOptions);
-  } catch (error) { failure = error; }
-  try { await reclaimer.close(); } catch (error) { if (!failure) failure = error; }
-  if (failure) throw failure;
+    const inspector = (format === 2 ? createTableForeignInspectorV2 : createTableForeignInspectorV3)(binding, dependencies, expected);
+    const proof = validator(bound, config.maxTrackingBytes, expected, format);
+    try { await inspector.inspect(proof.visitor, auditBudget, auditOptions); }
+    finally { await inspector.close(); }
+    const { state, result } = proof.check();
+    const b = bound.bytes.toString('base64'); let h = digest(['orka-recovery-data-v2', b]); let count = 0;
+    for (const record of proof.records) if (record.row !== 'M') {
+      h = digest(['orka-recovery-row-v2', h, record.row, record.value.digest]); count++;
+    }
+    const preData = digest(['orka-recovery-data-end-v2', h, count]);
+    const dispositionDigest = deliveryRecoveryDigest(bound, state, result, preData, count);
+    const reclaimer = expirer ?? (format === 2 ? createTableOperatorReclaimerV2(binding, dependencies, expected) :
+      createTableOperatorReclaimerV3(binding, dependencies, expected));
+    let index = 0; let finished = false; let failure: unknown;
+    try {
+      await reclaimer.reclaim({ passes: 2,
+        record(pass, record): undefined {
+          const position = pass === 1 ? index : index - proof.records.length;
+          same(proof.records[position], record); index++;
+        },
+        endPass(pass): undefined { if (index !== proof.records.length * pass) corrupt(); },
+        finalize(): undefined { if (index !== proof.records.length * 2) corrupt(); finished = true; },
+      }, auditBudget, {
+        state, dispositionDigest, ...(attestation === undefined ? {} : { operatorAttestationDigest: attestation }),
+        complete(summary) {
+          if (!finished || summary.dataRowCount !== count + 1) corrupt();
+          return { result, domainDispositionDigest: deliveryRecoveryDigest(bound, state, result,
+            summary.postDataDigest, summary.dataRowCount) };
+        },
+      }, auditOptions);
+    } catch (error) { failure = error; }
+    try { await reclaimer.close(); } catch (error) { if (!failure) failure = error; }
+    if (failure) throw failure;
+  } finally { await expirer?.close(); }
 }

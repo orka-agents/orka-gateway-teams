@@ -64,8 +64,12 @@ async function recoverIngress(mode: 2 | 3 | 'expiry', binding: TableBinding, dep
   // before its own inspection, so its subsequent complete audit must independently
   // reproduce the same domain proof before this disposition can be submitted.
   let inspector: ReturnType<typeof createTableForeignInspectorV2>;
-  try { inspector = (mode === 2 ? createTableForeignInspectorV2 : createTableForeignInspectorV3)(snapshot, dependencies, fence); }
-  catch (error) { initial.dispose(); throw error; }
+  let expirer: ReturnType<typeof createTableLeaseExpirerV3> | undefined;
+  try {
+    // One paired clock guard covers the first proof as well as final submission.
+    if (mode === 'expiry') expirer = createTableLeaseExpirerV3(snapshot, dependencies, fence);
+    inspector = (mode === 2 ? createTableForeignInspectorV2 : createTableForeignInspectorV3)(snapshot, dependencies, fence);
+  } catch (error) { initial.dispose(); await expirer?.close(); throw error; }
   try {
     await inspector.inspect(initial.visitor, limits, safeOptions);
     initial.releaseScratch();
@@ -102,7 +106,7 @@ async function recoverIngress(mode: 2 | 3 | 'expiry', binding: TableBinding, dep
     const second = new InboxIndex(maxIndexBytes - 60 * 1024);
     const check = createInboxAuditProjection(snapshot, second);
     let transport: ReturnType<typeof createTableOperatorReclaimerV2>;
-    try { transport = (mode === 2 ? createTableOperatorReclaimerV2 : mode === 3 ? createTableOperatorReclaimerV3 : createTableLeaseExpirerV3)(snapshot, dependencies, fence); }
+    try { transport = expirer ?? (mode === 2 ? createTableOperatorReclaimerV2 : createTableOperatorReclaimerV3)(snapshot, dependencies, fence); }
     catch (error) { check.dispose(); throw error; }
     try {
       const visitor = check.visitor;
@@ -141,5 +145,5 @@ async function recoverIngress(mode: 2 | 3 | 'expiry', binding: TableBinding, dep
         },
       }, safeOptions);
     } finally { check.dispose(); await transport.close(); }
-  } finally { initial.dispose(); await inspector.close(); }
+  } finally { initial.dispose(); await Promise.all([inspector.close(), expirer?.close()]); }
 }

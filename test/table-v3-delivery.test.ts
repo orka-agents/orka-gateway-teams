@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import * as journals from '../src/delivery/table-journal.js';
 import * as recoveries from '../src/delivery/table-recovery.js';
+import { TableError } from '../src/storage/table/types.js';
 import { budget } from './support/owned-audit.js';
 import { code, dataEntity, payload, request, rowKey } from './support/table-delivery.js';
 import { deferred, eventually, hash, tableBinding, tableService } from './support/table-service.js';
@@ -208,6 +209,17 @@ test('V3 delivery live foreign lease wait returns busy on renewed M without clea
 });
 
 // Re-signing the post-transition snapshot cannot hide a false pre-transition disposition inside its audit.
+test('wall-only jump during the first delivery expiry inspection cannot clear a still-live foreign lease', async t => {
+  const { s, owner } = await occupied(t); const clock = new TestClock(); const before = fence(s); const writes = s.stats.writes;
+  let jumped = false;
+  s.controls.hook = e => { if (!jumped && e.req.method === 'GET' && !e.path.includes("RowKey='")) { jumped = true; clock.wall += 125001; } e.reply(); };
+  let failure: unknown;
+  try { await recoveries.expireTableDeliveryV3(tableBinding, { ...s.dependencies, leaseClock: clock }, before, auditBudget()); } catch (error) { failure = error; }
+  assert.equal(jumped, true); assert.equal(s.stats.writes, writes, 'a wall jump must not authorize any expiry batch');
+  assert.ok(failure instanceof TableError && failure.code === 'unresolved'); assert.equal(fence(s).owner, before.owner);
+  delete s.controls.hook; await owner.close();
+});
+
 test('V3 delivery startup verifies the expiry audit pre-disposition as well as the post-data fold', async t => {
   const { s, clock, owner } = await occupied(t); await owner.begin(request); await transition(s, clock, 'expiry');
   const m = s.rows.get('M')!; const exit = receipt(s); const id = `control_lease_expiry:${exit.auditId}`; const key = rowKey('control', id);
