@@ -216,6 +216,18 @@ export function encodeRecord(binding: BoundTable, value: RecordValue): Record<st
 export function encodeExit(input: ExitReceipt | undefined): Buffer {
   if (input === undefined) return Buffer.alloc(0);
   const v = object(input);
+  if (v.kind === 'lease-expiry') {
+    object(v, ['kind', 'oldOwner', 'oldEpoch', 'invocation', 'originalMDigest', 'planDigest', 'domainDispositionDigest', 'auditId', 'auditDigest', 'lease', 'observedAt']);
+    const l = object(v.lease, ['schema', 'durationMs', 'skewMs', 'handoffMs', 'sequence', 'invocation', 'expiresAt']);
+    if (Object.keys(l).length !== 7 || l.schema !== 1 || l.durationMs !== 120000 || l.skewMs !== 5000 || l.handoffMs !== 1000) fail();
+    const lease = { schema: 1, durationMs: 120000, skewMs: 5000, handoffMs: 1000,
+      sequence: integer(l.sequence, 1, Number.MAX_SAFE_INTEGER), invocation: uuid(l.invocation), expiresAt: integer(l.expiresAt, 1, Number.MAX_SAFE_INTEGER) };
+    const observedAt = integer(v.observedAt, 1, Number.MAX_SAFE_INTEGER);
+    if (observedAt <= lease.expiresAt + 5000) fail();
+    return bytes(Buffer.from(JSON.stringify({ kind: 'lease-expiry', oldOwner: uuid(v.oldOwner), oldEpoch: integer(v.oldEpoch, 1, Number.MAX_SAFE_INTEGER),
+      invocation: uuid(v.invocation), originalMDigest: hex(v.originalMDigest), planDigest: hex(v.planDigest),
+      domainDispositionDigest: hex(v.domainDispositionDigest), auditId: uuid(v.auditId), auditDigest: hex(v.auditDigest), lease, observedAt })), 1024);
+  }
   const common = ['kind', 'oldOwner', 'oldEpoch', 'invocation'];
   const keys = v.kind === 'clean-release' ? [...common, 'planDigest'] :
     v.kind === 'operator-recovery' ? [...common, 'originalMDigest', 'planDigest', 'domainDispositionDigest', 'operatorAttestationDigest',
@@ -232,7 +244,8 @@ export function decodeExit(input: Uint8Array): ExitReceipt | undefined {
   try {
     const raw = bytes(input, 1024); if (!raw.length) return undefined;
     const receipt = rawJSON(raw) as ExitReceipt;
-    if (!encodeExit(receipt).equals(raw)) fail(); return receipt;
+    // V2 remains closed to V3 transition evidence, even when owner-empty.
+    if (receipt.kind === 'lease-expiry' || !encodeExit(receipt).equals(raw)) fail(); return receipt;
   } catch { throw new TableError('corrupt'); }
 }
 export function recoveryAuditId(invocation: string): string { return `control_recovery:${uuid(invocation)}`; }
@@ -256,6 +269,13 @@ export function metadataV2(binding: BoundTable, value: Omit<MetadataV2, 'digest'
     m.invocation, m.operation, m.plan, m.state.toString('base64'), m.result.toString('base64'), encodeExit(m.exit).toString('base64')]) };
 }
 export function decodeObjectV2(binding: BoundTable, input: unknown, row?: string, headerETag?: string): StoredRecordV2 {
+  return decodeModernObject(binding, input, row, headerETag, false);
+}
+/** V3's explicit closed envelope path; no V2 caller can enable it. */
+export function decodeObjectV3Envelope(binding: BoundTable, input: unknown, row?: string, headerETag?: string): import('./types.js').StoredRecordV3 {
+  return decodeModernObject(binding, input, row, headerETag, true) as import('./types.js').StoredRecordV3;
+}
+function decodeModernObject(binding: BoundTable, input: unknown, row: string | undefined, headerETag: string | undefined, v3: boolean): StoredRecordV2 {
   try {
     const v = object(input);
     // Data retains the exact V1 decoder, but M can never fall back to it.
@@ -265,17 +285,20 @@ export function decodeObjectV2(binding: BoundTable, input: unknown, row?: string
     }
     const service = serviceFields(v);
     if (v.PartitionKey !== binding.partition || (row !== undefined && row !== 'M') ||
-        (headerETag !== undefined && etag(headerETag) !== service.etag) || v.V !== 2) fail();
+        (headerETag !== undefined && etag(headerETag) !== service.etag) || v.V !== (v3 ? 3 : 2)) fail();
     checkProperties(v, { PartitionKey: 'Edm.String', RowKey: 'Edm.String', Timestamp: 'Edm.DateTime', V: 'Edm.Int32', Digest: 'Edm.String',
       Binding: 'Edm.Binary', InitId: 'Edm.String', InitDigest: 'Edm.String', Owner: 'Edm.String', Epoch: 'Edm.Int64',
-      Invocation: 'Edm.String', Operation: 'Edm.String', Plan: 'Edm.String', State: 'Edm.Binary', Result: 'Edm.Binary', Exit: 'Edm.Binary' });
+      Invocation: 'Edm.String', Operation: 'Edm.String', Plan: 'Edm.String', State: 'Edm.Binary', Result: 'Edm.Binary', Exit: 'Edm.Binary', ...(v3 ? { Lease: 'Edm.Binary' } : {}) });
     const initId = uuid(v.InitId); const initDigest = hex(v.InitDigest);
     if (!binary(v.Binding, 16384).equals(binding.bytes) || initializationDigestV2(binding, initId) !== initDigest ||
         typeof v.Epoch !== 'string' || !/^(?:0|[1-9]\d{0,15})$/u.test(v.Epoch) ||
-        !['initialize', 'acquire', 'mutate', 'barrier', 'release', 'recover'].includes(v.Operation as string)) fail();
+        !['initialize', 'acquire', 'mutate', 'barrier', 'release', 'recover', ...(v3 ? ['lease-expiry'] : [])].includes(v.Operation as string)) fail();
+    const rawExit = binary(v.Exit, 1024);
+    const exitValue = v3 && rawExit.length ? rawJSON(rawExit) as ExitReceipt : decodeExit(rawExit);
+    if (!encodeExit(exitValue).equals(rawExit)) fail();
     const result = metadataV2(binding, { initId, initDigest, owner: v.Owner === '' ? '' : uuid(v.Owner), epoch: integer(Number(v.Epoch), 0, Number.MAX_SAFE_INTEGER),
       invocation: uuid(v.Invocation), operation: v.Operation as MetadataV2['operation'], plan: hex(v.Plan), state: binary(v.State, 65536),
-      result: binary(v.Result, 65536), exit: decodeExit(binary(v.Exit, 1024)) });
+      result: binary(v.Result, 65536), exit: exitValue });
     const exit = result.exit;
     if (result.epoch === 0) {
       if (result.owner || exit || result.state.length || result.result.length || !['initialize', 'barrier'].includes(result.operation)) fail();
@@ -284,11 +307,25 @@ export function decodeObjectV2(binding: BoundTable, input: unknown, row?: string
           (result.epoch === 1 ? exit !== undefined : !exit || exit.oldEpoch !== result.epoch - 1 || exit.oldOwner === result.owner)) fail();
       if (result.operation === 'acquire' && result.epoch === 1 && (result.state.length || result.result.length)) fail();
     } else {
-      if (!exit || exit.oldEpoch !== result.epoch || !['release', 'recover', 'barrier'].includes(result.operation)) fail();
-      if (result.operation !== 'barrier' && (exit.kind !== (result.operation === 'release' ? 'clean-release' : 'operator-recovery') ||
+      if (!exit || exit.oldEpoch !== result.epoch || !['release', 'recover', 'barrier', ...(v3 ? ['lease-expiry'] : [])].includes(result.operation)) fail();
+      if (result.operation !== 'barrier' && (exit.kind !== (result.operation === 'release' ? 'clean-release' : result.operation === 'lease-expiry' ? 'lease-expiry' : 'operator-recovery') ||
           exit.invocation !== result.invocation || exit.planDigest !== result.plan)) fail();
     }
     if (result.operation === 'initialize' && (result.invocation !== result.initId || result.plan !== digest(['initialize', result.initId]))) fail();
+    if (v3) {
+      const rawLease = binary(v.Lease, 1024);
+      let lease: import('./types.js').LeaseValue | undefined;
+      if (rawLease.length) {
+        const l = object(rawJSON(rawLease), ['schema', 'durationMs', 'skewMs', 'handoffMs', 'sequence', 'invocation', 'expiresAt']);
+        if (Object.keys(l).length !== 7 || l.schema !== 1 || l.durationMs !== 120000 || l.skewMs !== 5000 || l.handoffMs !== 1000) fail();
+        lease = { schema: 1, durationMs: 120000, skewMs: 5000, handoffMs: 1000, sequence: integer(l.sequence, 1, Number.MAX_SAFE_INTEGER),
+          invocation: uuid(l.invocation), expiresAt: integer(l.expiresAt, 1, Number.MAX_SAFE_INTEGER) };
+        if (!Buffer.from(JSON.stringify(lease)).equals(rawLease)) fail();
+      }
+      if (Boolean(result.owner) !== Boolean(lease)) fail();
+      const value = { ...result, lease, digest: digest(['orka-m-v3', result.digest, rawLease.toString('base64')]) };
+      if (hex(v.Digest) !== value.digest) fail(); return { row: 'M', ...service, value };
+    }
     if (hex(v.Digest) !== result.digest) fail(); return { row: 'M', ...service, value: result };
   } catch { throw new TableError('corrupt'); }
 }

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { data, dataRow, integer } from '../storage/table/codec.js';
 import { OWNED_AUDIT_BUDGET_EXHAUSTED, TableError } from '../storage/table/types.js';
 import type { BoundTable, DataAction, DataKey, Plan, PlannerViewV2, StoredRecordV2 } from '../storage/table/types.js';
-import type { TableKernelV2 } from '../storage/table/index.js';
+import type { TableKernelV2, TableKernelV3 } from '../storage/table/index.js';
 import { digest as bodyDigest, encode, fingerprint } from './codec.js';
 import type { IngressPolicy, IngressScope, AdmissionResult } from './types.js';
 import { readCommand } from './table-input.js';
@@ -16,7 +16,7 @@ import type { EventPayload, EventSummary, InboxState, InboxResultBasis, Ordinary
 import { MAX_EVENT_PAYLOAD_BYTES, MAX_ROUTE_PAYLOAD_BYTES, MAX_SEAL_PAYLOAD_BYTES } from './table-types.js';
 
 export interface MutationOwner {
-  kernel: TableKernelV2; index: InboxIndex; bound: BoundTable;
+  kernel: TableKernelV2 | TableKernelV3; index: InboxIndex; bound: BoundTable;
   phase(deadline: number): number;
   submitting(state: Readonly<InboxState>): void;
   confirmed(state: Readonly<InboxState>): void;

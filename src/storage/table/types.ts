@@ -24,9 +24,18 @@ export type OperatorRecoveryExit = {
   kind: 'operator-recovery'; oldOwner: string; oldEpoch: number; invocation: string;
   originalMDigest: string; planDigest: string; domainDispositionDigest: string; operatorAttestationDigest: string;
 } & ({ auditId: string; auditDigest: string } | { auditId?: never; auditDigest?: never });
-export type ExitReceipt = CleanReleaseExit | OperatorRecoveryExit;
+export interface LeaseExpiryExit {
+  kind: 'lease-expiry'; oldOwner: string; oldEpoch: number; invocation: string;
+  originalMDigest: string; planDigest: string; domainDispositionDigest: string;
+  auditId: string; auditDigest: string; lease: LeaseValue; observedAt: number;
+}
+export interface LeaseExpiryAudit {
+  schema: 1; kind: 'lease-expiry-audit'; invocation: string; oldOwner: string; oldEpoch: number;
+  originalMDigest: string; dispositionDigest: string; lease: LeaseValue; observedAt: number;
+}
+export type ExitReceipt = CleanReleaseExit | OperatorRecoveryExit | LeaseExpiryExit;
 export interface MetadataV2 extends Omit<Metadata, 'operation' | 'release'> {
-  operation: Metadata['operation'] | 'recover'; exit: ExitReceipt | undefined;
+  operation: Metadata['operation'] | 'recover' | 'lease-expiry'; exit: ExitReceipt | undefined;
 }
 export interface LeaseValue {
   schema: 1; durationMs: 120000; skewMs: 5000; handoffMs: 1000;

@@ -9,6 +9,8 @@ import { createHttpHeaders, defaultRetryPolicy, bearerTokenAuthenticationPolicyN
 import type { PipelineRequest, PipelineResponse } from '@azure/core-rest-pipeline';
 import { tlsVerificationEnabled } from '../../ingress/config.js';
 import { data, dataRow, decodeRecoveryAudit, encodeRecord, etag, fail, metadataV2, object, rawJSON, recoveryAuditId } from './codec.js';
+import { decodeExpiryAudit, encodeLease, expiryAuditId, metadataV3 } from './codec-v3.js';
+import type { MetadataV3, StoredRecordV3 } from './types.js';
 import { MAX_RESPONSE_BYTES, MAX_WIRE_BYTES, TableError } from './types.js';
 import type { BoundTable, DataAction, DataRecord, MetadataV2, StoredRecordV2, TableDependencies } from './types.js';
 import { encodeMetadata, readPage, readRecord, receiptBytes } from './format.js';
@@ -152,12 +154,38 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
         [{ kind: 'create', key: { type: audit.type, id: audit.id }, payload: audit.payload }, ...(seal ? [seal] : [])], context, true);
     } catch { return Promise.reject(new TableError('invalid-input')); }
   }
+  protected checkedLeaseWrite(original: StoredRecordV3, m: MetadataV3, audit: DataRecord, seal: DataAction | undefined, context: WorkContext): Promise<void> {
+    try {
+      const x = m.exit; const prior = original.value;
+      if (this.format !== 3 || original.row !== 'M' || prior.kind !== 'metadata' || !prior.owner || !prior.lease ||
+          m.owner !== '' || m.lease !== undefined || m.epoch !== prior.epoch || m.initId !== prior.initId || m.initDigest !== prior.initDigest ||
+          !x || x.kind === 'clean-release' || x.oldOwner !== prior.owner || x.oldEpoch !== prior.epoch || x.originalMDigest !== prior.digest ||
+          x.invocation !== m.invocation || x.planDigest !== m.plan || x.auditId !== m.invocation || x.auditDigest !== audit.digest ||
+          audit.type !== 'control' || data(this.binding, { type: audit.type, id: audit.id }, audit.payload).digest !== audit.digest ||
+          metadataV3(this.binding, m).digest !== m.digest || metadataV3(this.binding, prior).digest !== prior.digest) fail();
+      if (x.kind === 'lease-expiry') {
+        const a = decodeExpiryAudit(audit.payload);
+        if (m.operation !== 'lease-expiry' || audit.id !== expiryAuditId(m.invocation) || a.invocation !== m.invocation ||
+            a.oldOwner !== x.oldOwner || a.oldEpoch !== x.oldEpoch || a.originalMDigest !== x.originalMDigest || a.observedAt !== x.observedAt ||
+            !encodeLease(a.lease).equals(encodeLease(x.lease)) || !encodeLease(x.lease).equals(encodeLease(prior.lease))) fail();
+      } else {
+        const a = decodeRecoveryAudit(audit.payload);
+        if (m.operation !== 'recover' || audit.id !== recoveryAuditId(m.invocation) || a.invocation !== m.invocation ||
+            a.oldOwner !== x.oldOwner || a.oldEpoch !== x.oldEpoch || a.originalMDigest !== x.originalMDigest ||
+            a.operatorAttestationDigest !== x.operatorAttestationDigest) fail();
+      }
+      if (seal && (this.binding.kind !== 'ingress' || seal.kind !== 'create' || seal.key.type !== 'control' || !/^generation:[1-9][0-9]*$/u.test(seal.key.id))) fail();
+      return this.#transaction(m as MetadataFor<F>, original.etag,
+        [{ kind: 'create', key: { type: audit.type, id: audit.id }, payload: audit.payload }, ...(seal ? [seal] : [])], context, true);
+    } catch { return Promise.reject(new TableError('invalid-input')); }
+  }
   #transaction(m: MetadataFor<F>, originalETag: string | undefined, actions: readonly DataAction[], context: WorkContext, recover: boolean): Promise<void> {
     // Inputs here are kernel-owned; copy actions and validate their closed shapes before any SDK/auth work.
     let transaction: TransactionAction[];
     try {
       // Recovery-shaped metadata is readable, not writable through this normal-owner transport.
-      if (this.format !== 1 && (m.operation === 'recover') !== recover) fail();
+      if (this.format !== 1 && (recover ? !['recover', ...(this.format === 3 ? ['lease-expiry'] : [])].includes(m.operation) :
+          !['initialize', 'acquire', 'mutate', 'barrier', 'release'].includes(m.operation))) fail();
       if (!Array.isArray(actions) || actions.length > 99 || (originalETag === undefined && actions.length)) fail();
       if (originalETag !== undefined) etag(originalETag);
       const entity = encodeMetadata(this.format, this.binding, m) as TableEntity;
@@ -349,6 +377,14 @@ export class RecoveryTableClient extends OwnedTableClient<2> {
 
   writeRecover(original: StoredRecordV2, m: MetadataV2, audit: DataRecord, seal: DataAction | undefined, context: WorkContext): Promise<void> {
     return this.checkedRecoveryWrite(original, m, audit, seal, context);
+  }
+}
+
+/** One-use domain transitions use this checked transport, never ordinary owner writes. */
+export class LeaseTransitionTableClient extends OwnedTableClient<3> {
+  constructor(binding: BoundTable, dependencies: TableDependencies) { super(binding, dependencies, 3); }
+  writeRecover(original: StoredRecordV3, m: MetadataV3, audit: DataRecord, seal: DataAction | undefined, context: WorkContext): Promise<void> {
+    return this.checkedLeaseWrite(original, m, audit, seal, context);
   }
 }
 

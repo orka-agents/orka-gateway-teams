@@ -1,9 +1,9 @@
 import { auditConfig, auditFields } from '../storage/table/audit.js';
 import { bindTable, digest, etag, hex, integer, uuid } from '../storage/table/codec.js';
-import { createTableForeignInspectorV2 } from '../storage/table/index.js';
-import { createTableOperatorReclaimerV2 } from '../storage/table/recovery.js';
+import { createTableForeignInspectorV2, createTableForeignInspectorV3 } from '../storage/table/inspection.js';
+import { createTableOperatorReclaimerV2, createTableOperatorReclaimerV3, createTableLeaseExpirerV3 } from '../storage/table/recovery.js';
 import { TableError } from '../storage/table/types.js';
-import type { DataAction, ForeignInspectionBudget, ForeignInspectionOptions, ForeignOwnerFenceV2, TableBinding, TableDependencies } from '../storage/table/types.js';
+import type { DataAction, ForeignInspectionBudget, ForeignInspectionOptions, ForeignOwnerFenceV2, MetadataV3, TableBinding, TableDependencies, TableLeaseDependencies } from '../storage/table/types.js';
 import { validateScope } from './codec.js';
 import { createInboxAuditProjection } from './table-audit.js';
 import type { InboxAuditHeader } from './table-audit.js';
@@ -18,6 +18,26 @@ import type { InboxRecoveryResult, SealPayload } from './table-types.js';
 export async function reclaimTableIngress(binding: TableBinding, dependencies: TableDependencies,
   expected: Readonly<ForeignOwnerFenceV2>, budget: ForeignInspectionBudget, maxIndexBytes: number,
   operatorAttestationDigest: string, options?: ForeignInspectionOptions): Promise<void> {
+  return recoverIngress(2, binding, dependencies, expected, budget, maxIndexBytes, operatorAttestationDigest, options);
+}
+
+/** Manual recovery still requires independently retained termination evidence. */
+export function reclaimTableIngressV3(binding: TableBinding, dependencies: TableLeaseDependencies,
+  expected: Readonly<ForeignOwnerFenceV2>, budget: ForeignInspectionBudget, maxIndexBytes: number,
+  operatorAttestationDigest: string, options?: ForeignInspectionOptions): Promise<void> {
+  return recoverIngress(3, binding, dependencies, expected, budget, maxIndexBytes, operatorAttestationDigest, options);
+}
+
+/** Automatic expiry proves the lease boundary, never operator intent or process death. */
+export function expireTableIngressV3(binding: TableBinding, dependencies: TableLeaseDependencies,
+  expected: Readonly<ForeignOwnerFenceV2>, budget: ForeignInspectionBudget, maxIndexBytes: number,
+  options?: ForeignInspectionOptions): Promise<void> {
+  return recoverIngress('expiry', binding, dependencies, expected, budget, maxIndexBytes, undefined, options);
+}
+
+async function recoverIngress(mode: 2 | 3 | 'expiry', binding: TableBinding, dependencies: TableLeaseDependencies,
+  expected: Readonly<ForeignOwnerFenceV2>, budget: ForeignInspectionBudget, maxIndexBytes: number,
+  operatorAttestationDigest: string | undefined, options?: ForeignInspectionOptions): Promise<void> {
   let snapshot: TableBinding & { kind: 'ingress' }; let fence: ForeignOwnerFenceV2;
   let limits: ForeignInspectionBudget; let safeOptions: ForeignInspectionOptions;
   let bound: ReturnType<typeof bindTable>;
@@ -31,7 +51,7 @@ export async function reclaimTableIngress(binding: TableBinding, dependencies: T
     if (Object.keys(f).length !== 6) throw new TableError('invalid-input');
     fence = { initId: uuid(f.initId), initDigest: hex(f.initDigest), owner: uuid(f.owner),
       epoch: integer(f.epoch, 1, Number.MAX_SAFE_INTEGER), mDigest: hex(f.mDigest), etag: etag(f.etag) };
-    hex(operatorAttestationDigest);
+    if (mode !== 'expiry') hex(operatorAttestationDigest);
     const config = auditConfig<2>({ passes: 2, record() {}, endPass() {}, finalize() {} }, budget, options);
     limits = { maxPages: config.maxPages, maxPageBytes: config.maxPageBytes, maxDurationMs: config.maxDurationMs,
       maxTrackingBytes: config.maxTrackingBytes };
@@ -44,13 +64,14 @@ export async function reclaimTableIngress(binding: TableBinding, dependencies: T
   // before its own inspection, so its subsequent complete audit must independently
   // reproduce the same domain proof before this disposition can be submitted.
   let inspector: ReturnType<typeof createTableForeignInspectorV2>;
-  try { inspector = createTableForeignInspectorV2(snapshot, dependencies, fence); }
+  try { inspector = (mode === 2 ? createTableForeignInspectorV2 : createTableForeignInspectorV3)(snapshot, dependencies, fence); }
   catch (error) { initial.dispose(); throw error; }
   try {
     await inspector.inspect(initial.visitor, limits, safeOptions);
     initial.releaseScratch();
     let header: Readonly<InboxAuditHeader> | undefined = initial.result().header;
     const firstTimestamp = header.version.timestamp;
+    const expiredLease = mode === 'expiry' ? (header.metadata as MetadataV3).lease : undefined;
     const proof = initial.proof();
     const old = header.state;
     const arm = old.handoffClockArm;
@@ -81,7 +102,7 @@ export async function reclaimTableIngress(binding: TableBinding, dependencies: T
     const second = new InboxIndex(maxIndexBytes - 60 * 1024);
     const check = createInboxAuditProjection(snapshot, second);
     let transport: ReturnType<typeof createTableOperatorReclaimerV2>;
-    try { transport = createTableOperatorReclaimerV2(snapshot, dependencies, fence); }
+    try { transport = (mode === 2 ? createTableOperatorReclaimerV2 : mode === 3 ? createTableOperatorReclaimerV3 : createTableLeaseExpirerV3)(snapshot, dependencies, fence); }
     catch (error) { check.dispose(); throw error; }
     try {
       const visitor = check.visitor;
@@ -95,19 +116,22 @@ export async function reclaimTableIngress(binding: TableBinding, dependencies: T
               h.version.timestamp !== firstTimestamp || again.versions !== proof.versions || again.count !== proof.count) throw new TableError('corrupt');
         },
       }, limits, {
-        state, dispositionDigest, operatorAttestationDigest: attestation, ...(seal ? { seal } : {}),
+        state, dispositionDigest, ...(mode === 'expiry' ? {} : { operatorAttestationDigest: attestation! }), ...(seal ? { seal } : {}),
         complete(summary) {
           if (summary.dataRowCount !== proof.count + 1 + (seal ? 1 : 0)) throw new TableError('corrupt');
-          const result = encodeResult({ schema: 1, operation: 'operator-recovery', invocation: summary.auditId,
+          const operation = mode === 'expiry' ? 'lease-expiry' : 'operator-recovery';
+          const result = encodeResult({ schema: 1, operation, invocation: summary.auditId,
             oldEpoch: fence.epoch, originalMDigest: fence.mDigest, disposition,
             postStateDigest: stateDigest(bound, state, 'operator-recovery'), postDataDigest: summary.postDataDigest,
             dataRowCount: summary.dataRowCount });
           const domainDispositionDigest = digest(['orka-inbox-recovery-v2', bound.bytes.toString('base64'), result.toString('base64')]);
           validateResult({ binding: bound,
-            metadata: { ...check.result().header.metadata, epoch: fence.epoch, owner: '', operation: 'recover', state, result,
-              exit: { kind: 'operator-recovery', oldOwner: fence.owner, oldEpoch: fence.epoch,
-                invocation: summary.auditId, originalMDigest: fence.mDigest, planDigest: fence.mDigest,
-                domainDispositionDigest, operatorAttestationDigest: attestation, auditId: summary.auditId, auditDigest: summary.auditDigest } },
+            metadata: { ...check.result().header.metadata, epoch: fence.epoch, owner: '', operation: mode === 'expiry' ? 'lease-expiry' : 'recover', state, result,
+              exit: { oldOwner: fence.owner, oldEpoch: fence.epoch, invocation: summary.auditId,
+                originalMDigest: fence.mDigest, planDigest: fence.mDigest, domainDispositionDigest,
+                auditId: summary.auditId, auditDigest: summary.auditDigest,
+                ...(mode === 'expiry' ? { kind: 'lease-expiry', lease: expiredLease!, observedAt: dependencies.leaseClock?.wallNow() ?? Date.now() } :
+                  { kind: 'operator-recovery', operatorAttestationDigest: attestation! }) } },
             state: post,
             graph: { eventByOrder: n => second.eventByOrder(n), eventById: id => second.eventById(id),
               eventByTarget: id => second.eventByTarget(id),
