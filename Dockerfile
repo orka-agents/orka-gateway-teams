@@ -16,7 +16,8 @@ RUN npm ci --omit=dev \
 FROM node:24.2.0-bookworm-slim@sha256:b30c143a092c7dced8e17ad67a8783c03234d4844ee84c39090c9780491aaf89
 WORKDIR /app
 ENV NODE_ENV=production
-COPY --from=production-dependencies /app/package.json /app/package-lock.json ./
+# The non-root runtime must read metadata even from a private-mode checkout.
+COPY --chmod=0644 --from=production-dependencies /app/package.json /app/package-lock.json ./
 COPY --from=production-dependencies /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 USER 1000:1000

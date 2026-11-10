@@ -180,6 +180,7 @@ async function smoke(): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), 'teams-container-'));
   const owned = `teams-smoke-${randomUUID()}`; const containers: string[] = []; let network = false;
   const fixtureDir = join(directory, 'fixture'); const data = join(directory, 'data'); const tls = join(directory, 'tls');
+  const nginxConfig = join(fixtureDir, 'nginx.conf');
   // Exercise the existing configuration's inclusive 8192-character bearer limit.
   const secrets = [randomUUID(), randomUUID(), randomUUID().repeat(228).slice(0, 8192), randomUUID()];
   const env: Record<string, string> = { TEAMS_APP_ID: randomUUID(), TEAMS_TENANT_ID: randomUUID(), ORKA_BASE_URL: 'https://orka.example.invalid/',
@@ -221,6 +222,11 @@ async function smoke(): Promise<void> {
   try {
     stage = 'private fixture preparation'; assert.equal(process.getuid?.(), 1000);
     mkdirSync(fixtureDir, { mode: 0o755 }); mkdirSync(data, { mode: 0o700 }); mkdirSync(tls, { mode: 0o755 });
+    // mkdir's mode is filtered by the host umask. NGINX runs as UID101, not
+    // the host UID1000 that owns these synthetic read-only fixture mounts.
+    chmodSync(fixtureDir, 0o755); chmodSync(tls, 0o755);
+    writeFileSync(nginxConfig, readFileSync(join(root, 'deploy/nginx.conf')));
+    chmodSync(nginxConfig, 0o444);
     const ts = await import('typescript');
     const compiled = ts.transpileModule(readFileSync(fileURLToPath(import.meta.url), 'utf8'), {
       compilerOptions: { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.ESNext }, fileName: 'container-smoke.ts',
@@ -377,11 +383,11 @@ async function smoke(): Promise<void> {
     await start(app, appArgs, env);
     stage = 'pinned NGINX static configuration syntax';
     const syntax = await run(['run', '--rm', '--network', 'none', ...security, ...mount(tls, '/etc/adapter-tls'),
-      ...mount(join(root, 'deploy/nginx.conf'), '/etc/nginx/nginx.conf'), '--entrypoint', 'nginx', nginxImage, '-t', '-c', '/etc/nginx/nginx.conf']);
+      ...mount(nginxConfig, '/etc/nginx/nginx.conf'), '--entrypoint', 'nginx', nginxImage, '-t', '-c', '/etc/nginx/nginx.conf']);
     ok(syntax);
     stage = 'pinned NGINX startup and nonroot identity';
     await start(proxy, [...podNetwork, ...security, ...mount(tls, '/etc/adapter-tls'),
-      ...mount(join(root, 'deploy/nginx.conf'), '/etc/nginx/nginx.conf'), '--entrypoint', 'nginx', nginxImage,
+      ...mount(nginxConfig, '/etc/nginx/nginx.conf'), '--entrypoint', 'nginx', nginxImage,
       '-c', '/etc/nginx/nginx.conf', '-g', 'daemon off;']);
     assert.equal(ok(await run(['exec', proxy, 'id', '-u'])), '101'); assert.equal(ok(await run(['exec', proxy, 'id', '-g'])), '101');
     const auth = { Authorization: `Bearer ${env.ORKA_OUTBOUND_BEARER_TOKEN}` };
