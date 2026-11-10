@@ -132,14 +132,24 @@ test('actual full receiver App token + MSAL -> dispatcher/journal uses one clien
   const owned = f.reopen(); try { assert.equal(owned.journal.begin({ ...finalDelivery, deliveryId: 'first', idempotencyId: 'first' }).kind, 'delivered'); } finally { owned.close(); }
 });
 
-for (const variant of ['failure', 'cancel', 'deadline', 'shutdown']) test(`certificate acquisition ${variant} is pre-effect retryable and owned work drains`, async (t) => {
+for (const variant of ['failure', 'cancel', 'deadline', 'shutdown', 'already-expired']) test(`certificate acquisition ${variant} is pre-effect retryable and owned work drains`,
+  { ...(variant === 'already-expired' ? { timeout: 1500 } : {}) }, async (t) => {
   const f = storage(t); f.init(); const owned = f.reopen(); const reached = deferred<void>(); const gate = deferred<void>(); let sends = 0;
   const receiver = await startReceiver(f.config.receiver, owned.store, { certificateNetwork: tokenNetwork(async () => {
     reached.resolve(); await gate.promise; if (variant === 'failure') throw new Error('synthetic-private-response');
   }), providerPost: async () => { sends++; throw new Error('must not send'); } }, { journal: owned.journal, getRoute: (key) => owned.store.getRoute(key) });
+  t.after(async () => { gate.resolve(); await receiver.stop(); owned.close(); });
   const abort = new AbortController(); const pending = receiver.outbound!.deliver(finalDelivery,
-    { signal: abort.signal, ...(variant === 'deadline' ? { deadline: performance.now() + 100 } : {}) });
-  await reached.promise;
+    { signal: abort.signal, ...(variant === 'deadline' ? { deadline: performance.now() + 100 } :
+      variant === 'already-expired' ? { deadline: performance.now() - 1 } : {}) });
+  // Under full-suite load the deadline can expire before acquisition starts.
+  // In that case there is no native work whose callback can release this wait.
+  const entered = await Promise.race([reached.promise.then(() => true), pending.then(() => false)]);
+  if (!entered) {
+    assert.ok(variant === 'deadline' || variant === 'already-expired');
+    assert.equal((await pending).status, 'retryableError'); assert.equal(sends, 0); return;
+  }
+  assert.notEqual(variant, 'already-expired');
   if (variant === 'cancel') abort.abort();
   if (variant === 'failure') gate.resolve();
   let stopped = false; let stopping: Promise<void> | undefined;
@@ -149,7 +159,7 @@ for (const variant of ['failure', 'cancel', 'deadline', 'shutdown']) test(`certi
     stopping ??= receiver.stop().then(() => { stopped = true; });
     await sleep(20); if (variant !== 'failure') assert.equal(stopped, false);
     gate.resolve(); await stopping; assert.equal(sends, 0);
-  } finally { gate.resolve(); await receiver.stop(); owned.close(); }
+  } finally { gate.resolve(); await receiver.stop(); }
 });
 
 test('prepared receiver is private, snapshots before ownership, and starts only once without rereads', async (t) => {
