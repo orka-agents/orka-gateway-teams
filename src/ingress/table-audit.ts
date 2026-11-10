@@ -1,4 +1,4 @@
-import { decodeUpgradeAudit, isUpgradeAudit, upgradeEvidence } from '../storage/table/upgrade-codec.js';
+import { decodeUpgradeAudit, domainExit, isUpgradeAudit, upgradeEvidence } from '../storage/table/upgrade-codec.js';
 import type { TableKernelV2, TableKernelV3 } from '../storage/table/index.js';
 import { decodeExpiryAudit, domainFingerprint, expiryAuditId } from '../storage/table/codec-v3.js';
 import { TableError } from '../storage/table/types.js';
@@ -111,7 +111,7 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
           const expiry = d.id.startsWith('control_lease_expiry:');
           const audit = expiry ? decodeExpiryAudit(d.payload) : decodeRecoveryAudit(d.payload);
           const kind = expiry ? 'lease-expiry' : 'operator-recovery';
-          const m = header.metadata; const x = m.exit;
+          const m = header.metadata; const x = domainExit(m);
           if ((expiry && !('lease' in m)) || (expiry ? expiryAuditId(audit.invocation) : recoveryAuditId(audit.invocation)) !== d.id ||
               audit.oldEpoch > m.epoch ||
               (audit.oldEpoch === m.epoch && (m.owner !== '' || x?.kind !== kind || x.auditId !== audit.invocation)) ||
@@ -156,7 +156,7 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
     }, endPass(this: void, pass: 1 | 2): undefined { index.endPass(pass); }, finalize(this: void): undefined {
       if (versions[0] !== versions[1] || versionCounts[0] !== versionCounts[1]) throw new TableError('corrupt');
       upgrade!.finish();
-      const x = header!.metadata.exit;
+      const x = domainExit(header!.metadata);
       if (x && x.kind !== 'clean-release' && x.auditId !== undefined && (x.auditId !== x.invocation || referencedAudit !== 1)) throw new TableError('corrupt');
       const h = header!; index.finishBuild(h.state);
       const result = decodeResult(h.metadata.result);

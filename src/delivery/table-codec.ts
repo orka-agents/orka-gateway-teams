@@ -1,5 +1,5 @@
 import { decodeRecoveryAudit, digest, object, rawJSON } from '../storage/table/codec.js';
-import { decodeUpgradeAudit, isUpgradeAudit, upgradeEvidence } from '../storage/table/upgrade-codec.js';
+import { decodeUpgradeAudit, domainExit, isUpgradeAudit, upgradeEvidence } from '../storage/table/upgrade-codec.js';
 import { decodeExpiryAudit, encodeLease, expiryAuditId } from '../storage/table/codec-v3.js';
 import type { BoundTable, ForeignOwnerFenceV2, Metadata, MetadataV2, MetadataV3, StoredRecord, StoredRecordV2, StoredRecordV3 } from '../storage/table/types.js';
 import { identity, validateClaim, validateOutcome } from './identity.js';
@@ -157,7 +157,7 @@ export function auditV3Startup(binding: BoundTable, records: readonly StoredReco
 }
 function auditStartup(binding: BoundTable, records: readonly StoredRecordV2[], genesis: boolean, v3: boolean): number {
   const m = records.find(r => r.row === 'M'); if (!m || m.value.kind !== 'metadata') corrupt();
-  const metadata = m.value; const exit = metadata.exit;
+  const metadata = m.value; const exit = domainExit(metadata);
   if (!metadata.owner || metadata.operation !== 'acquire' ||
       (exit ? metadata.epoch - 1 !== exit.oldEpoch || metadata.owner === exit.oldOwner : metadata.epoch !== 1)) corrupt();
   const epoch = auditGraph(records, metadata, genesis, binding, v3);
@@ -171,7 +171,7 @@ export function deliveryRecoveryDigest(binding: BoundTable, state: Buffer, resul
 /** Exit commits data only at the unchanged acquisition boundary, not after later
  * legitimate owner mutations. Shared by normal startup and a foreign acquire. */
 function auditTransitionCommitment(binding: BoundTable, records: readonly StoredRecordV2[], metadata: MetadataV2): void {
-  const exit = metadata.exit;
+  const exit = domainExit(metadata);
   if (exit?.kind !== 'operator-recovery' && exit?.kind !== 'lease-expiry') corrupt();
   const expiry = exit.kind === 'lease-expiry';
   const b = binding.bytes.toString('base64'); let h = digest(['orka-recovery-data-v2', b]);
@@ -206,7 +206,8 @@ function auditForeign(binding: BoundTable, records: readonly StoredRecordV2[], e
       m.value.initId !== expected.initId || m.value.initDigest !== expected.initDigest ||
       m.value.owner !== expected.owner || m.value.epoch !== expected.epoch) corrupt();
   auditGraph(records, m.value, false, binding, v3);
-  if (m.value.operation === 'acquire' && (m.value.exit?.kind === 'operator-recovery' || (v3 && m.value.exit?.kind === 'lease-expiry')))
+  const exit = domainExit(m.value);
+  if (m.value.operation === 'acquire' && (exit?.kind === 'operator-recovery' || (v3 && exit?.kind === 'lease-expiry')))
     auditTransitionCommitment(binding, records, m.value);
   return { state: Buffer.from(m.value.state), result: Buffer.from(m.value.result) };
 }
@@ -218,7 +219,7 @@ function auditGraph(records: readonly DomainRecord[], metadata: Metadata | Metad
   validateMarker(metadata.state); const result = decodeResult(metadata.result);
   const operations = new Map<string, Operation>(); const aliases = new Map<string, string>();
   const sessions = new Map<string, SessionControl>();
-  const exit = 'exit' in metadata ? metadata.exit : undefined;
+  const exit = 'exit' in metadata ? domainExit(metadata) : undefined;
   let matchingAudit = 0;
   const upgrade = binding ? upgradeEvidence(binding, metadata as MetadataV2) : undefined;
   for (const record of records) {

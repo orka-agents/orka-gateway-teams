@@ -29,8 +29,11 @@ first. Missing stores are not initialized. Each call pins owner-empty V2 interna
 and proves its complete domain twice under the supplied audit budgets.
 
 One exact-ETag batch replaces M with owner-empty, lease-empty V3 at the same epoch
-and appends a canonical `control_format_upgrade:` audit. State, Result, prior Exit,
-initialization identity and all old rows stay unchanged. The audit binds the old
+and appends a canonical `control_format_upgrade:` audit. State, Result,
+initialization identity and all old rows stay unchanged. A typed format-upgrade
+Exit retains the exact prior Exit bytes and the required upgrade-audit link through
+acquisition, crash and failed startup. A missing or rewritten audit prevents domain
+readiness and recovery; acquisition cannot mask that evidence. The audit binds the old
 M digest, prior operation/invocation/plan and complete pre-upgrade data fold. V3
 domain audits check that bridge and retain old recovery commitments; later
 recovery/expiry commitments include the upgrade row too. Epoch-zero kernel stores
@@ -145,7 +148,9 @@ Do not use these dormant libraries for production serving: final external POST
 fences are not integrated yet.
 
 V3 keeps V1 data envelopes and the V2 initialization identity and existing Exits,
-and adds a closed `lease-expiry` Exit with separate expiry audit evidence.
+and adds closed `lease-expiry` and `format-upgrade` Exits with separate audit evidence.
+The format-upgrade Exit contains the canonical prior V2 Exit bytes and is bounded
+to 2048 bytes; prior Exit layouts retain their 1024-byte bounds.
 M adds a canonical Binary `Lease` and an `orka-m-v3` digest over the complete V2
 domain fingerprint plus lease bytes. Owner-empty M has no lease; owned M has
 `{schema:1, durationMs:120000, skewMs:5000, handoffMs:1000, sequence, invocation,

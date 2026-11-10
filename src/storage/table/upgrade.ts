@@ -5,7 +5,7 @@ import { OwnedTableClient, UpgradeTableClient } from './client.js';
 import type { WorkContext } from './client.js';
 import { bindTable, data, dataRow, digest, fail, hex, metadataV2 } from './codec.js';
 import { metadataV3 } from './codec-v3.js';
-import { encodeUpgradeAudit, upgradeAuditId, upgradePlan } from './upgrade-codec.js';
+import { encodeUpgradeAudit, upgradeAuditId, upgradeExit, upgradePlan } from './upgrade-codec.js';
 import type { FormatUpgradeAudit } from './upgrade-codec.js';
 import { OWNED_AUDIT_BUDGET_EXHAUSTED, TableError } from './types.js';
 import type { ForeignInspectionBudget, ForeignInspectionOptions, StoredRecordV2, TableBinding, TableDependencies } from './types.js';
@@ -95,7 +95,7 @@ async function upgrade(kind: 'ingress' | 'delivery', binding: TableBinding, depe
       originalMDigest: m.digest, previousInvocation: m.invocation, previousOperation: m.operation, previousPlan: m.plan,
       dataDigest: digest(['orka-recovery-data-end-v2', folds[0], counts[0]]), dataRowCount: counts[0]!, upgradeAttestationDigest: intent };
     const audit = data(bound, { type: 'control', id: upgradeAuditId(invocation) }, encodeUpgradeAudit(a));
-    const next = metadataV3(bound, { ...m, lease: undefined, operation: 'format-upgrade', invocation, plan: upgradePlan(a, audit.digest) });
+    const next = metadataV3(bound, { ...m, lease: undefined, operation: 'format-upgrade', invocation, plan: upgradePlan(a, audit.digest), exit: upgradeExit(m, a, audit.digest) });
     const writeContext = context();
     try { await cross.writeUpgrade(prior, next, audit, writeContext); } catch { /* ACK is never commit authority. */ }
     // Native/token work has drained, but server commit can still be delayed. Only

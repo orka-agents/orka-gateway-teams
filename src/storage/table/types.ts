@@ -33,7 +33,11 @@ export interface LeaseExpiryAudit {
   schema: 1; kind: 'lease-expiry-audit'; invocation: string; oldOwner: string; oldEpoch: number;
   originalMDigest: string; dispositionDigest: string; lease: LeaseValue; observedAt: number;
 }
-export type ExitReceipt = CleanReleaseExit | OperatorRecoveryExit | LeaseExpiryExit;
+export interface FormatUpgradeExit {
+  kind: 'format-upgrade'; oldOwner: string; oldEpoch: number; invocation: string;
+  originalMDigest: string; planDigest: string; auditDigest: string; previousExit: string;
+}
+export type ExitReceipt = CleanReleaseExit | OperatorRecoveryExit | LeaseExpiryExit | FormatUpgradeExit;
 export interface MetadataV2 extends Omit<Metadata, 'operation' | 'release'> {
   operation: Metadata['operation'] | 'recover' | 'lease-expiry' | 'format-upgrade'; exit: ExitReceipt | undefined;
 }

@@ -60,13 +60,15 @@ function checkEntity(e: Record<string, unknown>, expectedPartition: string, expe
       ...(metadataFormat === 3 ? ['Lease', 'Lease@odata.type'] : [])];
     if (Object.keys(e).length !== allowed.length || Object.keys(e).some(k => !allowed.includes(k)) || typeof e.Exit !== 'string') return false;
     const exit = Buffer.from(e.Exit, 'base64');
-    if (exit.length > 1024 || exit.toString('base64') !== e.Exit || e['Exit@odata.type'] !== 'Edm.Binary') return false;
+    if (exit.length > (metadataFormat === 3 ? 2048 : 1024) || exit.toString('base64') !== e.Exit || e['Exit@odata.type'] !== 'Edm.Binary') return false;
     if (exit.length) {
       const x = JSON.parse(exit.toString());
       const base = { kind: x.kind, oldOwner: x.oldOwner, oldEpoch: x.oldEpoch, invocation: x.invocation };
       const canonical = x.kind === 'clean-release' ? { ...base, planDigest: x.planDigest } : x.kind === 'operator-recovery' ? { ...base,
         originalMDigest: x.originalMDigest, planDigest: x.planDigest, domainDispositionDigest: x.domainDispositionDigest, operatorAttestationDigest: x.operatorAttestationDigest,
         ...(x.auditId === undefined && x.auditDigest === undefined ? {} : { auditId: x.auditId, auditDigest: x.auditDigest }) } :
+        metadataFormat === 3 && x.kind === 'format-upgrade' ? { ...base, originalMDigest: x.originalMDigest, planDigest: x.planDigest,
+          auditDigest: x.auditDigest, previousExit: x.previousExit } :
         metadataFormat === 3 && x.kind === 'lease-expiry' ? { ...base, originalMDigest: x.originalMDigest, planDigest: x.planDigest,
           domainDispositionDigest: x.domainDispositionDigest, auditId: x.auditId, auditDigest: x.auditDigest, lease: x.lease, observedAt: x.observedAt } : undefined;
       if (x.kind === 'lease-expiry' && (x.lease?.durationMs !== 120000 || x.lease?.skewMs !== 5000 || x.lease?.handoffMs !== 1000 ||

@@ -165,7 +165,7 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
       const x = m.exit; const prior = original.value;
       if (this.format !== 3 || original.row !== 'M' || prior.kind !== 'metadata' || !prior.owner || !prior.lease ||
           m.owner !== '' || m.lease !== undefined || m.epoch !== prior.epoch || m.initId !== prior.initId || m.initDigest !== prior.initDigest ||
-          !x || x.kind === 'clean-release' || x.oldOwner !== prior.owner || x.oldEpoch !== prior.epoch || x.originalMDigest !== prior.digest ||
+          !x || x.kind === 'clean-release' || x.kind === 'format-upgrade' || x.oldOwner !== prior.owner || x.oldEpoch !== prior.epoch || x.originalMDigest !== prior.digest ||
           x.invocation !== m.invocation || x.planDigest !== m.plan || x.auditId !== m.invocation || x.auditDigest !== audit.digest ||
           audit.type !== 'control' || data(this.binding, { type: audit.type, id: audit.id }, audit.payload).digest !== audit.digest ||
           metadataV3(this.binding, m).digest !== m.digest || metadataV3(this.binding, prior).digest !== prior.digest) fail();
@@ -204,6 +204,7 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
           m.operation !== 'format-upgrade' || m.invocation !== a.invocation || m.plan !== upgradePlan(a, audit.digest) ||
           metadataV3(this.binding, m).digest !== m.digest || a.originalMDigest !== p.digest || a.epoch !== p.epoch ||
           a.previousOperation !== p.operation || a.previousInvocation !== p.invocation || a.previousPlan !== p.plan ||
+          m.exit?.kind !== 'format-upgrade' || m.exit.auditDigest !== audit.digest || m.exit.invocation !== a.invocation || m.exit.planDigest !== m.plan ||
           audit.type !== 'control' || audit.id !== upgradeAuditId(m.invocation) ||
           data(this.binding, { type: audit.type, id: audit.id }, audit.payload).digest !== audit.digest) fail();
       etag(original.etag);

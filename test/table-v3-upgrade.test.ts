@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { bindTable, data, decodeObjectV2, metadataV2 } from '../src/storage/table/codec.js';
 import { metadataV3 } from '../src/storage/table/codec-v3.js';
 import { OwnedTableClient, UpgradeTableClient } from '../src/storage/table/client.js';
-import { encodeUpgradeAudit, upgradeAuditId, upgradePlan } from '../src/storage/table/upgrade-codec.js';
+import { encodeUpgradeAudit, upgradeAuditId, upgradeExit, upgradePlan } from '../src/storage/table/upgrade-codec.js';
 import * as library from '../src/storage/table/upgrade.js';
 import { reclaimTableIngress, reclaimTableIngressV3 } from '../src/ingress/table-recovery.js';
 import { createTableDeliveryJournalV2, createTableDeliveryJournalV3 } from '../src/delivery/table-journal.js';
@@ -13,7 +13,7 @@ import { createTableKernelV2, createTableKernelV3, TableError } from '../src/sto
 import { budget } from './support/owned-audit.js';
 import { request } from './support/table-delivery.js';
 import { options } from './support/table-ingress-store.js';
-import { pair } from './support/table-ingress-audit.js';
+import { pair, wireData } from './support/table-ingress-audit.js';
 import { ingressBinding, tableBinding, tableService, deferred } from './support/table-service.js';
 
 const attestation = 'a'.repeat(64);
@@ -36,7 +36,8 @@ for (const kind of ['delivery', 'ingress'] as const) test(`empty_owner_v2_upgrad
   for (const field of ['Binding', 'InitId', 'InitDigest', 'State', 'Result']) assert.equal(m[field], prior[field]);
   for (const [key, row] of before) if (key !== 'M') assert.deepEqual(s.rows.get(key), row);
   assert.equal(s.rows.size, before.size + 1);
-  assert.equal(m.Exit, prior.Exit);
+  const exit = JSON.parse(Buffer.from(String(m.Exit), 'base64').toString());
+  assert.equal(exit.kind, 'format-upgrade'); assert.equal(exit.previousExit, prior.Exit);
   const audit = [...s.rows.values()].find(r => String(r.Id).startsWith('control_format_upgrade:'))!;
   const evidence = JSON.parse(Buffer.from(String(audit.B0), 'base64').toString());
   assert.equal(evidence.kind, 'format-upgrade-audit'); assert.equal(evidence.originalMDigest, prior.Digest);
@@ -159,7 +160,7 @@ test('upgrade_checks_v2_etag_and_encodes_v3: closed cross-format validation prec
     previousInvocation: p.invocation, previousOperation: p.operation, previousPlan: p.plan,
     dataDigest: 'a'.repeat(64), dataRowCount: 0, upgradeAttestationDigest: attestation };
   const audit = data(bound, { type: 'control', id: upgradeAuditId(invocation) }, encodeUpgradeAudit(a));
-  const m = metadataV3(bound, { ...p, lease: undefined, operation: 'format-upgrade', invocation, plan: upgradePlan(a, audit.digest) });
+  const m = metadataV3(bound, { ...p, lease: undefined, operation: 'format-upgrade', invocation, plan: upgradePlan(a, audit.digest), exit: upgradeExit(p, a, audit.digest) });
   const client = new UpgradeTableClient(bound, s.dependencies); const normal = new OwnedTableClient(bound, s.dependencies, 3);
   const context = () => ({ signal: new AbortController().signal, deadline: performance.now() + 30000 });
   const tokens = s.stats.tokens;
@@ -185,13 +186,13 @@ test('checked upgrade refuses a digest-valid but impossible owner-empty V2 layou
   await createTableDeliveryJournalV2(tableBinding, s.dependencies).initialize();
   const bound = bindTable(tableBinding); const prior = decodeObjectV2(bound, s.rows.get('M')!);
   assert.ok(prior.value.kind === 'metadata');
-  const p = metadataV2(bound, { ...prior.value, epoch: 0 }); // A positive-epoch Exit/state cannot inhabit epoch zero.
+  const p = metadataV2(bound, { ...prior.value, operation: 'initialize' }); // An exited positive epoch cannot be initialization.
   const invocation = '33333333-3333-4333-8333-333333333333';
   const a = { schema: 1 as const, kind: 'format-upgrade-audit' as const, invocation, epoch: p.epoch, originalMDigest: p.digest,
     previousInvocation: p.invocation, previousOperation: p.operation, previousPlan: p.plan,
     dataDigest: 'a'.repeat(64), dataRowCount: 0, upgradeAttestationDigest: attestation };
   const audit = data(bound, { type: 'control', id: upgradeAuditId(invocation) }, encodeUpgradeAudit(a));
-  const m = metadataV3(bound, { ...p, lease: undefined, operation: 'format-upgrade', invocation, plan: upgradePlan(a, audit.digest) });
+  const m = metadataV3(bound, { ...p, lease: undefined, operation: 'format-upgrade', invocation, plan: upgradePlan(a, audit.digest), exit: upgradeExit(p, a, audit.digest) });
   const client = new UpgradeTableClient(bound, s.dependencies); const tokens = s.stats.tokens;
   await assert.rejects(client.writeUpgrade({ ...prior, value: p }, m, audit,
     { signal: new AbortController().signal, deadline: performance.now() + 30000 }), code('invalid-input'));
@@ -257,6 +258,31 @@ test('cancelled upgrade cannot hand off after a held token even when another sig
   await arrived.promise; signal.abort(); release.resolve();
   await assert.rejects(running, code('incomplete')); assert.equal(s.stats.writes, writes); assert.equal(s.rows.get('M')!.V, 2);
 });
+
+for (const kind of ['delivery', 'ingress'] as const) for (const defect of ['missing', 'deleted-during-acquire', 'rewritten-attestation'] as const)
+  test(`V3 startup must retain the pre-acquire upgrade audit reference: ${kind} ${defect}`, async t => {
+    const s = await tableService(t, kind, 2); s.controls.allowUpgrade = true;
+    const binding = kind === 'delivery' ? tableBinding : ingressBinding;
+    await (kind === 'delivery' ? createTableDeliveryJournalV2(binding, s.dependencies) : createTableIngressStore(binding, s.dependencies, options)).initialize();
+    if (kind === 'delivery') await library.upgradeTableDeliveryV2(binding, s.dependencies, budget(), attestation);
+    else await library.upgradeTableIngressV2(binding, s.dependencies, budget(), options.maxIndexBytes, attestation);
+    const [key, audit] = [...s.rows].find(([, r]) => String(r.Id).startsWith('control_format_upgrade:'))!;
+    if (defect === 'missing') s.rows.delete(key);
+    else if (defect === 'rewritten-attestation') {
+      const a = JSON.parse(Buffer.from(String(audit.B0), 'base64').toString());
+      s.rows.set(key, wireData(s, 'control', String(audit.Id), Buffer.from(JSON.stringify({ ...a, upgradeAttestationDigest: 'f'.repeat(64) }))));
+    } else s.controls.hook = e => { if (e.actions[0]?.entity.Operation === 'acquire') s.rows.delete(key); e.reply(); };
+    const next = kind === 'delivery' ? createTableDeliveryJournalV3(binding, s.dependencies) : createTableIngressStoreV3(binding, s.dependencies, options);
+    await assert.rejects(next.open(), e => e instanceof Error && 'code' in e && ['corrupt', 'unresolved'].includes(String(e.code)));
+    assert.notEqual(s.rows.get('M')!.Owner, '', 'failed startup must not claim a clean release');
+    assert.notEqual(s.rows.get('M')!.Operation, 'release');
+    await next.close().catch(() => undefined);
+    // A restart/recovery must not forget the required audit after the failed acquire.
+    const writes = s.stats.writes; const expected = fence(s.rows.get('M')!);
+    await assert.rejects(kind === 'delivery' ? reclaimTableDeliveryOperatorV3(binding, s.dependencies, expected, budget(), 'b'.repeat(64)) :
+      reclaimTableIngressV3(binding, s.dependencies, expected, budget(), options.maxIndexBytes, 'b'.repeat(64)), code('unresolved'));
+    assert.equal(s.stats.writes, writes); assert.equal(s.rows.get('M')!.Digest, expected.mDigest);
+  });
 
 test('upgrade snapshots reject hostile binding reflection and invalid attestation with fixed safe errors before token work', async t => {
   const s = await tableService(t, 'delivery', 2); const tokens = s.stats.tokens;
