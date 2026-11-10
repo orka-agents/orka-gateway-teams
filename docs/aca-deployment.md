@@ -7,7 +7,16 @@ Orka, register a bot, change tenant policy, initialize stores automatically, or
 provide recovery/HA. Keep an operator ledger of resource names, image digests,
 initialization executions, private capture locations and successful shutdowns.
 
-**Do not apply these examples over a running gateway.** Table ownership is
+The optional [Table V3 runtime](table-runtime.md#v3-timing-upgrade-and-failure-boundaries)
+adds fenced expiry takeover and explicit owner-empty V2 upgrades. The fixed
+renderer/examples below still select V2; do not treat them as a V3 rollout.
+Before a V3 ACA rollout, supervise real identity/store crash and pause tests,
+verify UTC skew and final-handoff bounds, measure expiry-to-ready and memory,
+and confirm no uncertain operation is replayed. Local synthetic/process/container
+checks do not qualify those ACA assumptions or promise uptime. Retain the stable
+partitions and inspect uncertain upgrade/release outcomes; no downgrade/reset.
+
+**Do not apply these V2 examples over a running gateway.** Table ownership is
 non-expiring. One replica and Single revision mode do not fence an old process.
 An unclean/occupied store blocks reopening until verified termination and an
 explicit audited operator reclaim; there is no automatic takeover, reset or

@@ -27,7 +27,7 @@ export interface ReceiverDependencies { sdkCloud?: CloudEnvironment; fetchKeys?:
   botToken?: Token; providerPost?: ProviderPost; providerGet?: ProviderGet; certificateNetwork?: INetworkModule; managedIdentity?: ManagedIdentityDependencies }
 export interface AdmissionSink { readonly scope: IngressStore['scope'];
   admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>): AdmissionResult | Promise<AdmissionResult> }
-export interface ReceiverOutbound { interimDelivery?: boolean; meetingDrafts?: boolean; journal: DeliveryJournalPort; correlation?: SessionCorrelationPort; getRoute: (key: string) => ReplyRoute | undefined | Promise<ReplyRoute | undefined> }
+export interface ReceiverOutbound { authority?: import('../storage/table/types.js').LeaseAuthority; interimDelivery?: boolean; meetingDrafts?: boolean; journal: DeliveryJournalPort; correlation?: SessionCorrelationPort; getRoute: (key: string) => ReplyRoute | undefined | Promise<ReplyRoute | undefined> }
 export interface Receiver { port: number; stop(): Promise<void>; failed: Promise<never>; outbound?: DeliveryDispatcher }
 export interface PreparedReceiver { start(sink: AdmissionSink, outbound?: ReceiverOutbound, signal?: AbortSignal): Promise<Receiver> }
 
@@ -140,7 +140,7 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
         } catch { return undefined; }
       }, { ...(dependencies.providerPost === undefined ? {} : { post: dependencies.providerPost }),
         ...(dependencies.providerGet === undefined ? {} : { get: dependencies.providerGet }) });
-      dispatcher = createDeliveryDispatcher({ journal: outbound.journal, getRoute: outbound.getRoute,
+      dispatcher = createDeliveryDispatcher({ ...(outbound.authority === undefined ? {} : { authority: outbound.authority }), journal: outbound.journal, getRoute: outbound.getRoute,
         ...(outbound.interimDelivery === undefined ? {} : { interimDelivery: outbound.interimDelivery }),
         ...(outbound.meetingDrafts === undefined ? {} : { meetingDrafts: outbound.meetingDrafts }),
         ...(outbound.correlation === undefined ? {} : { correlation: outbound.correlation }),

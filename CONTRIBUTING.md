@@ -49,16 +49,16 @@ in ignored `bin/`. Do not commit binaries, credentials, or generated output.
 
 See [Table storage boundaries](docs/table-storage.md). The kernel lives entirely in
 `src/storage/table/`; the [V2 inbox](docs/table-inbox.md) lives under
-`src/ingress/table-*.ts`. The compiled CLI selects the V2 inbox/delivery runtime
+`src/ingress/table-*.ts`. The compiled CLI selects explicit V2 or V3 inbox/delivery runtime
 through `src/ingress/runtime-config.ts`; SQLite remains the default. See the
-[Table runtime guide](docs/table-runtime.md). Operator recovery uses a separate audited Table V2 command; low-level kernels
+[Table runtime guide](docs/table-runtime.md). Operator recovery and owner-empty V2-to-V3 upgrades use separate audited commands; low-level kernels
 and foreign inspection remain library APIs.
 Focused check: `node --import tsx --test test/table-*.test.ts`.
 Tests exercise real public SDK/native HTTPS against an independently implemented
 local service; they use no Azure resources or real credentials. Preserve raw
 FULLmetadata validation, exact-M reconciliation, active-instrumentation privacy,
-nonexpiring ownership and actual-work drain. SDK ACKs are not commit authority.
-The separate V2 foreign-owner inspector must remain GET-only on every path, one-shot
+explicit V1/V2 nonexpiring ownership, V3 fencing and actual-work drain. SDK ACKs are not commit authority.
+The separate V2/V3 foreign-owner inspectors must remain GET-only on every path, one-shot
 and ownership-free, with exact supplied M fences and actual token/native/iterator
 drain. Keep generic traversal mechanics shared without moving owned admission,
 permission retirement, callback poison or FIFO publication into the helper.
@@ -70,6 +70,10 @@ body-free graph audit, independent queue/working ledgers and clock-before-restar
 projection. Do not copy the V1 delivery wrapper's unconditional close bridge into an
 armed inbox: unknown/possible arms or clock debt require invalidation before kernel
 close. Closing may publish only private cleanup progress, never a grant or Ready.
+V3 tests must cover both domains' authority loss before open/listen, post-token
+and native Orka handoff, held actual work, and real SIGKILL/SIGSTOP/SIGCONT with
+retained Table maps. Use trusted library clocks/barriers only, never environment
+clock or production-endpoint overrides. No successor resends uncertain work.
 Keep SQLite differential traces separate from the documented armed-crash adaptation;
 small native fixtures and capacity arithmetic are not 100000-record/RSS qualification.
 

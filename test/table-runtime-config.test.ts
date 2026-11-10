@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ConfigurationError, parseConfig } from '../src/ingress/config.js';
-import { parseRuntimeConfig, parseTableRecoveryConfig, snapshotTableInitConfig, snapshotTableServeConfig } from '../src/ingress/runtime-config.js';
+import { parseRuntimeConfig, parseTableUpgradeConfig, parseTableRecoveryConfig, snapshotTableInitConfig, snapshotTableServeConfig } from '../src/ingress/runtime-config.js';
 import { receiverConfig, scope } from './support/ingress-auth.js';
 
 function environment(): NodeJS.ProcessEnv {
@@ -16,6 +16,28 @@ function environment(): NodeJS.ProcessEnv {
     TEAMS_SERVICE_URLS: JSON.stringify(receiverConfig.serviceUrls), ORKA_BEARER_TOKEN: 'synthetic-ingress-bearer',
     OUTBOUND_ENABLED: 'true', ORKA_OUTBOUND_BEARER_TOKEN: 'synthetic-outbound-bearer' };
 }
+for (const kind of ['ingress', 'delivery'] as const) test(`upgrade ${kind} requires explicit V3 target and private intent, no recovery inputs`, () => {
+  const env = { ...environment(), GATEWAY_STORAGE_BACKEND: 'table-v3', TABLE_UPGRADE_ATTESTATION_DIGEST: 'a'.repeat(64) };
+  const config = parseTableUpgradeConfig(env, kind);
+  assert.equal(config.target.kind, kind); assert.equal(config.attestationDigest, 'a'.repeat(64));
+  for (const change of [{ GATEWAY_STORAGE_BACKEND: 'table-v2' }, { TABLE_UPGRADE_ATTESTATION_DIGEST: undefined },
+    { TABLE_UPGRADE_ATTESTATION_DIGEST: 'private statement' }, { TABLE_RECOVERY_EXPECTED_OWNER: '22222222-2222-4222-8222-222222222222' }]) {
+    assert.throws(() => parseTableUpgradeConfig({ ...env, ...change }, kind), ConfigurationError);
+  }
+});
+
+for (const mode of ['init', 'init-delivery', 'serve'] as const) test(`V3 ${mode} stays explicit across snapshots`, () => {
+  const env = { ...environment(), GATEWAY_STORAGE_BACKEND: 'table-v3' };
+  const value = mode === 'serve' ? parseRuntimeConfig(env, mode) : parseRuntimeConfig(env, mode);
+  assert.ok('storage' in value); assert.equal(value.storage.backend, 'table-v3');
+});
+for (const backend of ['sqlite', 'table-v2', 'table-v3']) for (const mode of ['init', 'init-delivery', 'serve'] as const) {
+  test(`${backend} ${mode} rejects upgrade intent outside explicit upgrade`, () => {
+    assert.throws(() => parseRuntimeConfig({ ...environment(), GATEWAY_STORAGE_BACKEND: backend,
+      TABLE_UPGRADE_ATTESTATION_DIGEST: 'a'.repeat(64) }, mode as 'serve'), ConfigurationError);
+  });
+}
+
 const tableKeys = ['TABLE_ACCOUNT', 'TABLE_NAME', 'TABLE_INGRESS_STORE_ID', 'TABLE_DELIVERY_STORE_ID',
   'TABLE_MANAGED_IDENTITY_HOST', 'TABLE_MANAGED_IDENTITY_CLIENT_ID', 'TABLE_AUDIT_MAX_PAGES', 'TABLE_AUDIT_MAX_BYTES',
   'TABLE_AUDIT_MAX_DURATION_MS', 'TABLE_AUDIT_MAX_TRACKING_BYTES', 'TABLE_MAX_INDEX_BYTES'];

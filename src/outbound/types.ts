@@ -10,7 +10,7 @@ export interface DeliveryResponse {
   providerMessageId?: string;
   message?: string;
 }
-export interface DeliveryContext { signal?: AbortSignal; deadline?: number }
+export interface DeliveryContext { signal?: AbortSignal; deadline?: number; authority?: import('../storage/table/types.js').LeaseAuthority }
 export type ProviderResult = { kind: 'delivered'; providerMessageId: string } | { kind: 'retryable' | 'unknown' };
 export interface ProviderSender {
   getMembers?(route: Readonly<ReplyRoute>, context?: DeliveryContext): Promise<MembersResult>;
@@ -18,6 +18,7 @@ export interface ProviderSender {
   stop(): Promise<void>;
 }
 export interface DispatcherOptions {
+  authority?: import('../storage/table/types.js').LeaseAuthority;
   interimDelivery?: boolean;
   meetingDrafts?: boolean;
   journal: DeliveryJournalPort;

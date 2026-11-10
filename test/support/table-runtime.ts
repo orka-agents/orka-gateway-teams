@@ -22,9 +22,9 @@ export function tableRuntimeConfig(scope: Readonly<IngressScope>): TableServeCon
 
 /** Native proxy only: each URL or multipart body chooses its OWN kind partition.
  * Both independent Table oracles still enforce the same physical account/table. */
-export async function runtimeTableService(t: FixtureHooks, scope: Readonly<IngressScope>) {
-  const inbox = await tableService(t, 'ingress', 2, scope);
-  const delivery = await tableService(t, 'delivery', 2, scope);
+export async function runtimeTableService(t: FixtureHooks, scope: Readonly<IngressScope>, format: 2 | 3 = 2) {
+  const inbox = await tableService(t, 'ingress', format, scope);
+  const delivery = await tableService(t, 'delivery', format, scope);
   const stats = { requests: 0, requestCloses: 0, sockets: 0, socketCloses: 0,
     forwarded: 0, forwardCloses: 0, forwardSockets: 0, forwardSocketCloses: 0, contract: true };
   const native = https.request;
