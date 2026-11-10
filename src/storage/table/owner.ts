@@ -364,9 +364,9 @@ class TableKernel<F extends MetadataFormat> {
       await runAuditTraversal(config, {
         check: () => this.checkAudit(job), authority, matches, contradiction: () => this.poison(),
         page: async (cursor, allowance) => {
-          const context = this.auditRequest(job, config); await this.checkpoint();
+          this.checkAudit(job); await this.checkpoint();
           // Traversal classifies observed M contradictions before benign aborts.
-          return this.client.page(context, cursor, allowance);
+          return this.client.page(this.auditRequest(job, config), cursor, allowance);
         },
         exhaust: () => this.cancel(job, new TableError('incomplete')),
         record: (pass, record) => this.auditCall(job, config.record, pass, record),

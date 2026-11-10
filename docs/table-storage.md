@@ -151,7 +151,9 @@ checks and page checkpoints. Caller cancellation does not cancel that maintenanc
 write. The active FIFO job awaits actual renewal drain before releasing its slot,
 and close waits for it; legacy callers may still receive their cancellation early.
 Maintenance failures and expiry still irreversibly revoke authority. The existing
-cleanup limit is unchanged and supplies no extra lease time.
+cleanup limit is unchanged and supplies no extra lease time. Each page GET's
+request budget starts after checkpoint maintenance drains, still capped by the
+audit's original admission deadline.
 
 Renewal has a reserved maintenance turn outside user queue capacity. Owned scans
 and streaming audits renew at page boundaries inside their existing serialized
