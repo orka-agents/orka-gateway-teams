@@ -1,8 +1,9 @@
-import type { TableKernelV2 } from '../storage/table/index.js';
+import type { TableKernelV2, TableKernelV3 } from '../storage/table/index.js';
+import { decodeExpiryAudit, domainFingerprint, expiryAuditId } from '../storage/table/codec-v3.js';
 import { TableError } from '../storage/table/types.js';
 import { auditConfig, signalAborted } from '../storage/table/audit.js';
 import { bindTable, digest, initializationDigestV2, object, decodeRecoveryAudit, recoveryAuditId } from '../storage/table/codec.js';
-import type { BoundTable, ForeignInspectionVisitorV2, MetadataV2, OwnedAuditBudget, OwnedAuditOptions, StoredRecordV2, TableBinding } from '../storage/table/types.js';
+import type { BoundTable, ForeignInspectionVisitorV2, MetadataV2, MetadataV3, OwnedAuditBudget, OwnedAuditOptions, StoredRecordV2, TableBinding } from '../storage/table/types.js';
 import { InboxIndex } from './table-index.js';
 import type { IndexVersion, IndexWorkingCredit } from './table-index.js';
 import { routeEvidence, routeFields } from './table-index-slots.js';
@@ -39,7 +40,7 @@ class InboxAuditResult implements AuditedInbox {
  * (including while queued); the auditor retains no source object or Buffer.
  * Owned-job credits cover fresh serialization, header copies and all callbacks.
  * Store normal-open MUST refuse every retained arm, even a valid sealed arm. */
-export function auditInbox(kernel: TableKernelV2, binding: TableBinding, budget: OwnedAuditBudget,
+export function auditInbox(kernel: TableKernelV2 | TableKernelV3, binding: TableBinding, budget: OwnedAuditBudget,
   maxIndexBytes: number, options?: OwnedAuditOptions): Promise<AuditedInbox> {
   // Snapshot only immutable scalar/string sources at the external boundary.
   // Their pre-job lifetime belongs to the private caller's input reservation;
@@ -77,7 +78,8 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
         versions[pass - 1] = digest(['orka-inbox-audit-version-v1', versions[pass - 1], record.row,
           record.etag, record.timestamp, d.digest]); versionCounts[pass - 1]!++;
         const version = { etag: record.etag, digest: d.digest, timestamp: record.timestamp };
-        if (pass === 2 && !(d.type === 'control' && d.id.startsWith('control_recovery:'))) index.seePass2(key, version);
+        const transitionAudit = d.type === 'control' && (d.id.startsWith('control_recovery:') || d.id.startsWith('control_lease_expiry:'));
+        if (pass === 2 && !transitionAudit) index.seePass2(key, version);
         if (d.type === 'event') {
           const { body, ...event } = decodeEvent(key, d.payload);
           if (pass === 1) index.addEvent({ event: { ...event, externalEventId: d.id },
@@ -95,18 +97,24 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
           if (pass === 1) index.addRoute({ replyTarget: d.id, externalEventId: r.externalEventId, botId: r.route.bot.id,
             conversationId: r.route.conversation.id, ...routeFields(r.route), routeDigest: r.routeDigest, routeEncodingBytes: encode(r.route).length,
             payloadBytes: d.payload.length, version });
-        } else if (d.type === 'control' && d.id.startsWith('control_recovery:')) {
-          const audit = decodeRecoveryAudit(d.payload);
+        } else if (transitionAudit) {
+          const expiry = d.id.startsWith('control_lease_expiry:');
+          const audit = expiry ? decodeExpiryAudit(d.payload) : decodeRecoveryAudit(d.payload);
+          const kind = expiry ? 'lease-expiry' : 'operator-recovery';
           const m = header.metadata; const x = m.exit;
-          if (recoveryAuditId(audit.invocation) !== d.id || audit.oldEpoch > m.epoch ||
-              (audit.oldEpoch === m.epoch && (m.owner !== '' || x?.kind !== 'operator-recovery' || x.auditId !== audit.invocation)) ||
+          if ((expiry && !('lease' in m)) || (expiry ? expiryAuditId(audit.invocation) : recoveryAuditId(audit.invocation)) !== d.id ||
+              audit.oldEpoch > m.epoch ||
+              (audit.oldEpoch === m.epoch && (m.owner !== '' || x?.kind !== kind || x.auditId !== audit.invocation)) ||
               (x?.kind === 'clean-release' && audit.oldEpoch === x.oldEpoch)) throw new TableError('corrupt');
-          if (x?.kind === 'operator-recovery' && x.invocation === audit.invocation && x.oldEpoch === audit.oldEpoch &&
-              (!x.auditId || !x.auditDigest)) throw new TableError('corrupt');
-          if (x?.kind === 'operator-recovery' && x.auditId === audit.invocation) {
-            if (x.invocation !== audit.invocation || x.auditDigest !== d.digest ||
-                x.oldOwner !== audit.oldOwner || x.oldEpoch !== audit.oldEpoch ||
-                x.originalMDigest !== audit.originalMDigest || x.operatorAttestationDigest !== audit.operatorAttestationDigest) throw new TableError('corrupt');
+          if (x && x.kind !== 'clean-release' && x.invocation === audit.invocation && x.oldEpoch === audit.oldEpoch &&
+              (x.kind !== kind || !x.auditId || !x.auditDigest)) throw new TableError('corrupt');
+          if (x && x.kind !== 'clean-release' && x.auditId === audit.invocation) {
+            if (x.kind !== kind || x.invocation !== audit.invocation || x.auditDigest !== d.digest ||
+                x.oldOwner !== audit.oldOwner || x.oldEpoch !== audit.oldEpoch || x.originalMDigest !== audit.originalMDigest) throw new TableError('corrupt');
+            if (x.kind === 'operator-recovery' && (!('operatorAttestationDigest' in audit) ||
+                x.operatorAttestationDigest !== audit.operatorAttestationDigest)) throw new TableError('corrupt');
+            if (x.kind === 'lease-expiry' && (!('lease' in audit) || x.observedAt !== audit.observedAt ||
+                !encode(x.lease).equals(encode(audit.lease)))) throw new TableError('corrupt');
             if (pass === 1) { referencedAudit++; referencedDispositionDigest = audit.dispositionDigest; }
           }
         } else {
@@ -129,14 +137,15 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
         const decoded = decodeState(state); decodeResult(result);
         if (decoded.restartEpoch > m.epoch) throw new TableError('corrupt');
         if (decoded.handoffClockArm) Object.freeze(decoded.handoffClockArm);
-        header = Object.freeze({ metadata: Object.freeze({ ...m, state, result, exit: m.exit ? Object.freeze({ ...m.exit }) : undefined }),
+        header = Object.freeze({ metadata: Object.freeze({ ...m, state, result, exit: m.exit ? Object.freeze({ ...m.exit,
+          ...(m.exit.kind === 'lease-expiry' ? { lease: Object.freeze({ ...m.exit.lease }) } : {}) }) : undefined }),
           state: Object.freeze(decoded), version: Object.freeze({ etag: record.etag, digest: m.digest, timestamp: record.timestamp }) });
       }
       // No second-pass M copy. Kernel proves both snapshots against its same fence.
     }, endPass(this: void, pass: 1 | 2): undefined { index.endPass(pass); }, finalize(this: void): undefined {
       if (versions[0] !== versions[1] || versionCounts[0] !== versionCounts[1]) throw new TableError('corrupt');
       const x = header!.metadata.exit;
-      if (x?.kind === 'operator-recovery' && x.auditId !== undefined && (x.auditId !== x.invocation || referencedAudit !== 1)) throw new TableError('corrupt');
+      if (x && x.kind !== 'clean-release' && x.auditId !== undefined && (x.auditId !== x.invocation || referencedAudit !== 1)) throw new TableError('corrupt');
       const h = header!; index.finishBuild(h.state);
       const result = decodeResult(h.metadata.result);
       for (let order = 1; order <= h.state.records;) {
@@ -145,7 +154,7 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
         // Only recovery can seal after the last prepared domain epoch. A later
         // unarmed recovery may preserve that final uncertainty interval before
         // any successful open; its older result/Exit need not still be retained.
-        if (seal.epoch > h.state.restartEpoch && !(result.operation === 'operator-recovery' &&
+        if (seal.epoch > h.state.restartEpoch && !((result.operation === 'operator-recovery' || result.operation === 'lease-expiry') &&
             seal.reason === 'clock-uncertain' && seal.epoch <= result.oldEpoch &&
             seal.lastOrder === h.state.records && h.state.currentGeneration === null)) throw new TableError('corrupt');
         order = seal.lastOrder + 1;
@@ -158,7 +167,8 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
       }
       validateResult({ binding: bound!, metadata: h.metadata, state: h.state, graph: index,
         postDataDigest: digest(['orka-recovery-data-end-v2', fold, count]), dataRowCount: count });
-      if (x?.kind === 'operator-recovery' && x.auditId !== undefined && result.operation === 'operator-recovery') {
+      if (x && x.kind !== 'clean-release' && x.auditId !== undefined &&
+          (result.operation === 'operator-recovery' || result.operation === 'lease-expiry')) {
         const seal = result.disposition.kind === 'inbox-clock-uncertain' ? index.sealByGeneration(result.disposition.generation) : undefined;
         // A regression seal predates reclaim; only a new uncertain seal is in
         // the writer's disposition commitment. Compare exact canonical bytes.
@@ -169,6 +179,17 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
     } };
   return {
     visitor,
+    /** Owned V3 audits may renew M between pages. Publish only a later kernel-
+     * checked fence with the exact same domain; foreign proofs stay exact-M. */
+    refreshMetadata(record: Readonly<StoredRecordV2>): void {
+      if (!header || !bound || record.value.kind !== 'metadata' || !('lease' in record.value) ||
+          domainFingerprint(bound, header.metadata as MetadataV3) !== domainFingerprint(bound, record.value as MetadataV3)) throw new TableError('corrupt');
+      const m = record.value;
+      header = Object.freeze({ ...header,
+        metadata: Object.freeze({ ...m, state: Buffer.from(m.state), result: Buffer.from(m.result), exit: m.exit ? Object.freeze({ ...m.exit,
+          ...(m.exit.kind === 'lease-expiry' ? { lease: Object.freeze({ ...m.exit.lease }) } : {}) }) : undefined }),
+        version: Object.freeze({ etag: record.etag, digest: m.digest, timestamp: record.timestamp }) });
+    },
     proof(): Readonly<{ versions: string; count: number }> {
       if (versions[0] !== versions[1] || versionCounts[0] !== versionCounts[1]) throw new TableError('corrupt');
       return { versions: versions[0]!, count: versionCounts[0]! };
@@ -179,7 +200,7 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
   };
 }
 
-async function runAudit(kernel: TableKernelV2, snapshot: TableBinding & { kind: 'ingress'; scope: Readonly<IngressScope> },
+async function runAudit(kernel: TableKernelV2 | TableKernelV3, snapshot: TableBinding & { kind: 'ingress'; scope: Readonly<IngressScope> },
   index: InboxIndex, config: OwnedAuditBudget & { signal: AbortSignal | undefined; requestTimeoutMs: number }): Promise<AuditedInbox> {
   const projection = createInboxAuditProjection(snapshot, index);
   let published = false;
@@ -188,6 +209,13 @@ async function runAudit(kernel: TableKernelV2, snapshot: TableBinding & { kind: 
     await kernel.auditOwned(projection.visitor, { maxPages: config.maxPages, maxPageBytes: config.maxPageBytes,
       maxDurationMs: config.maxDurationMs, maxTrackingBytes: config.maxTrackingBytes },
     { ...(config.signal ? { signal: config.signal } : {}), requestTimeoutMs: config.requestTimeoutMs });
+    if ('lease' in projection.result().header.metadata) {
+      const remaining = Math.floor(deadline - performance.now());
+      if (remaining < 1) throw new TableError('incomplete');
+      const current = await kernel.read('M', { ...(config.signal ? { signal: config.signal } : {}), timeoutMs: Math.min(remaining, config.requestTimeoutMs) });
+      if (!current) throw new TableError('corrupt');
+      projection.refreshMetadata(current);
+    }
     const status = kernel.status();
     if (status.lifecycle === 'poisoned') throw new TableError('unresolved');
     if (status.lifecycle !== 'envelope-audited' || status.ownership !== 'owned' || performance.now() >= deadline ||

@@ -66,7 +66,11 @@ function checkEntity(e: Record<string, unknown>, expectedPartition: string, expe
       const base = { kind: x.kind, oldOwner: x.oldOwner, oldEpoch: x.oldEpoch, invocation: x.invocation };
       const canonical = x.kind === 'clean-release' ? { ...base, planDigest: x.planDigest } : x.kind === 'operator-recovery' ? { ...base,
         originalMDigest: x.originalMDigest, planDigest: x.planDigest, domainDispositionDigest: x.domainDispositionDigest, operatorAttestationDigest: x.operatorAttestationDigest,
-        ...(x.auditId === undefined && x.auditDigest === undefined ? {} : { auditId: x.auditId, auditDigest: x.auditDigest }) } : undefined;
+        ...(x.auditId === undefined && x.auditDigest === undefined ? {} : { auditId: x.auditId, auditDigest: x.auditDigest }) } :
+        metadataFormat === 3 && x.kind === 'lease-expiry' ? { ...base, originalMDigest: x.originalMDigest, planDigest: x.planDigest,
+          domainDispositionDigest: x.domainDispositionDigest, auditId: x.auditId, auditDigest: x.auditDigest, lease: x.lease, observedAt: x.observedAt } : undefined;
+      if (x.kind === 'lease-expiry' && (x.lease?.durationMs !== 120000 || x.lease?.skewMs !== 5000 || x.lease?.handoffMs !== 1000 ||
+          !Number.isSafeInteger(x.observedAt) || x.observedAt <= x.lease.expiresAt + 5000)) return false;
       if (JSON.stringify(canonical) !== exit.toString()) return false;
     }
     const domain = hash(['orka-m-v2', e.Binding, e.InitId, e.InitDigest, e.Owner, Number(e.Epoch), e.Invocation, e.Operation, e.Plan, e.State, e.Result, e.Exit]);
@@ -126,12 +130,13 @@ export async function tableService(t: FixtureHooks, kind: 'delivery' | 'ingress'
         } else actions.push({ method: req.method!, ...(req.headers['if-match'] ? { etag: String(req.headers['if-match']) } : {}), entity: JSON.parse(body.toString()) });
         stats.lastActions = actions.length;
         if (!actions.length || actions.length > 100 || actions.filter(a => a.entity.RowKey === 'M').length !== 1 || !actions.every(a => checkEntity(a.entity, partition, expectedBinding, metadataFormat))) stats.violation = true;
-        if (actions[0]?.entity.Operation === 'recover') {
-          const m = actions[0].entity; const receipt = JSON.parse(Buffer.from(String(m.Exit), 'base64').toString());
-          const audit = actions.find(a => a.entity.RowKey === `control_${Buffer.from(`control_recovery:${receipt.auditId}`).toString('base64url')}`);
-          if (metadataFormat !== 2 || actions[0].method !== 'PUT' || actions[0].etag === undefined ||
+        if (['recover', 'lease-expiry'].includes(String(actions[0]?.entity.Operation))) {
+          const m = actions[0]!.entity; const receipt = JSON.parse(Buffer.from(String(m.Exit), 'base64').toString());
+          const prefix = m.Operation === 'recover' ? 'control_recovery:' : 'control_lease_expiry:';
+          const audit = actions.find(a => a.entity.RowKey === `control_${Buffer.from(`${prefix}${receipt.auditId}`).toString('base64url')}`);
+          if ((metadataFormat !== 2 && metadataFormat !== 3) || (m.Operation === 'lease-expiry' && metadataFormat !== 3) || actions[0]!.method !== 'PUT' || actions[0]!.etag === undefined ||
               !audit || audit.method !== 'POST' || receipt.auditDigest !== audit.entity.Digest ||
-              String(m.Owner) !== '' || (actions[0].etag === rows.get('M')?.['odata.etag'] &&
+              String(m.Owner) !== '' || (actions[0]!.etag === rows.get('M')?.['odata.etag'] &&
                 (String(m.Epoch) !== String(rows.get('M')?.Epoch) || receipt.oldOwner !== rows.get('M')?.Owner ||
                   receipt.originalMDigest !== rows.get('M')?.Digest))) stats.violation = true;
         }

@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { bindTable, integer, object } from '../storage/table/codec.js';
-import { createTableKernel, createTableKernelV2 } from '../storage/table/owner.js';
+import { createTableKernel, createTableKernelV2, createTableKernelV3 } from '../storage/table/owner.js';
+import { waitForTableLeaseV3 } from '../storage/table/lease-takeover.js';
 import { DEFAULT_LIMITS, TableError } from '../storage/table/types.js';
-import type { BoundTable, DataAction, DataKey, Plan, PlannerView, PlannerViewV2, TableBinding, TableDependencies, TableLimits } from '../storage/table/types.js';
+import type { BoundTable, DataAction, DataKey, Plan, PlannerView, PlannerViewV2, PlannerViewV3, TableBinding, TableDependencies, TableLeaseDependencies, TableLimits } from '../storage/table/types.js';
 import type { DeliveryRequest } from '../protocol/types.js';
 import { requestIdentity, validateClaim, validateOutcome, validateScope } from './identity.js';
 import type { RequestIdentity } from './identity.js';
-import { audit, auditV2Startup, corrupt, countSessionControls, decodeAlias, decodeOperation, decodeResult, decodeSessionControl, effectiveState, encode, marker, sessionControlId, validateMarker } from './table-codec.js';
+import { audit, auditV2Startup, auditV3Startup, corrupt, countSessionControls, decodeAlias, decodeOperation, decodeResult, decodeSessionControl, effectiveState, encode, marker, sessionControlId, validateMarker } from './table-codec.js';
+import { expireTableDeliveryV3 } from './table-recovery.js';
 import type { Operation, Result } from './table-codec.js';
 import { DeliveryJournalError } from './types.js';
 import type { BeginDeliveryResult, DeliveryClaim, DeliveryJournalPort, DeliveryOutcome, JournalScope, SettlementResult } from './types.js';
@@ -67,8 +69,20 @@ export function createTableDeliveryJournalV2(binding: TableBinding, dependencies
     return new TableDeliveryJournal(snapshot, dependencies, limits, 2, bound);
   } catch (error) { throw safeError(error); }
 }
-type Storage = { format: 1; kernel: ReturnType<typeof createTableKernel> } | { format: 2; kernel: ReturnType<typeof createTableKernelV2> };
-type DomainPlanner = (view: PlannerView | PlannerViewV2) => Plan;
+/** Dormant explicit V3 library; normal V1/V2 opens never wait, expire or migrate. */
+export function createTableDeliveryJournalV3(binding: TableBinding, dependencies: TableLeaseDependencies, limits: TableDeliveryJournalLimits = {}) {
+  try {
+    bindTable(binding); if (binding.kind !== 'delivery') throw new DeliveryJournalError('invalid-input');
+    const snapshot = { ...binding, scope: validateScope(binding.scope) }; const bound = bindTable(snapshot);
+    // All three transports must retain the same token/native transport/clock identity.
+    const { token, request, leaseClock } = dependencies;
+    const native = { token, ...(request === undefined ? {} : { request }), ...(leaseClock === undefined ? {} : { leaseClock }) };
+    return new TableDeliveryJournal(snapshot, native, limits, 3, bound);
+  } catch (error) { throw safeError(error); }
+}
+type Storage = { format: 1; kernel: ReturnType<typeof createTableKernel> } | { format: 2; kernel: ReturnType<typeof createTableKernelV2> } |
+  { format: 3; kernel: ReturnType<typeof createTableKernelV3> };
+type DomainPlanner = (view: PlannerView | PlannerViewV2 | PlannerViewV3) => Plan;
 class TableDeliveryJournal implements DeliveryJournalPort, SessionCorrelationPort {
   private readonly storage: Storage;
   private get kernel() { return this.storage.kernel; }
@@ -87,14 +101,24 @@ class TableDeliveryJournal implements DeliveryJournalPort, SessionCorrelationPor
   private startupProof: 'none' | 'pending' | 'validated' | 'invalidated' = 'none';
   private closing?: Promise<void>;
   private drained?: () => void;
-  constructor(binding: Extract<TableBinding, { kind: 'delivery' }>, dependencies: TableDependencies, limits: TableDeliveryJournalLimits, format: 1 | 2, private readonly bound: BoundTable) {
+  private readonly startupAbort = new AbortController();
+  private acquisitionStarted = false;
+  private readonly kernelLimits: TableLimits;
+  constructor(private readonly binding: Extract<TableBinding, { kind: 'delivery' }>, private readonly dependencies: TableLeaseDependencies,
+    limits: TableDeliveryJournalLimits, format: 1 | 2 | 3, private readonly bound: BoundTable) {
     object(limits, ['maxPending', 'maxPendingBytes', 'maxSessions', 'kernel']);
     this.maxSessions = sessionCorrelationLimit(limits.maxSessions);
     this.maxPending = integer(limits.maxPending ?? DEFAULT_LIMITS.maxPending, 1, 1024);
     this.maxPendingBytes = integer(limits.maxPendingBytes ?? DEFAULT_LIMITS.maxPendingBytes, 1, 256 * 1024 * 1024);
     this.scope = validateScope(binding.scope);
+    this.kernelLimits = format === 3 ? { ...DEFAULT_LIMITS, ...limits.kernel } : DEFAULT_LIMITS;
     this.storage = format === 1 ? { format, kernel: createTableKernel(binding, dependencies, limits.kernel) } :
-      { format, kernel: createTableKernelV2(binding, dependencies, limits.kernel) };
+      format === 2 ? { format, kernel: createTableKernelV2(binding, dependencies, limits.kernel) } :
+      { format, kernel: createTableKernelV3(binding, dependencies, this.kernelLimits) };
+  }
+  leaseAuthority() {
+    if (this.storage.format !== 3) throw new DeliveryJournalError('invalid-input');
+    return this.storage.kernel.leaseAuthority();
   }
   status() {
     return Object.freeze({ lifecycle: this.lifecycle, pending: this.pending, pendingBytes: this.pendingBytes, kernel: this.kernel.status() });
@@ -105,14 +129,31 @@ class TableDeliveryJournal implements DeliveryJournalPort, SessionCorrelationPor
     if (this.lifecycle !== 'new') return Promise.reject(new DeliveryJournalError(this.lifecycle === 'closed' || this.closing ? 'closed' : 'unavailable'));
     this.lifecycle = initialize ? 'initializing' : 'opening';
     // Debt exists before acquisition can submit, even before Exit necessity is known.
-    if (this.storage.format === 2) this.startupProof = 'pending';
+    if (this.storage.format !== 1) this.startupProof = 'pending';
     this.startup = this.startOwned(initialize); return this.startup;
   }
   private async startOwned(initialize: boolean): Promise<void> {
     try {
       if (initialize) await this.kernel.initialize();
+      if (this.storage.format === 3 && !initialize) {
+        // Waiting is outside the kernel FIFO and is bounded to the first foreign
+        // lease. Close cancels it before either audited clear or acquisition.
+        const expected = await waitForTableLeaseV3(this.binding, this.dependencies, {
+          signal: this.startupAbort.signal, timeoutMs: this.kernelLimits.callTimeoutMs,
+        });
+        if (expected) await expireTableDeliveryV3(this.binding, this.dependencies, expected, {
+          maxPages: this.kernelLimits.scanPages, maxPageBytes: this.kernelLimits.scanBytes,
+          maxTrackingBytes: this.kernelLimits.scanBytes, maxDurationMs: this.kernelLimits.callTimeoutMs,
+        }, { signal: this.startupAbort.signal, requestTimeoutMs: this.kernelLimits.callTimeoutMs });
+        if (this.startupAbort.signal.aborted) throw new DeliveryJournalError('closed');
+      }
+      this.acquisitionStarted = true;
       await this.kernel.acquire();
-      if (this.storage.format === 2) {
+      if (this.storage.format === 3) {
+        const records = await this.storage.kernel.scan();
+        this.epoch = this.domain(() => auditV3Startup(this.bound, records, initialize));
+        this.sessionCount = this.domain(() => countSessionControls(records, this.maxSessions));
+      } else if (this.storage.format === 2) {
         const records = await this.storage.kernel.scan();
         this.epoch = this.domain(() => auditV2Startup(this.bound, records, initialize));
         this.sessionCount = this.domain(() => countSessionControls(records, this.maxSessions));
@@ -134,6 +175,7 @@ class TableDeliveryJournal implements DeliveryJournalPort, SessionCorrelationPor
       } else this.lifecycle = 'ready';
     } catch (error) {
       await this.retire();
+      if (this.storage.format === 3 && this.startupAbort.signal.aborted) throw new DeliveryJournalError('closed');
       if (!initialize && error instanceof TableError && error.code === 'incomplete') throw new TableDeliveryStartupFailure();
       throw safeError(error);
     }
@@ -179,7 +221,10 @@ class TableDeliveryJournal implements DeliveryJournalPort, SessionCorrelationPor
   }
   private guardStartupRelease(): void {
     if (this.startupProof !== 'pending') return;
-    this.startupProof = 'invalidated'; this.kernel.invalidate();
+    this.startupProof = 'invalidated';
+    // Only the foreign wait has no release debt. Acquisition may still commit
+    // while its first read is pending, before the kernel marks ownership possible.
+    if (this.storage.format !== 3 || this.acquisitionStarted) this.kernel.invalidate();
   }
   private async retire(): Promise<void> {
     if (!this.closing) this.lifecycle = 'failed'; this.rejectQueued();
@@ -191,7 +236,7 @@ class TableDeliveryJournal implements DeliveryJournalPort, SessionCorrelationPor
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;
-    this.lifecycle = 'closing';
+    this.lifecycle = 'closing'; this.startupAbort.abort();
     const drained = new Promise<void>(resolve => { if (this.active) this.drained = resolve; else resolve(); });
     // Must precede the FIRST kernel.close: it schedules release before startup drains.
     this.guardStartupRelease();

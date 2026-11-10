@@ -49,7 +49,7 @@ function outcome(value: unknown): AdmissionResult {
 }
 function recoveryResult(value: unknown): InboxRecoveryResult {
   const v = shape(value, ['schema', 'operation', 'invocation', 'oldEpoch', 'originalMDigest', 'disposition', 'postStateDigest', 'postDataDigest', 'dataRowCount']);
-  if (v.schema !== 1 || v.operation !== 'operator-recovery') fail();
+  if (v.schema !== 1 || (v.operation !== 'operator-recovery' && v.operation !== 'lease-expiry')) fail();
   const d = object(v.disposition); let disposition: InboxRecoveryResult['disposition'];
   if (d.kind === 'inbox-unarmed') { shape(d, ['kind']); disposition = { kind: 'inbox-unarmed' }; }
   else {
@@ -57,12 +57,12 @@ function recoveryResult(value: unknown): InboxRecoveryResult {
     disposition = { kind: 'inbox-clock-uncertain', armId: uuid(d.armId), generation: integer(d.generation, 1, MAX_INBOX_RECORDS),
       watermark: integer(d.watermark, 0, MAX_INBOX_TIME) };
   }
-  return { schema: 1, operation: 'operator-recovery', invocation: uuid(v.invocation), oldEpoch: integer(v.oldEpoch, 1, Number.MAX_SAFE_INTEGER),
+  return { schema: 1, operation: v.operation, invocation: uuid(v.invocation), oldEpoch: integer(v.oldEpoch, 1, Number.MAX_SAFE_INTEGER),
     originalMDigest: hex(v.originalMDigest), disposition, postStateDigest: hex(v.postStateDigest), postDataDigest: hex(v.postDataDigest),
     dataRowCount: integer(v.dataRowCount, 0, Number.MAX_SAFE_INTEGER) };
 }
 function normalize(value: unknown): InboxResult {
-  if (object(value).operation === 'operator-recovery') return recoveryResult(value);
+  if (object(value).operation === 'operator-recovery' || object(value).operation === 'lease-expiry') return recoveryResult(value);
   const v = shape(value, ['schema', 'operation', 'epoch', 'basis', 'clock', 'decision', 'postStateDigest']);
   if (v.schema !== 1) fail();
   const epoch = integer(v.epoch, 1, Number.MAX_SAFE_INTEGER);
@@ -116,7 +116,7 @@ function normalize(value: unknown): InboxResult {
 export function encodeResult(value: Readonly<InboxResult>): Buffer {
   return boundary('invalid-input', () => {
     const result = normalize(value);
-    return bytes(encode(result), result.operation === 'operator-recovery' ? MAX_INBOX_RECOVERY_RESULT_BYTES : MAX_INBOX_RESULT_BYTES);
+    return bytes(encode(result), result.operation === 'operator-recovery' || result.operation === 'lease-expiry' ? MAX_INBOX_RECOVERY_RESULT_BYTES : MAX_INBOX_RESULT_BYTES);
   });
 }
 export function decodeResult(input: Uint8Array): InboxResult {
@@ -259,8 +259,8 @@ function recoveryConsistency(result: InboxRecoveryResult, context: ResultValidat
   // A later clean exit can replace recovery evidence without touching domain bytes.
   // A later inbox recovery cannot: both dispositions must install a new result.
   // Same-invocation/epoch evidence therefore always requires exact correlation.
-  if (x.kind === 'operator-recovery' || x.invocation === result.invocation || x.oldEpoch <= result.oldEpoch) {
-    if (x.kind !== 'operator-recovery' || x.invocation !== result.invocation || x.oldEpoch !== result.oldEpoch ||
+  if (x.kind === 'operator-recovery' || x.kind === 'lease-expiry' || x.invocation === result.invocation || x.oldEpoch <= result.oldEpoch) {
+    if (x.kind !== result.operation || x.invocation !== result.invocation || x.oldEpoch !== result.oldEpoch ||
         x.originalMDigest !== result.originalMDigest ||
         x.domainDispositionDigest !== digest(['orka-inbox-recovery-v2', binding.bytes.toString('base64'), metadata.result.toString('base64')])) fail();
   }
@@ -273,7 +273,7 @@ export function validateResult(context: ResultValidationContext): void {
     if (!encodeState(state).equals(metadata.state)) fail();
     integer(metadata.epoch, 1, Number.MAX_SAFE_INTEGER); hex(postDataDigest); integer(dataRowCount, 0, Number.MAX_SAFE_INTEGER);
     const result = decodeResult(metadata.result);
-    if (result.operation === 'operator-recovery') { recoveryConsistency(result, context, physical); return; }
+    if (result.operation === 'operator-recovery' || result.operation === 'lease-expiry') { recoveryConsistency(result, context, physical); return; }
     if (result.epoch > metadata.epoch || result.postStateDigest !== stateDigest(binding, metadata.state)) fail();
     // An older retained operator Exit is not a commitment to this new ordinary state.
     ordinaryResult(result, physical, graph, dataRowCount);

@@ -11,12 +11,12 @@ import type { BoundTable, ForeignOwnerFenceV2, ForeignInspectionBudget, ForeignI
 
 type Lifecycle = 'new' | 'inspecting' | 'completed' | 'failed' | 'closing' | 'closed';
 
-function snapshot(binding: TableBinding, expected: Readonly<ForeignOwnerFenceV2>): { binding: BoundTable; expected: ForeignOwnerFenceV2 } {
+function snapshot(binding: TableBinding, expected: Readonly<ForeignOwnerFenceV2>, format: 2 | 3): { binding: BoundTable; expected: ForeignOwnerFenceV2 } {
   const b = auditFields(binding, ['account', 'table', 'storeId', 'kind', 'scope']);
   b.scope = auditFields(b.scope, b.kind === 'ingress' ? ['appId', 'tenantId', 'orkaBaseUrl', 'gatewayNamespace', 'gatewayName'] : ['appId', 'tenantId']);
   const bound = bindTable(b as TableBinding);
   const f = auditFields(expected, ['initId', 'initDigest', 'owner', 'epoch', 'mDigest', 'etag']);
-  const fence = { initId: uuid(f.initId), initDigest: hex(f.initDigest), owner: uuid(f.owner),
+  const fence = { initId: uuid(f.initId), initDigest: hex(f.initDigest), owner: format === 3 && f.owner === '' ? '' : uuid(f.owner),
     epoch: integer(f.epoch, 1, Number.MAX_SAFE_INTEGER), mDigest: hex(f.mDigest), etag: etag(f.etag) };
   if (fence.initDigest !== initializationDigestV2(bound, fence.initId)) fail();
   return { binding: bound, expected: fence };
@@ -24,10 +24,16 @@ function snapshot(binding: TableBinding, expected: Readonly<ForeignOwnerFenceV2>
 
 /** Retained, one-shot V2 envelope observation. No ownership or Table mutation capability. */
 export function createTableForeignInspectorV2(binding: TableBinding, dependencies: TableDependencies, expected: Readonly<ForeignOwnerFenceV2>) {
-  let captured: ReturnType<typeof snapshot>; let client: Pick<OwnedTableClient<2>, 'read' | 'page' | 'close'>;
+  return createInspector(binding, dependencies, expected, 2);
+}
+export function createTableForeignInspectorV3(binding: TableBinding, dependencies: TableDependencies, expected: Readonly<ForeignOwnerFenceV2>) {
+  return createInspector(binding, dependencies, expected, 3);
+}
+function createInspector(binding: TableBinding, dependencies: TableDependencies, expected: Readonly<ForeignOwnerFenceV2>, format: 2 | 3) {
+  let captured: ReturnType<typeof snapshot>; let client: Pick<OwnedTableClient<2 | 3>, 'read' | 'page' | 'close'>;
   try {
     // Canonical identity and exact fence are private before ANY dependency reflection.
-    captured = snapshot(binding, expected); client = new OwnedTableClient(captured.binding, dependencies, 2);
+    captured = snapshot(binding, expected, format); client = new OwnedTableClient(captured.binding, dependencies, format);
   } catch { throw new TableError('invalid-input'); }
   const fence = captured.expected;
   let lifecycle: Lifecycle = 'new'; let pending: 0 | 1 = 0; let consumed = false; let callback = false;

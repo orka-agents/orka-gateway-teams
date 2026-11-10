@@ -13,7 +13,7 @@ export function snapshotRecord(record: AnyStoredRecord | undefined): AnyStoredRe
   return 'release' in value ? { ...record, value: { ...value, ...buffers, release: Buffer.from(value.release) } } :
     { ...record, value: { ...value, ...buffers,
       ...('lease' in value ? { lease: value.lease ? { ...value.lease } : undefined } : {}),
-      exit: value.exit ? { ...value.exit } : undefined } };
+      exit: value.exit ? { ...value.exit, ...(value.exit.kind === 'lease-expiry' ? { lease: { ...value.exit.lease } } : {}) } : undefined } };
 }
 
 /** Mechanics only: callers retain admission, authority policy, callback guards and publication. */

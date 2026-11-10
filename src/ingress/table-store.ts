@@ -1,8 +1,10 @@
 import { auditConfig } from '../storage/table/audit.js';
 import { bindTable, initializationDigestV2, integer, object } from '../storage/table/codec.js';
-import { createTableKernelV2 } from '../storage/table/index.js';
+import { createTableKernelV2, createTableKernelV3 } from '../storage/table/index.js';
+import { waitForTableLeaseV3 } from '../storage/table/lease-takeover.js';
+import { expireTableIngressV3 } from './table-recovery.js';
 import { DEFAULT_LIMITS, OWNED_AUDIT_BUDGET_EXHAUSTED, TableError } from '../storage/table/types.js';
-import type { OwnedAuditBudget, TableBinding, TableDependencies, TableErrorCode, TableLimits } from '../storage/table/types.js';
+import type { OwnedAuditBudget, TableBinding, TableDependencies, TableLeaseDependencies, TableErrorCode, TableLimits } from '../storage/table/types.js';
 import { identity, validatePolicy, validateScope } from './codec.js';
 import type { EventEnvelope } from '../protocol/types.js';
 import { admissionBound, admissionSources, admission, claimIdentity, commandBytes, FRAME_BYTES, readCommand, settlement } from './table-input.js';
@@ -60,6 +62,15 @@ function copyString(value: string): string { const b = Buffer.alloc(Buffer.byteL
 /** Synchronous retained ownership handle. Fixed validated configuration owns its
  * own strings independently of record-index credits. No runtime/backend selector. */
 export function createTableIngressStore(binding: TableBinding, dependencies: TableDependencies, options: TableIngressStoreOptions) {
+  return createIngressStore(2, binding, dependencies, options);
+}
+
+/** Explicit dormant V3 library: startup proves expiry before ordinary acquire. */
+export function createTableIngressStoreV3(binding: TableBinding, dependencies: TableLeaseDependencies, options: TableIngressStoreOptions) {
+  return createIngressStore(3, binding, dependencies, options);
+}
+
+function createIngressStore(format: 2 | 3, binding: TableBinding, dependencies: TableLeaseDependencies, options: TableIngressStoreOptions) {
   try {
     const b = fields(binding, ['account', 'table', 'storeId', 'kind', 'scope']);
     const s = validateScope(fields(b.scope)); bindTable({ ...b, scope: s } as TableBinding);
@@ -71,13 +82,13 @@ export function createTableIngressStore(binding: TableBinding, dependencies: Tab
     const limits = o.kernel === undefined ? {} : fields(o.kernel, Object.keys(DEFAULT_LIMITS));
     const resolved = { ...DEFAULT_LIMITS, ...limits } as TableLimits;
     if (o.now !== undefined && typeof o.now !== 'function') throw new TableError('invalid-input');
-    const d = fields(dependencies, ['token', 'request']);
+    const d = fields(dependencies, format === 3 ? ['token', 'request', 'leaseClock'] : ['token', 'request']);
     if (typeof d.token !== 'function' || (d.request !== undefined && typeof d.request !== 'function')) throw new TableError('invalid-input');
     const config = { audit: { maxPages: a.maxPages, maxPageBytes: a.maxPageBytes, maxDurationMs: a.maxDurationMs, maxTrackingBytes: a.maxTrackingBytes },
       maxIndexBytes: integer(o.maxIndexBytes, 1, 1024 * 1024 * 1024), policy: validatePolicy(o.policy === undefined ? undefined : fields(o.policy)),
       now: (o.now ?? Date.now) as (this: void) => number,
       maxPending: integer(o.maxPending ?? 96, 1, 96), maxPendingBytes: integer(o.maxPendingBytes ?? 32 * 1024 * 1024, 1, 32 * 1024 * 1024), kernel: resolved };
-    return new TableIngressStore(snapshot, d as unknown as TableDependencies, config);
+    return new TableIngressStore(snapshot, d as unknown as TableLeaseDependencies, config, format);
   } catch (error) { throw factoryError(error); }
 }
 type Config = Required<TableIngressStoreOptions> & { kernel: TableLimits };
@@ -98,10 +109,12 @@ class TableIngressStore implements IngressPort {
   private startup: Promise<void> | undefined;
   private closing: Promise<void> | undefined;
   private cleanup: Promise<void> | undefined;
-  constructor(binding: TableBinding, dependencies: TableDependencies, private readonly config: Config) {
+  private readonly startupAbort = new AbortController();
+  constructor(binding: TableBinding, private readonly dependencies: TableLeaseDependencies, private readonly config: Config, private readonly format: 2 | 3) {
     this.binding = binding; this.bound = bindTable(binding);
-    this.kernel = createTableKernelV2(binding, dependencies, config.kernel);
+    this.kernel = (format === 3 ? createTableKernelV3 : createTableKernelV2)(binding, dependencies, config.kernel);
   }
+  leaseAuthority() { return this.kernel.leaseAuthority(); }
   status() { return Object.freeze({ lifecycle: this.lifecycle, pending: this.pending, pendingBytes: this.pendingBytes,
     kernel: this.kernel.status(), index: this.index?.diagnostics() }); }
   initialize(): Promise<void> { return this.start(true); }
@@ -138,6 +151,14 @@ class TableIngressStore implements IngressPort {
   private async startOwned(initialize: boolean): Promise<void> {
     try {
       if (initialize) { await this.kernel.initialize(); this.liveStartup(); }
+      if (!initialize && this.format === 3) {
+        const signal = this.startupAbort.signal;
+        const expected = await waitForTableLeaseV3(this.binding, this.dependencies, { signal, timeoutMs: this.config.kernel.callTimeoutMs });
+        this.liveStartup();
+        if (expected) await expireTableIngressV3(this.binding, this.dependencies, expected, this.config.audit, this.config.maxIndexBytes,
+          { signal, requestTimeoutMs: this.config.kernel.callTimeoutMs });
+        this.liveStartup();
+      }
       this.knowledge = 'unknown'; await this.kernel.acquire(); this.liveStartup();
       if (initialize) await this.genesis();
       else {
@@ -468,6 +489,7 @@ class TableIngressStore implements IngressPort {
   close(): Promise<void> {
     if (this.closing) return this.closing;
     this.lifecycle = 'closing';
+    this.startupAbort.abort();
     this.rejectQueued();
     if (this.frame) this.retire(this.frame);
     this.closing = (async () => {

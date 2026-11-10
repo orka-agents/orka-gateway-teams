@@ -1,16 +1,16 @@
 # Azure Table storage — kernel and journal contracts
 
 `src/storage/table/index.ts` exposes a bounded protocol/codec/ownership kernel
-and a separate GET-only V2 foreign-owner envelope inspector.
-`src/delivery/table-journal.ts` implements explicit V1 and V2 delivery journals on that kernel.
-`src/ingress/table-store.ts` implements the [V2 inbox](table-inbox.md), with a
+and separate GET-only V2/V3 foreign-owner envelope inspectors.
+`src/delivery/table-journal.ts` implements explicit V1/V2/V3 delivery libraries on that kernel.
+`src/ingress/table-store.ts` implements the [inbox](table-inbox.md), with a
 body-free two-pass domain audit and durable handoff arm. The compiled CLI ships
 [explicit Table V2 runtime selection](table-runtime.md) and purpose-specific
 storage identity; SQLite remains the default. This page describes the underlying
 library APIs (including the library-only foreign-owner inspector), not provisioning
 or hosting instructions. The runtime has no Azure provisioning, renewable lease,
 automatic takeover, migration, deletion or pruning. A separate library-only V3
-kernel provides renewable ownership but is not selected by any runtime or domain store. An explicit audited V2 operator
+kernel and explicit V3 domain factories provide renewable ownership and audited expiry, but no runtime selects them. An explicit audited V2 operator
 reclaim command is described in [Table runtime](table-runtime.md#manual-owner-reclaim).
 
 ## Library contract
@@ -106,12 +106,14 @@ compatibility path is fixture-tested, not live Azure exact-key qualification.
 
 `createTableKernelV3(binding, dependencies, limits?)` pins metadata format 3.
 It never adopts V1/V2 data, upgrades a store or takes over an occupied owner,
-including an expired one. The CLI, inbox and delivery journal remain unchanged;
-there is no V3 serve, upgrade or reclaim command. Do not select this foundation
-for retained production stores: domain expiry dispositions and final external
-POST fences are not integrated yet.
+including an expired one. The explicit `createTableIngressStoreV3` and
+`createTableDeliveryJournalV3` libraries add domain-aware expiry before acquire.
+The CLI remains unchanged: there is no V3 serve, upgrade or reclaim command.
+Do not use these dormant libraries for production serving: final external POST
+fences are not integrated yet.
 
-V3 keeps V1 data envelopes and the V2 initialization identity and Exit encoding.
+V3 keeps V1 data envelopes and the V2 initialization identity and existing Exits,
+and adds a closed `lease-expiry` Exit with separate expiry audit evidence.
 M adds a canonical Binary `Lease` and an `orka-m-v3` digest over the complete V2
 domain fingerprint plus lease bytes. Owner-empty M has no lease; owned M has
 `{schema:1, durationMs:120000, skewMs:5000, handoffMs:1000, sequence, invocation,
@@ -161,8 +163,41 @@ job, even before envelope audit completion. Only a self-confirmed M lease update
 may change the exact fence during that job; all non-lease domain fields and data
 versions remain unchanged. No domain mutation interleaves. A returned scan M can
 be its already-validated original header; domain consumers must publish the
-current authoritative M after auditing. That integration is not provided here.
-V1/V2 and GET-only foreign inspection retain exact-M behavior.
+current authoritative M after auditing. The V3 inbox refreshes its private audit
+header from the current kernel fence before publishing it; its data index retains
+the exact audited row versions. V1/V2 and GET-only foreign inspection retain
+exact-M behavior.
+
+### Dormant V3 domain expiry and recovery
+
+The V3 domain factories accept the corresponding V2 factory inputs and expose
+`leaseAuthority()`. An occupied startup waits once for the initially observed
+lease's E+5000 boundary, strictly past equality, with a 135001 ms monotonic cap.
+The wait is outside the owner FIFO and close cancels it. A fresh read with changed
+M returns busy, rather than following a renewed owner indefinitely.
+
+A safely expired exact M is audited through complete GET-only domain passes.
+One conditional batch clears its owner at the same epoch, appends a
+`control_lease_expiry:` audit and applies the conservative domain disposition.
+Ingress clears an uncertain handoff arm and seals its interval rather than
+forwarding it again. Delivery retains sending rows, whose later-epoch projection
+is unknown; receipts, aliases and Session controls remain intact. Ordinary
+acquisition then advances the epoch. A crash between clear and acquire leaves
+valid unowned state. Competing clears cannot both commit; a losing submitted
+clear can verify the winner's exact audit, unchanged old graph, disposition and
+new data commitment without claiming its own batch committed.
+
+`reclaimTableIngressV3` and `reclaimTableDeliveryOperatorV3` retain the manual
+termination-attestation requirement, including for a still-live lease. Expiry is
+not an operator statement or proof of process death. Both domains verify retained
+transition evidence after later acquisition. Checked transition transports reject
+invalid metadata, audit, ETag and seal shapes before token acquisition; ordinary
+owner writes cannot emit transition operations or reserved audit rows. Lost
+acknowledgments require exact readback or remain uncertain, never blind retries.
+
+These APIs neither migrate V2 nor enable mixed-format serving. Format upgrade
+and runtime activation are separate work. The synthetic native HTTPS tests do not
+qualify ACA clocks, provider sends or live crash recovery.
 
 Existing call and cleanup limits, including 300000 ms, remain accepted. If a
 single request, token wait or reconciliation outlasts authority, the handle loses

@@ -1,5 +1,6 @@
 import { decodeRecoveryAudit, digest, object, rawJSON } from '../storage/table/codec.js';
-import type { BoundTable, ForeignOwnerFenceV2, Metadata, MetadataV2, StoredRecord, StoredRecordV2 } from '../storage/table/types.js';
+import { decodeExpiryAudit, encodeLease, expiryAuditId } from '../storage/table/codec-v3.js';
+import type { BoundTable, ForeignOwnerFenceV2, Metadata, MetadataV2, MetadataV3, StoredRecord, StoredRecordV2, StoredRecordV3 } from '../storage/table/types.js';
 import { identity, validateClaim, validateOutcome } from './identity.js';
 import type { RequestIdentity } from './identity.js';
 import { DeliveryJournalError } from './types.js';
@@ -7,7 +8,7 @@ import type { BeginDeliveryResult, DeliveryClaim, DeliveryOutcome, SettlementRes
 import { MAX_SESSION_CORRELATIONS, sessionCorrelationLimit, validateSessionObservation } from './session-correlation.js';
 import type { SessionObservation, SessionObservationResult } from './session-correlation.js';
 
-type DomainRecord = StoredRecord | StoredRecordV2;
+type DomainRecord = StoredRecord | StoredRecordV2 | StoredRecordV3;
 export interface Operation {
   schema: 1; fingerprint: 1; digest: string; attemptId: string; attemptEpoch: number;
   state: 'ready' | 'sending' | 'delivered' | 'rejected' | 'unknown'; providerMessageId: string | null;
@@ -148,12 +149,18 @@ export function audit(records: readonly StoredRecord[], genesis = false): number
 /** Startup only: the private kernel has just acquired and its complete scan proves
  * the exact acquire fence. Historical Exit is not a commitment to later mutations. */
 export function auditV2Startup(binding: BoundTable, records: readonly StoredRecordV2[], genesis = false): number {
+  return auditStartup(binding, records, genesis, false);
+}
+export function auditV3Startup(binding: BoundTable, records: readonly StoredRecordV3[], genesis = false): number {
+  return auditStartup(binding, records, genesis, true);
+}
+function auditStartup(binding: BoundTable, records: readonly StoredRecordV2[], genesis: boolean, v3: boolean): number {
   const m = records.find(r => r.row === 'M'); if (!m || m.value.kind !== 'metadata') corrupt();
   const metadata = m.value; const exit = metadata.exit;
   if (!metadata.owner || metadata.operation !== 'acquire' ||
       (exit ? metadata.epoch - 1 !== exit.oldEpoch || metadata.owner === exit.oldOwner : metadata.epoch !== 1)) corrupt();
-  const epoch = auditGraph(records, metadata, genesis, binding);
-  if (exit?.kind === 'operator-recovery') auditOperatorRecoveryCommitment(binding, records, metadata);
+  const epoch = auditGraph(records, metadata, genesis, binding, v3);
+  if (exit?.kind === 'operator-recovery' || (v3 && exit?.kind === 'lease-expiry')) auditTransitionCommitment(binding, records, metadata);
   return epoch;
 }
 export function deliveryRecoveryDigest(binding: BoundTable, state: Buffer, result: Buffer, dataDigest: string, count: number): string {
@@ -162,18 +169,20 @@ export function deliveryRecoveryDigest(binding: BoundTable, state: Buffer, resul
 }
 /** Exit commits data only at the unchanged acquisition boundary, not after later
  * legitimate owner mutations. Shared by normal startup and a foreign acquire. */
-function auditOperatorRecoveryCommitment(binding: BoundTable, records: readonly StoredRecordV2[], metadata: MetadataV2): void {
+function auditTransitionCommitment(binding: BoundTable, records: readonly StoredRecordV2[], metadata: MetadataV2): void {
   const exit = metadata.exit;
-  if (exit?.kind !== 'operator-recovery') corrupt();
+  if (exit?.kind !== 'operator-recovery' && exit?.kind !== 'lease-expiry') corrupt();
+  const expiry = exit.kind === 'lease-expiry';
   const b = binding.bytes.toString('base64'); let h = digest(['orka-recovery-data-v2', b]);
-  let before = h; let count = 0; let beforeCount = 0; let currentAudit: ReturnType<typeof decodeRecoveryAudit> | undefined;
+  let before = h; let count = 0; let beforeCount = 0;
+  let currentAudit: ReturnType<typeof decodeRecoveryAudit> | ReturnType<typeof decodeExpiryAudit> | undefined;
   let previous: string | undefined;
   for (const record of records) {
     if (record.row === 'M') continue;
     if (record.value.kind !== 'data' || (previous !== undefined && record.row <= previous)) corrupt();
     h = digest(['orka-recovery-row-v2', h, record.row, record.value.digest]); previous = record.row; count++;
-    if (exit.auditId && record.value.type === 'control' && record.value.id === `control_recovery:${exit.auditId}`) {
-      try { currentAudit = decodeRecoveryAudit(record.value.payload); } catch { corrupt(); }
+    if (exit.auditId && record.value.type === 'control' && record.value.id === (expiry ? expiryAuditId(exit.auditId) : `control_recovery:${exit.auditId}`)) {
+      try { currentAudit = expiry ? decodeExpiryAudit(record.value.payload) : decodeRecoveryAudit(record.value.payload); } catch { corrupt(); }
     } else { before = digest(['orka-recovery-row-v2', before, record.row, record.value.digest]); beforeCount++; }
   }
   const data = digest(['orka-recovery-data-end-v2', h, count]);
@@ -184,16 +193,22 @@ function auditOperatorRecoveryCommitment(binding: BoundTable, records: readonly 
 /** Foreign-owner domain proof. The inspector supplies a complete, fenced two-pass snapshot;
  * unlike startup, M must still be occupied by the exact old owner. */
 export function auditV2Foreign(binding: BoundTable, records: readonly StoredRecordV2[], expected: Readonly<ForeignOwnerFenceV2>): { state: Buffer; result: Buffer } {
+  return auditForeign(binding, records, expected, false);
+}
+export function auditV3Foreign(binding: BoundTable, records: readonly StoredRecordV3[], expected: Readonly<ForeignOwnerFenceV2>): { state: Buffer; result: Buffer } {
+  return auditForeign(binding, records, expected, true);
+}
+function auditForeign(binding: BoundTable, records: readonly StoredRecordV2[], expected: Readonly<ForeignOwnerFenceV2>, v3: boolean): { state: Buffer; result: Buffer } {
   const m = records.find(r => r.row === 'M');
   if (!m || m.value.kind !== 'metadata' || m.etag !== expected.etag || m.value.digest !== expected.mDigest ||
       m.value.initId !== expected.initId || m.value.initDigest !== expected.initDigest ||
       m.value.owner !== expected.owner || m.value.epoch !== expected.epoch) corrupt();
-  auditGraph(records, m.value, false, binding);
-  if (m.value.operation === 'acquire' && m.value.exit?.kind === 'operator-recovery')
-    auditOperatorRecoveryCommitment(binding, records, m.value);
+  auditGraph(records, m.value, false, binding, v3);
+  if (m.value.operation === 'acquire' && (m.value.exit?.kind === 'operator-recovery' || (v3 && m.value.exit?.kind === 'lease-expiry')))
+    auditTransitionCommitment(binding, records, m.value);
   return { state: Buffer.from(m.value.state), result: Buffer.from(m.value.result) };
 }
-function auditGraph(records: readonly DomainRecord[], metadata: Metadata | MetadataV2, genesis: boolean, binding?: BoundTable): number {
+function auditGraph(records: readonly DomainRecord[], metadata: Metadata | MetadataV2 | MetadataV3, genesis: boolean, binding?: BoundTable, v3 = false): number {
   if (genesis) {
     if (records.length !== 1 || metadata.epoch !== 1 || metadata.state.length || metadata.result.length) corrupt();
     return metadata.epoch;
@@ -214,12 +229,26 @@ function auditGraph(records: readonly DomainRecord[], metadata: Metadata | Metad
       const session = decodeSessionControl(record);
       if (sessions.has(session.sessionDigest) || sessions.size >= MAX_SESSION_CORRELATIONS) corrupt();
       sessions.set(session.sessionDigest, session);
+    } else if (record.value.type === 'control' && binding && v3 && id.startsWith('control_lease_expiry:')) {
+      // Automatic expiry is its own evidence, never a fabricated operator statement.
+      let auditRow: ReturnType<typeof decodeExpiryAudit>;
+      try { auditRow = decodeExpiryAudit(record.value.payload); } catch { return corrupt(); }
+      if (id !== expiryAuditId(auditRow.invocation) || auditRow.oldEpoch >= metadata.epoch ||
+          (exit?.kind === 'clean-release' && auditRow.oldEpoch === exit.oldEpoch) ||
+          (exit?.kind === 'operator-recovery' && auditRow.oldEpoch === exit.oldEpoch)) corrupt();
+      if (exit?.kind === 'lease-expiry' && auditRow.oldEpoch === exit.oldEpoch) {
+        if (auditRow.invocation !== exit.auditId || auditRow.invocation !== exit.invocation || auditRow.oldOwner !== exit.oldOwner ||
+            auditRow.originalMDigest !== exit.originalMDigest || record.value.digest !== exit.auditDigest ||
+            auditRow.observedAt !== exit.observedAt || !encodeLease(auditRow.lease).equals(encodeLease(exit.lease))) corrupt();
+        matchingAudit++;
+      }
     } else if (record.value.type === 'control' && binding) {
       // Closed operator audit rows never masquerade as operations or aliases.
       let auditRow: ReturnType<typeof decodeRecoveryAudit>;
       try { auditRow = decodeRecoveryAudit(record.value.payload); } catch { return corrupt(); }
       if (id !== `control_recovery:${auditRow.invocation}` || auditRow.oldEpoch >= metadata.epoch ||
-          (exit?.kind === 'clean-release' && auditRow.oldEpoch === exit.oldEpoch)) corrupt();
+          (exit?.kind === 'clean-release' && auditRow.oldEpoch === exit.oldEpoch) ||
+          (v3 && exit?.kind === 'lease-expiry' && auditRow.oldEpoch === exit.oldEpoch)) corrupt();
       if (exit?.kind === 'operator-recovery' && auditRow.oldEpoch === exit.oldEpoch) {
         if (!exit.auditId || !exit.auditDigest || auditRow.invocation !== exit.auditId ||
             auditRow.invocation !== exit.invocation || auditRow.oldOwner !== exit.oldOwner ||
@@ -229,7 +258,7 @@ function auditGraph(records: readonly DomainRecord[], metadata: Metadata | Metad
       }
     } else corrupt();
   }
-  if (exit?.kind === 'operator-recovery' && (exit.auditId || exit.auditDigest) && matchingAudit !== 1) corrupt();
+  if (((exit?.kind === 'operator-recovery' && (exit.auditId || exit.auditDigest)) || (v3 && exit?.kind === 'lease-expiry')) && matchingAudit !== 1) corrupt();
   for (const id of operations.keys()) if (aliases.get(id) !== id) corrupt();
   for (const id of aliases.values()) if (!operations.has(id)) corrupt();
   auditResult(result, operations, aliases, sessions, metadata.epoch);

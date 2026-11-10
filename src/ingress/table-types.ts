@@ -64,12 +64,12 @@ export type OrdinaryInboxResult =
   )) |
   (OrdinaryResultBase & { operation: 'handoff-finalize'; basis: InboxResultBasis; clock: null;
     decision: { armId: string; sampling: 'none'; domainEligible: null } });
-export interface InboxRecoveryResult {
-  schema: 1; operation: 'operator-recovery'; invocation: string; oldEpoch: number; originalMDigest: string;
+export type InboxRecoveryResult = ({ operation: 'operator-recovery' } | { operation: 'lease-expiry' }) & {
+  schema: 1; invocation: string; oldEpoch: number; originalMDigest: string;
   disposition: { kind: 'inbox-unarmed' } |
     { kind: 'inbox-clock-uncertain'; armId: string; generation: number; watermark: number };
   postStateDigest: string; postDataDigest: string; dataRowCount: number;
-}
+};
 export type InboxResult = OrdinaryInboxResult | InboxRecoveryResult;
 /** Body-free projection, not a forwarding grant. Only old forwarding loses its effective ID. */
 export interface EffectiveEventState {
