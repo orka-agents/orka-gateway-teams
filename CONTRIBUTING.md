@@ -72,7 +72,8 @@ armed inbox: unknown/possible arms or clock debt require invalidation before ker
 close. Closing may publish only private cleanup progress, never a grant or Ready.
 V3 tests must cover both domains' authority loss before open/listen, post-token
 and native Orka handoff, held actual work, and real SIGKILL/SIGSTOP/SIGCONT with
-retained Table maps. Use trusted library clocks/barriers only, never environment
+retained Table maps. These native process tests require Linux: their pause barriers
+use SIGSTOP/SIGCONT and inspect `/proc/<pid>/status`. Use trusted library clocks/barriers only, never environment
 clock or production-endpoint overrides. No successor resends uncertain work.
 Keep SQLite differential traces separate from the documented armed-crash adaptation;
 small native fixtures and capacity arithmetic are not 100000-record/RSS qualification.

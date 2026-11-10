@@ -275,13 +275,15 @@ or default-credential support is implied.
 
 ## Operational and verification boundary
 
-Support **one writer with controlled clean handover** or explicit, audited
-operator reclaim after verified termination. Occupied ownership, crashes,
-failed audits and unclean releases do not trigger automatic takeover. Replica
-count or ACA single-revision mode is not fencing; rolling revisions can overlap.
-No scale-out, rolling-handover automation, lease, autonomous crash recovery,
-force/reset or migration is provided. The checked-in Kubernetes package remains SQLite/client-secret; this
-feature does not deploy or provision ACA or alter Kubernetes assets. The separate
+V2 supports **one writer with controlled clean handover** or explicit, audited
+operator reclaim after verified termination; its ownership does not expire.
+Explicit V3 `serve` renews leases and can audit/clear safely expired ownership
+before acquisition. Neither a failed audit nor an unclean release is, by itself,
+authority to take over. Live ACA clock/stall/crash qualification remains separate.
+Replica count or ACA single-revision mode is not fencing; rolling revisions can
+overlap. No scale-out, rolling-handover automation, force/reset or automatic
+migration is provided. The checked-in Kubernetes package remains SQLite/client-secret;
+this feature does not deploy or provision ACA or alter Kubernetes assets. The separate
 [ACA profile renderer](aca-deployment.md) prepares operator-owned templates only.
 
 The default offline test compiles the real source entrypoint into private output
