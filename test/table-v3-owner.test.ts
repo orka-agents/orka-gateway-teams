@@ -177,6 +177,30 @@ test('V3 confirmed release retires its lease before transport drain crosses expi
   await k.close(); assert.equal(s.rows.get('M')?.Owner, '');
   assert.equal(k.leaseAuthority().lost.aborted, false); assert.equal(clock.pendingTimers, 0);
 });
+test('V3 premature owned audit remains unready and does not poison an unowned handle', async t => {
+  const s = await tableService(t, 'delivery', 3); const clock = new TestClock();
+  const k = create(tableBinding, { ...s.dependencies, leaseClock: clock });
+  t.after(() => k.close().catch(() => {}));
+  const visitor = { passes: 1 as const, record(): undefined {}, endPass(): undefined {}, finalize(): undefined {} };
+  const budget = { maxPages: 10, maxPageBytes: 1024 * 1024, maxDurationMs: 10000, maxTrackingBytes: 1024 * 1024 };
+  await assert.rejects(k.auditOwned(visitor, budget), code('unready'));
+  assert.equal(k.leaseAuthority().lost.aborted, false); await k.initialize();
+  await assert.rejects(k.auditOwned(visitor, budget), code('unready'));
+  assert.equal(k.leaseAuthority().lost.aborted, false); await k.acquire(); await k.scan(); await k.close();
+  assert.equal(s.rows.get('M')?.Owner, '');
+});
+for (const field of ['etag', 'digest'] as const) test(`V3 read crossing renewal returns caller-owned ${field}, not the private fence`, async t => {
+  const { s, k, clock } = await setup(t); let advanced = false;
+  s.controls.hook = e => {
+    e.reply(); if (!advanced && e.path.includes("RowKey='M'")) { advanced = true; clock.advance(40000, false); }
+  };
+  const record = await k.read('M'); assert.equal(savedLease(s.rows.get('M')).sequence, 2);
+  assert.ok(record); assert.equal(record.value.kind, 'metadata');
+  if (field === 'etag') record.etag = 'W/"caller-owned"';
+  else record.value.digest = 'f'.repeat(64);
+  delete s.controls.hook; assert.equal(await k.leaseAuthority().revalidate(), true);
+  assert.equal(k.leaseAuthority().lost.aborted, false); await k.close(); assert.equal(s.rows.get('M')?.Owner, '');
+});
 test('V3 normal mutation cannot append reserved recovery, expiry or upgrade evidence', async t => {
   const { s, k } = await setup(t); await k.scan();
   for (const prefix of ['control_recovery:', 'control_lease_expiry:', 'control_format_upgrade:']) {

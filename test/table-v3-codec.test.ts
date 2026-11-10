@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { bindTable, decodeRecord, decodeRecordV2 } from '../src/storage/table/codec.js';
 import { readRecord } from '../src/storage/table/format.js';
+import { snapshotRecord } from '../src/storage/table/audit-traversal.js';
 import { stamp, tableBinding } from './support/table-service.js';
 import { changedM3, lease, wireM3 } from './support/table-v3.js';
 
@@ -25,6 +26,14 @@ test('V3 lease policy, canonical bytes and owner/lease relation are validated in
   }
   const raw = changedM3(wireM3(owner, 1), { Lease: Buffer.from(JSON.stringify(lease(), null, 2)).toString('base64') });
   assert.throws(() => decode(raw));
+});
+test('V3 metadata snapshots detach the nested lease from their source record', () => {
+  const original = decode(stamp(wireM3(owner, 1), 1));
+  const copy = snapshotRecord(original) as typeof original;
+  assert.ok(original.value.kind === 'metadata' && original.value.lease);
+  assert.ok(copy.value.kind === 'metadata' && copy.value.lease);
+  const expiry = original.value.lease.expiresAt; copy.value.lease.expiresAt++;
+  assert.equal(original.value.lease.expiresAt, expiry);
 });
 test('V3 digest binds lease and domain bytes and rejects unknown wire fields/types', () => {
   const raw = stamp(wireM3(owner, 1), 1);

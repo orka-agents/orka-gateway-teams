@@ -134,7 +134,7 @@ class TableKernel<F extends MetadataFormat> {
       const current = this.ownership === 'owned' && !this.invalidated && this.lifecycle !== 'poisoned' ? await this.authority(context) : undefined;
       const record = row === 'M' && current ? current : await this.readRecord(row, context);
       if (current && row !== 'M') await this.authority(context);
-      return record as StoredFor<F> | undefined;
+      return (this.lease ? snapshotRecord(record) : record) as StoredFor<F> | undefined;
     });
   }
   scan(options?: CallOptions): Promise<readonly StoredFor<F>[]> {
@@ -325,7 +325,7 @@ class TableKernel<F extends MetadataFormat> {
   }
   private guardAuditCallback(): void { if (this.auditCallback) this.poison(); }
   private checkAudit(job: AuditJob): void {
-    if (this.lease && !this.lease.allowed()) this.invalidate();
+    if (this.lease && this.ownership === 'owned' && !this.lease.allowed()) this.invalidate();
     if (this.invalidated || this.lifecycle === 'poisoned') this.cancel(job, new TableError('unresolved'));
     else if (this.closing || !eligible(job.context)) this.cancel(job, new TableError('incomplete'));
     if (job.failure) throw job.failure;
