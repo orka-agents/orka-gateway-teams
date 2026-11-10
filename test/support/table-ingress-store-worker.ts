@@ -7,10 +7,11 @@ import { TableError } from '../../src/storage/table/types.js';
 import { ingressBinding } from './table-service.js';
 import { pair } from './table-ingress-audit.js';
 import { options } from './table-ingress-store.js';
-import { processClock } from './table-process-clock.js';
-interface Config { format?: 3; clockFile?: string; fresh?: boolean; tableUrl: string; tableCA: string; providerUrl: string; providerCA: string; mode: 'grant' | 'relay' | 'probe' | 'held-relay' }
+import { processClock, pauseAfterPost } from './table-process-clock.js';
+interface Config { format?: 3; clockFile?: string; pauseAtPost?: boolean; fresh?: boolean; tableUrl: string; tableCA: string; providerUrl: string; providerCA: string; mode: 'grant' | 'relay' | 'probe' | 'held-relay' }
 process.once('message', (config: Config) => { void run(config); });
 async function run(config: Config): Promise<void> {
+  if (config.pauseAtPost) pauseAfterPost(config.providerUrl);
   const j = (config.format === 3 ? createTableIngressStoreV3 : createTableIngressStore)(ingressBinding, {
     ...(config.clockFile ? { leaseClock: processClock(config.clockFile) } : {}), token: async () => 'synthetic.private.table.canary',
     request: ((url: URL, options: https.RequestOptions, callback: (response: IncomingMessage) => void) =>

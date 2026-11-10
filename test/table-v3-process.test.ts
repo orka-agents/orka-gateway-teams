@@ -43,7 +43,7 @@ for (const domain of ['ingress', 'delivery'] as const) for (const phase of ['cla
       else res.end('{"id":"process-receipt"}');
     });
     const config = { format: 3, clockFile, tableUrl: s.fixture.baseUrl, tableCA: s.fixture.ca.toString(), providerUrl: remote.baseUrl, providerCA: remote.ca.toString() };
-    const old = worker(t, domain, { ...config, mode: phase === 'claimed' ? domain === 'ingress' ? 'held-relay' : 'held-deliver' : domain === 'ingress' ? 'relay' : 'deliver' });
+    const old = worker(t, domain, { ...config, pauseAtPost: phase === 'posting', mode: phase === 'claimed' ? domain === 'ingress' ? 'held-relay' : 'held-deliver' : domain === 'ingress' ? 'relay' : 'deliver' });
     if (phase === 'posting') await posted.promise;
     else assert.equal((await old.next()).kind, phase === 'claimed' ? domain === 'ingress' ? 'armed' : 'claimed' : domain === 'ingress' ? 'ready' : 'result');
     const oldOwner = s.rows.get('M')!.Owner;

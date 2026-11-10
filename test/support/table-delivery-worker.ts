@@ -6,10 +6,11 @@ import { fixtureProviderSender, providerServiceUrl } from './table-delivery-prov
 import { createDeliveryDispatcher } from '../../src/outbound/dispatcher.js';
 import { finalDelivery } from '../fixtures/outgoing.js';
 
-import { processClock } from './table-process-clock.js';
-interface Config { format: 1 | 2 | 3; clockFile?: string; fresh?: boolean; tableUrl: string; tableCA: string; providerUrl: string; providerCA: string; mode: 'claim' | 'deliver' | 'replay' | 'held-deliver' }
+import { processClock, pauseAfterPost } from './table-process-clock.js';
+interface Config { format: 1 | 2 | 3; clockFile?: string; pauseAtPost?: boolean; fresh?: boolean; tableUrl: string; tableCA: string; providerUrl: string; providerCA: string; mode: 'claim' | 'deliver' | 'replay' | 'held-deliver' }
 process.once('message', (input: Config) => { void run(input); });
 async function run(config: Config) {
+  if (config.pauseAtPost) pauseAfterPost(config.providerUrl);
   const scope = { appId: 'App', tenantId: 'Tenant' }; const request = { ...finalDelivery, accountId: 'Tenant', ...(config.fresh ? { idempotencyId: 'fresh-operation', deliveryId: 'fresh-delivery' } : {}) };
   const create = config.format === 3 ? createTableDeliveryJournalV3 : config.format === 2 ? createTableDeliveryJournalV2 : createTableDeliveryJournal;
   const journal = create({ account: 'Example123', table: 'Journal', storeId: 'stable', kind: 'delivery', scope }, {
