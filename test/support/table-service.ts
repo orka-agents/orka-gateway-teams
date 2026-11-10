@@ -105,7 +105,7 @@ export async function tableService(t: FixtureHooks, kind: 'delivery' | 'ingress'
     [scope.appId, scope.tenantId] : [scope.appId, scope.tenantId, scope.orkaBaseUrl, scope.gatewayNamespace, scope.gatewayName]]));
   const rows = new Map<string, Record<string, unknown>>(); let version = 0;
   const stats = { requests: 0, writes: 0, reads: 0, pages: 0, tokens: 0, requestCloses: 0, socketCloses: 0, sockets: 0, physicalSocketCloses: 0, bytes: 0, violation: false, lastActions: 0, conditionFailure: '' };
-  const controls: { hook?: (event: ServiceRequest) => Promise<void> | void; request?: TableDependencies['request']; missingCode?: 'ResourceNotFound' } = {};
+  const controls: { hook?: (event: ServiceRequest) => Promise<void> | void; request?: TableDependencies['request']; missingCode?: 'ResourceNotFound'; allowUpgrade?: boolean } = {};
   function error(res: ServerResponse, status: number, code: string) {
     res.writeHead(status, { 'content-type': 'application/json', 'x-ms-error-code': code }); res.end(JSON.stringify({ 'odata.error': { code, message: { lang: 'en-US', value: 'synthetic service error' } } }));
   }
@@ -129,7 +129,7 @@ export async function tableService(t: FixtureHooks, kind: 'delivery' | 'ingress'
           }
         } else actions.push({ method: req.method!, ...(req.headers['if-match'] ? { etag: String(req.headers['if-match']) } : {}), entity: JSON.parse(body.toString()) });
         stats.lastActions = actions.length;
-        if (!actions.length || actions.length > 100 || actions.filter(a => a.entity.RowKey === 'M').length !== 1 || !actions.every(a => checkEntity(a.entity, partition, expectedBinding, metadataFormat))) stats.violation = true;
+        if (!actions.length || actions.length > 100 || actions.filter(a => a.entity.RowKey === 'M').length !== 1 || !actions.every(a => checkEntity(a.entity, partition, expectedBinding, controls.allowUpgrade && a.entity.RowKey === 'M' && (a.entity.V === 2 || a.entity.V === 3) ? a.entity.V : metadataFormat))) stats.violation = true;
         if (['recover', 'lease-expiry'].includes(String(actions[0]?.entity.Operation))) {
           const m = actions[0]!.entity; const receipt = JSON.parse(Buffer.from(String(m.Exit), 'base64').toString());
           const prefix = m.Operation === 'recover' ? 'control_recovery:' : 'control_lease_expiry:';

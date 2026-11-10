@@ -292,7 +292,7 @@ function decodeModernObject(binding: BoundTable, input: unknown, row: string | u
     const initId = uuid(v.InitId); const initDigest = hex(v.InitDigest);
     if (!binary(v.Binding, 16384).equals(binding.bytes) || initializationDigestV2(binding, initId) !== initDigest ||
         typeof v.Epoch !== 'string' || !/^(?:0|[1-9]\d{0,15})$/u.test(v.Epoch) ||
-        !['initialize', 'acquire', 'mutate', 'barrier', 'release', 'recover', ...(v3 ? ['lease-expiry'] : [])].includes(v.Operation as string)) fail();
+        !['initialize', 'acquire', 'mutate', 'barrier', 'release', 'recover', ...(v3 ? ['lease-expiry', 'format-upgrade'] : [])].includes(v.Operation as string)) fail();
     const rawExit = binary(v.Exit, 1024);
     const exitValue = v3 && rawExit.length ? rawJSON(rawExit) as ExitReceipt : decodeExit(rawExit);
     if (!encodeExit(exitValue).equals(rawExit)) fail();
@@ -301,14 +301,14 @@ function decodeModernObject(binding: BoundTable, input: unknown, row: string | u
       result: binary(v.Result, 65536), exit: exitValue });
     const exit = result.exit;
     if (result.epoch === 0) {
-      if (result.owner || exit || result.state.length || result.result.length || !['initialize', 'barrier'].includes(result.operation)) fail();
+      if (result.owner || exit || result.state.length || result.result.length || !['initialize', 'barrier', ...(v3 ? ['format-upgrade'] : [])].includes(result.operation)) fail();
     } else if (result.owner) {
       if (!['acquire', 'mutate', 'barrier'].includes(result.operation) ||
           (result.epoch === 1 ? exit !== undefined : !exit || exit.oldEpoch !== result.epoch - 1 || exit.oldOwner === result.owner)) fail();
       if (result.operation === 'acquire' && result.epoch === 1 && (result.state.length || result.result.length)) fail();
     } else {
-      if (!exit || exit.oldEpoch !== result.epoch || !['release', 'recover', 'barrier', ...(v3 ? ['lease-expiry'] : [])].includes(result.operation)) fail();
-      if (result.operation !== 'barrier' && (exit.kind !== (result.operation === 'release' ? 'clean-release' : result.operation === 'lease-expiry' ? 'lease-expiry' : 'operator-recovery') ||
+      if (!exit || exit.oldEpoch !== result.epoch || !['release', 'recover', 'barrier', ...(v3 ? ['lease-expiry', 'format-upgrade'] : [])].includes(result.operation)) fail();
+      if (result.operation !== 'barrier' && result.operation !== 'format-upgrade' && (exit.kind !== (result.operation === 'release' ? 'clean-release' : result.operation === 'lease-expiry' ? 'lease-expiry' : 'operator-recovery') ||
           exit.invocation !== result.invocation || exit.planDigest !== result.plan)) fail();
     }
     if (result.operation === 'initialize' && (result.invocation !== result.initId || result.plan !== digest(['initialize', result.initId]))) fail();

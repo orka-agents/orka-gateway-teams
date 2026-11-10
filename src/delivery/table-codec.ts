@@ -1,4 +1,5 @@
 import { decodeRecoveryAudit, digest, object, rawJSON } from '../storage/table/codec.js';
+import { decodeUpgradeAudit, isUpgradeAudit, upgradeEvidence } from '../storage/table/upgrade-codec.js';
 import { decodeExpiryAudit, encodeLease, expiryAuditId } from '../storage/table/codec-v3.js';
 import type { BoundTable, ForeignOwnerFenceV2, Metadata, MetadataV2, MetadataV3, StoredRecord, StoredRecordV2, StoredRecordV3 } from '../storage/table/types.js';
 import { identity, validateClaim, validateOutcome } from './identity.js';
@@ -179,6 +180,7 @@ function auditTransitionCommitment(binding: BoundTable, records: readonly Stored
   let previous: string | undefined;
   for (const record of records) {
     if (record.row === 'M') continue;
+    if (isUpgradeAudit(record) && decodeUpgradeAudit((record.value as import('../storage/table/types.js').DataRecord).payload).epoch >= exit.oldEpoch) continue;
     if (record.value.kind !== 'data' || (previous !== undefined && record.row <= previous)) corrupt();
     h = digest(['orka-recovery-row-v2', h, record.row, record.value.digest]); previous = record.row; count++;
     if (exit.auditId && record.value.type === 'control' && record.value.id === (expiry ? expiryAuditId(exit.auditId) : `control_recovery:${exit.auditId}`)) {
@@ -218,9 +220,11 @@ function auditGraph(records: readonly DomainRecord[], metadata: Metadata | Metad
   const sessions = new Map<string, SessionControl>();
   const exit = 'exit' in metadata ? metadata.exit : undefined;
   let matchingAudit = 0;
+  const upgrade = binding ? upgradeEvidence(binding, metadata as MetadataV2) : undefined;
   for (const record of records) {
     if (record.row === 'M') continue;
     if (record.value.kind !== 'data') corrupt(); const id = record.value.id;
+    if (upgrade?.record(record as StoredRecordV2)) continue;
     if (record.value.type === 'delivery') {
       if (operations.has(id)) corrupt(); operations.set(id, decodeOperation(record, metadata.epoch));
     } else if (record.value.type === 'alias') {
@@ -258,6 +262,7 @@ function auditGraph(records: readonly DomainRecord[], metadata: Metadata | Metad
       }
     } else corrupt();
   }
+  upgrade?.finish();
   if (((exit?.kind === 'operator-recovery' && (exit.auditId || exit.auditDigest)) || (v3 && exit?.kind === 'lease-expiry')) && matchingAudit !== 1) corrupt();
   for (const id of operations.keys()) if (aliases.get(id) !== id) corrupt();
   for (const id of aliases.values()) if (!operations.has(id)) corrupt();

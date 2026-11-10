@@ -1,3 +1,4 @@
+import { decodeUpgradeAudit, isUpgradeAudit, upgradeEvidence } from '../storage/table/upgrade-codec.js';
 import type { TableKernelV2, TableKernelV3 } from '../storage/table/index.js';
 import { decodeExpiryAudit, domainFingerprint, expiryAuditId } from '../storage/table/codec-v3.js';
 import { TableError } from '../storage/table/types.js';
@@ -66,20 +67,29 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
   const scope = snapshot.scope;
   let meta: IndexWorkingCredit | undefined; let scratch: IndexWorkingCredit | undefined;
   let header: InboxAuditHeader | undefined; let bound: BoundTable | undefined;
+  let upgrade: ReturnType<typeof upgradeEvidence> | undefined;
   let fold = ''; let count = 0; let referencedAudit = 0; let referencedDispositionDigest: string | undefined;
   const versions = ['', '']; const versionCounts = [0, 0];
   const visitor: ForeignInspectionVisitorV2 = { passes: 2, record(this: void, pass: 1 | 2, record: Readonly<StoredRecordV2>): undefined {
       if (record.value.kind === 'data') {
         if (!header) throw new TableError('corrupt');
         const d = record.value; const key = { type: d.type, id: d.id };
-        if (pass === 1) { fold = digest(['orka-recovery-row-v2', fold, record.row, d.digest]); count++; }
+        const formatUpgrade = isUpgradeAudit(record);
+        if (pass === 1) {
+          upgrade!.record(record);
+          const saved = decodeResult(header.metadata.result);
+          const omit = formatUpgrade && (saved.operation === 'initialize' ||
+            ((saved.operation === 'operator-recovery' || saved.operation === 'lease-expiry') && saved.oldEpoch <= decodeUpgradeAudit(d.payload).epoch));
+          if (!omit) { fold = digest(['orka-recovery-row-v2', fold, record.row, d.digest]); count++; }
+        }
         // Index slots prove graph versions; this ordered proof also covers the
         // append-only audit subtype without retaining an unbounded audit index.
         versions[pass - 1] = digest(['orka-inbox-audit-version-v1', versions[pass - 1], record.row,
           record.etag, record.timestamp, d.digest]); versionCounts[pass - 1]!++;
         const version = { etag: record.etag, digest: d.digest, timestamp: record.timestamp };
         const transitionAudit = d.type === 'control' && (d.id.startsWith('control_recovery:') || d.id.startsWith('control_lease_expiry:'));
-        if (pass === 2 && !transitionAudit) index.seePass2(key, version);
+        if (pass === 2 && !transitionAudit && !formatUpgrade) index.seePass2(key, version);
+        if (formatUpgrade) return;
         if (d.type === 'event') {
           const { body, ...event } = decodeEvent(key, d.payload);
           if (pass === 1) index.addEvent({ event: { ...event, externalEventId: d.id },
@@ -130,6 +140,7 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
         bound = bindTable(snapshot);
         fold = digest(['orka-recovery-data-v2', bound.bytes.toString('base64')]);
         const m = record.value;
+        upgrade = upgradeEvidence(bound, m);
         if (initializationDigestV2(bound, m.initId) !== m.initDigest || !m.state.length || !m.result.length ||
             m.state.length > 4096 || m.result.length > 4096) throw new TableError('corrupt');
         const state = Buffer.alloc(m.state.length); state.set(m.state);
@@ -144,6 +155,7 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
       // No second-pass M copy. Kernel proves both snapshots against its same fence.
     }, endPass(this: void, pass: 1 | 2): undefined { index.endPass(pass); }, finalize(this: void): undefined {
       if (versions[0] !== versions[1] || versionCounts[0] !== versionCounts[1]) throw new TableError('corrupt');
+      upgrade!.finish();
       const x = header!.metadata.exit;
       if (x && x.kind !== 'clean-release' && x.auditId !== undefined && (x.auditId !== x.invocation || referencedAudit !== 1)) throw new TableError('corrupt');
       const h = header!; index.finishBuild(h.state);

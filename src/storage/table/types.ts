@@ -35,7 +35,7 @@ export interface LeaseExpiryAudit {
 }
 export type ExitReceipt = CleanReleaseExit | OperatorRecoveryExit | LeaseExpiryExit;
 export interface MetadataV2 extends Omit<Metadata, 'operation' | 'release'> {
-  operation: Metadata['operation'] | 'recover' | 'lease-expiry'; exit: ExitReceipt | undefined;
+  operation: Metadata['operation'] | 'recover' | 'lease-expiry' | 'format-upgrade'; exit: ExitReceipt | undefined;
 }
 export interface LeaseValue {
   schema: 1; durationMs: 120000; skewMs: 5000; handoffMs: 1000;

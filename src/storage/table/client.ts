@@ -8,7 +8,8 @@ import { createHttpHeaders, defaultRetryPolicy, bearerTokenAuthenticationPolicyN
   logPolicyName, proxyPolicyName, redirectPolicyName, tracingPolicyName } from '@azure/core-rest-pipeline';
 import type { PipelineRequest, PipelineResponse } from '@azure/core-rest-pipeline';
 import { tlsVerificationEnabled } from '../../ingress/config.js';
-import { data, dataRow, decodeRecoveryAudit, encodeRecord, etag, fail, metadataV2, object, rawJSON, recoveryAuditId } from './codec.js';
+import { data, dataRow, decodeObjectV2, decodeRecoveryAudit, encodeRecord, encodeRecordV2, etag, fail, metadataV2, object, rawJSON, recoveryAuditId } from './codec.js';
+import { decodeUpgradeAudit, sameUpgradeDomain, upgradeAuditId, upgradePlan } from './upgrade-codec.js';
 import { decodeExpiryAudit, encodeLease, expiryAuditId, metadataV3 } from './codec-v3.js';
 import type { MetadataV3, StoredRecordV3 } from './types.js';
 import { MAX_RESPONSE_BYTES, MAX_WIRE_BYTES, TableError } from './types.js';
@@ -49,7 +50,9 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
     const promise = Promise.resolve().then(run).catch((e: unknown) => { throw e instanceof TableError ? e : unavailable(); });
     this.work.add(promise); void promise.then(() => this.work.delete(promise), () => this.work.delete(promise)); return promise;
   }
-  read(row: string, context: WorkContext): Promise<StoredFor<F> | undefined> {
+  read(row: string, context: WorkContext): Promise<StoredFor<F> | undefined> { return this.readRecord(row, context); }
+  protected readUpgrade(context: WorkContext): Promise<StoredFor<F> | undefined> { return this.readRecord('M', context, true); }
+  private readRecord(row: string, context: WorkContext, upgrade = false): Promise<StoredFor<F> | undefined> {
     return this.track(async () => {
       if (row !== 'M' && !/^(event|route|delivery|alias|control)_[A-Za-z0-9_-]{1,342}$/u.test(row)) fail();
       let record: StoredFor<F> | undefined; let query = false;
@@ -60,7 +63,8 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
           if (code === 'ResourceNotFound') { query = true; return; }
         }
         if (response.status !== 200) throw unavailable();
-        record = readRecord(this.format, this.binding, response.body, row, header(response.headers.etag));
+        const format = upgrade && object(rawJSON(response.body)).V === 2 ? 2 : this.format;
+        record = readRecord(format, this.binding, response.body, row, header(response.headers.etag)) as StoredFor<F>;
       });
       await this.sdkWork.run(work, () => sdk.getEntity(this.binding.partition, row));
       if (!query) return record;
@@ -70,7 +74,9 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
       let received = false; let corrupt = false;
       const { sdk: exact, work: exactWork } = this.sdk({ kind: 'point-query', row }, context, response => {
         if (response.status !== 200) throw unavailable();
-        const records = readPage(this.format, this.binding, response.body);
+        const values = upgrade ? object(rawJSON(response.body)).value : undefined;
+        const format = Array.isArray(values) && values[0] && object(values[0]).V === 2 ? 2 : this.format;
+        const records = readPage(format, this.binding, response.body) as StoredFor<F>[];
         if (records.length > 1 || (records[0] && records[0].row !== row) ||
             response.headers['x-ms-continuation-nextpartitionkey'] !== undefined ||
             response.headers['x-ms-continuation-nextrowkey'] !== undefined) throw new TableError('corrupt');
@@ -179,12 +185,38 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
         [{ kind: 'create', key: { type: audit.type, id: audit.id }, payload: audit.payload }, ...(seal ? [seal] : [])], context, true);
     } catch { return Promise.reject(new TableError('invalid-input')); }
   }
-  #transaction(m: MetadataFor<F>, originalETag: string | undefined, actions: readonly DataAction[], context: WorkContext, recover: boolean): Promise<void> {
+  protected checkedUpgradeWrite(original: StoredRecordV2, m: MetadataV3, audit: DataRecord, context: WorkContext): Promise<void> {
+    try {
+      const p = original.value; const a = decodeUpgradeAudit(audit.payload);
+      if (original.row !== 'M' || p.kind !== 'metadata' || 'lease' in p) fail();
+      // Reuse the closed old-format decoder, not digest validity alone. SDK typed
+      // values are projected into a synthetic FULLmetadata envelope without I/O.
+      const raw: Record<string, unknown> = { Timestamp: original.timestamp, 'Timestamp@odata.type': 'Edm.DateTime', 'odata.etag': original.etag };
+      for (const [key, value] of Object.entries(encodeRecordV2(this.binding, p))) {
+        const name = key === 'partitionKey' ? 'PartitionKey' : key === 'rowKey' ? 'RowKey' : key;
+        if (value && typeof value === 'object' && 'type' in value && 'value' in value) {
+          raw[name] = value.value; raw[`${name}@odata.type`] = `Edm.${value.type}`;
+        } else raw[name] = value;
+      }
+      decodeObjectV2(this.binding, raw, 'M', original.etag);
+      if (this.format !== 3 || original.row !== 'M' || p.kind !== 'metadata' || 'lease' in p || p.owner ||
+          metadataV2(this.binding, p).digest !== p.digest || !sameUpgradeDomain(p, m) || m.owner || m.lease !== undefined ||
+          m.operation !== 'format-upgrade' || m.invocation !== a.invocation || m.plan !== upgradePlan(a, audit.digest) ||
+          metadataV3(this.binding, m).digest !== m.digest || a.originalMDigest !== p.digest || a.epoch !== p.epoch ||
+          a.previousOperation !== p.operation || a.previousInvocation !== p.invocation || a.previousPlan !== p.plan ||
+          audit.type !== 'control' || audit.id !== upgradeAuditId(m.invocation) ||
+          data(this.binding, { type: audit.type, id: audit.id }, audit.payload).digest !== audit.digest) fail();
+      etag(original.etag);
+      return this.#transaction(m as MetadataFor<F>, original.etag,
+        [{ kind: 'create', key: { type: audit.type, id: audit.id }, payload: audit.payload }], context, 'upgrade');
+    } catch { return Promise.reject(new TableError('invalid-input')); }
+  }
+  #transaction(m: MetadataFor<F>, originalETag: string | undefined, actions: readonly DataAction[], context: WorkContext, recover: boolean | 'upgrade'): Promise<void> {
     // Inputs here are kernel-owned; copy actions and validate their closed shapes before any SDK/auth work.
     let transaction: TransactionAction[];
     try {
       // Recovery-shaped metadata is readable, not writable through this normal-owner transport.
-      if (this.format !== 1 && (recover ? !['recover', ...(this.format === 3 ? ['lease-expiry'] : [])].includes(m.operation) :
+      if (this.format !== 1 && (recover === 'upgrade' ? this.format !== 3 || m.operation !== 'format-upgrade' : recover ? !['recover', ...(this.format === 3 ? ['lease-expiry'] : [])].includes(m.operation) :
           !['initialize', 'acquire', 'mutate', 'barrier', 'release'].includes(m.operation))) fail();
       if (!Array.isArray(actions) || actions.length > 99 || (originalETag === undefined && actions.length)) fail();
       if (originalETag !== undefined) etag(originalETag);
@@ -377,6 +409,15 @@ export class RecoveryTableClient extends OwnedTableClient<2> {
 
   writeRecover(original: StoredRecordV2, m: MetadataV2, audit: DataRecord, seal: DataAction | undefined, context: WorkContext): Promise<void> {
     return this.checkedRecoveryWrite(original, m, audit, seal, context);
+  }
+}
+
+/** Cross-format reads are confined to upgrade reconciliation; ordinary readers stay closed. */
+export class UpgradeTableClient extends OwnedTableClient<3> {
+  constructor(binding: BoundTable, dependencies: TableDependencies) { super(binding, dependencies, 3); }
+  readMetadata(context: WorkContext) { return this.readUpgrade(context); }
+  writeUpgrade(original: StoredRecordV2, m: MetadataV3, audit: DataRecord, context: WorkContext) {
+    return this.checkedUpgradeWrite(original, m, audit, context);
   }
 }
 
