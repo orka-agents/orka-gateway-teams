@@ -51,12 +51,13 @@ export function wireM(owner = '', epoch = 0): Record<string, unknown> {
 export function mDigest(m: Record<string, unknown>): string {
   return hash(['orka-m-v1', m.Binding, m.InitId, m.InitDigest, m.Owner, Number(m.Epoch), m.Invocation, m.Operation, m.Plan, m.State, m.Result, m.Release]);
 }
-function checkEntity(e: Record<string, unknown>, expectedPartition: string, expectedBinding: Buffer, metadataFormat: 1 | 2): boolean {
+function checkEntity(e: Record<string, unknown>, expectedPartition: string, expectedBinding: Buffer, metadataFormat: 1 | 2 | 3): boolean {
   if (e.PartitionKey !== expectedPartition || typeof e.RowKey !== 'string' || e.V !== (e.RowKey === 'M' ? metadataFormat : 1)) return false;
   if (e.RowKey === 'M') {
     if (metadataFormat === 1) return e.Digest === mDigest(e) && e.Binding === expectedBinding.toString('base64');
     const allowed = ['PartitionKey', 'RowKey', 'V', 'Digest', 'Binding', 'Binding@odata.type', 'InitId', 'InitDigest', 'Owner', 'Epoch', 'Epoch@odata.type',
-      'Invocation', 'Operation', 'Plan', 'State', 'State@odata.type', 'Result', 'Result@odata.type', 'Exit', 'Exit@odata.type'];
+      'Invocation', 'Operation', 'Plan', 'State', 'State@odata.type', 'Result', 'Result@odata.type', 'Exit', 'Exit@odata.type',
+      ...(metadataFormat === 3 ? ['Lease', 'Lease@odata.type'] : [])];
     if (Object.keys(e).length !== allowed.length || Object.keys(e).some(k => !allowed.includes(k)) || typeof e.Exit !== 'string') return false;
     const exit = Buffer.from(e.Exit, 'base64');
     if (exit.length > 1024 || exit.toString('base64') !== e.Exit || e['Exit@odata.type'] !== 'Edm.Binary') return false;
@@ -68,9 +69,22 @@ function checkEntity(e: Record<string, unknown>, expectedPartition: string, expe
         ...(x.auditId === undefined && x.auditDigest === undefined ? {} : { auditId: x.auditId, auditDigest: x.auditDigest }) } : undefined;
       if (JSON.stringify(canonical) !== exit.toString()) return false;
     }
+    const domain = hash(['orka-m-v2', e.Binding, e.InitId, e.InitDigest, e.Owner, Number(e.Epoch), e.Invocation, e.Operation, e.Plan, e.State, e.Result, e.Exit]);
+    if (metadataFormat === 3) {
+      if (typeof e.Lease !== 'string' || e['Lease@odata.type'] !== 'Edm.Binary') return false;
+      const bytes = Buffer.from(e.Lease, 'base64');
+      if (bytes.toString('base64') !== e.Lease || Boolean(e.Owner) !== Boolean(bytes.length)) return false;
+      if (bytes.length) {
+        const l = JSON.parse(bytes.toString());
+        if (l.schema !== 1 || l.durationMs !== 120000 || l.skewMs !== 5000 || l.handoffMs !== 1000 ||
+            !Number.isSafeInteger(l.sequence) || l.sequence < 1 || !Number.isSafeInteger(l.expiresAt) || l.expiresAt < 1 ||
+            JSON.stringify({ schema: 1, durationMs: 120000, skewMs: 5000, handoffMs: 1000, sequence: l.sequence,
+              invocation: l.invocation, expiresAt: l.expiresAt }) !== bytes.toString()) return false;
+      }
+    }
     return (e.Operation !== 'recover' || (exit.length > 0 && JSON.parse(exit.toString()).auditId !== undefined)) &&
       e.Binding === expectedBinding.toString('base64') && e.InitDigest === hash(['orka-init-v2', e.Binding, e.InitId]) &&
-      e.Digest === hash(['orka-m-v2', e.Binding, e.InitId, e.InitDigest, e.Owner, Number(e.Epoch), e.Invocation, e.Operation, e.Plan, e.State, e.Result, e.Exit]);
+      e.Digest === (metadataFormat === 3 ? hash(['orka-m-v3', domain, e.Lease]) : domain);
   }
   const chunks = Array.from({ length: Number(e.Count) }, (_, i) => Buffer.from(String(e[`B${i}`]), 'base64'));
   const payload = Buffer.concat(chunks);
@@ -78,7 +92,7 @@ function checkEntity(e: Record<string, unknown>, expectedPartition: string, expe
     chunks.every((b, i) => b.length <= 65536 && b.toString('base64') === e[`B${i}`] && e[`B${i}@odata.type`] === 'Edm.Binary') &&
     e.Digest === hash(['orka-data-v1', expectedBinding.toString('base64'), e.T, e.Id, payload.toString('base64')]);
 }
-export async function tableService(t: FixtureHooks, kind: 'delivery' | 'ingress' = 'delivery', metadataFormat: 1 | 2 = 1,
+export async function tableService(t: FixtureHooks, kind: 'delivery' | 'ingress' = 'delivery', metadataFormat: 1 | 2 | 3 = 1,
   scopeOverride?: Partial<Extract<TableBinding, { kind: 'ingress' }>['scope']>, tlsFixture: typeof httpsFixture = httpsFixture) {
   const partition = kind === 'delivery' ? 'v1_delivery_c3RhYmxl' : 'v1_ingress_c3RhYmxl';
   const scope = { appId: 'App', tenantId: 'Tenant', orkaBaseUrl: 'https://orka.example.invalid/', gatewayNamespace: 'gateway', gatewayName: 'teams', ...scopeOverride };

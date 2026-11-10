@@ -8,8 +8,9 @@ body-free two-pass domain audit and durable handoff arm. The compiled CLI ships
 [explicit Table V2 runtime selection](table-runtime.md) and purpose-specific
 storage identity; SQLite remains the default. This page describes the underlying
 library APIs (including the library-only foreign-owner inspector), not provisioning
-or hosting instructions. There is no Azure provisioning, lease, automatic
-takeover, migration, deletion or pruning. An explicit audited V2 operator
+or hosting instructions. The runtime has no Azure provisioning, renewable lease,
+automatic takeover, migration, deletion or pruning. A separate library-only V3
+kernel provides renewable ownership but is not selected by any runtime or domain store. An explicit audited V2 operator
 reclaim command is described in [Table runtime](table-runtime.md#manual-owner-reclaim).
 
 ## Library contract
@@ -100,6 +101,76 @@ path; one matching row returns its raw row ETag and decoded envelope. Wrong or
 multiple rows, any continuation (including empty or row-only), malformed replies,
 `TableNotFound`, unknown or contradictory error classifications fail closed. This
 compatibility path is fixture-tested, not live Azure exact-key qualification.
+
+## Library-only V3 lease kernel
+
+`createTableKernelV3(binding, dependencies, limits?)` pins metadata format 3.
+It never adopts V1/V2 data, upgrades a store or takes over an occupied owner,
+including an expired one. The CLI, inbox and delivery journal remain unchanged;
+there is no V3 serve, upgrade or reclaim command. Do not select this foundation
+for retained production stores: domain expiry dispositions and final external
+POST fences are not integrated yet.
+
+V3 keeps V1 data envelopes and the V2 initialization identity and Exit encoding.
+M adds a canonical Binary `Lease` and an `orka-m-v3` digest over the complete V2
+domain fingerprint plus lease bytes. Owner-empty M has no lease; owned M has
+`{schema:1, durationMs:120000, skewMs:5000, handoffMs:1000, sequence, invocation,
+expiresAt}` in that property order. Epoch, sequence and Unix expiry milliseconds
+are safe integers, with positive owned epochs, sequences and expiry. Each epoch
+starts at sequence 1. Old decoders reject V3 even after clean release. No automatic
+format conversion or downgrade is provided.
+
+A confirmed acquisition starts a 120-second lease. Renewal is due 40 seconds after
+the last confirmed grant's **submission** sample, not its acknowledgment. Renewal
+conditionally replaces only M's lease, preserving owner, epoch, State, Result,
+Exit and domain operation/invocation/plan. SDK success alone grants no authority:
+exact M readback must confirm the new lease. Uncertain renewal permanently
+invalidates that handle. A late commit can postpone expiry, never revive local
+permission.
+
+`leaseAuthority()` returns synchronous `allowed()`, queued async `revalidate()`
+and a one-shot `lost` AbortSignal. It is local lease authority, not a domain-ready
+or provider-send grant. Close revokes local permission immediately; expiry,
+unavailable authority reads with a live call context, clock uncertainty,
+invalidation and unresolved writes latch loss independently of user calls.
+Refused revalidation admission and cancellation of a read do not revoke an
+otherwise bounded grant or prevent clean release; they provide no new authority. Every native write checks again
+after the storage-token await, immediately before native request creation.
+Already submitted I/O cannot be revoked remotely.
+
+For persisted expiry E, permission requires local wall time strictly below
+E−5000−1000 and monotonic time strictly below submissionMono+114000. Wall clocks
+are assumed within 5000 ms of UTC, and the final synchronous check-to-handoff
+stall within 1000 ms. Detectable wall/monotonic elapsed-time divergence greater
+than 5000 ms revokes authority; that cannot prove initial UTC accuracy. A paused
+writer checks these limits synchronously on waking, not only when timers run.
+No live Azure clock, stall or crash-recovery qualification is implied.
+
+Every renewal uses its own bounded cleanup context, including inline authority
+checks and page checkpoints. Caller cancellation does not cancel that maintenance
+write. The active FIFO job awaits actual renewal drain before releasing its slot,
+and close waits for it; legacy callers may still receive their cancellation early.
+Maintenance failures and expiry still irreversibly revoke authority. The existing
+cleanup limit is unchanged and supplies no extra lease time. Each page GET's
+request budget starts after checkpoint maintenance drains, still capped by the
+audit's original admission deadline.
+
+Renewal has a reserved maintenance turn outside user queue capacity. Owned scans
+and streaming audits renew at page boundaries inside their existing serialized
+job, even before envelope audit completion. Only a self-confirmed M lease update
+may change the exact fence during that job; all non-lease domain fields and data
+versions remain unchanged. No domain mutation interleaves. A returned scan M can
+be its already-validated original header; domain consumers must publish the
+current authoritative M after auditing. That integration is not provided here.
+V1/V2 and GET-only foreign inspection retain exact-M behavior.
+
+Existing call and cleanup limits, including 300000 ms, remain accepted. If a
+single request, token wait or reconciliation outlasts authority, the handle loses
+permission permanently while actual work drains; larger limits do not extend
+the lease. A stalled request need not finish for `lost` to signal. A lost handle
+cannot claim clean release. Tests inject only a trusted library `leaseClock`
+with wall/monotonic reads and timer scheduling; there is no clock environment
+setting or production transport override.
 
 ## Persisted envelopes and service metadata
 
@@ -202,7 +273,7 @@ Official service references:
 
 ## M authority, uncertainty and cleanup truth
 
-Ownership is nonexpiring. Every submitted mutation, acquisition, barrier, release
+V1/V2 ownership is nonexpiring. Every submitted mutation, acquisition, barrier, release
 and explicit operator reclaim conditionally replaces M using the **exact original
 ETag**, together with its data actions in one partition. Initialization is the sole create-only exception. The
 kernel allocates private invocation UUIDs; it never resubmits an original write.

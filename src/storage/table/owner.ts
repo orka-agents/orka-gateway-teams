@@ -9,6 +9,9 @@ import { auditConfig, containCallbackPromise, signalAborted, subscribeAuditAbort
 import type { AuditConfig } from './audit.js';
 import { runAuditTraversal, snapshotRecord } from './audit-traversal.js';
 import { cleanRelease, initDigest, makeMetadata, matchingCleanReceipt } from './format.js';
+import { domainFingerprint } from './codec-v3.js';
+import { LeaseController } from './lease.js';
+import type { LeaseAuthority, MetadataV3, TableLeaseDependencies } from './types.js';
 import type { AnyMetadata as Metadata, AnyStoredRecord as StoredRecord, AuditVisitorFor, MetadataFor, MetadataFormat, PlannerFor, StoredFor } from './format.js';
 
 type Lifecycle = 'unowned' | 'acquiring' | 'owned-unready' | 'envelope-audited' | 'reconciling' | 'poisoned' | 'closing' | 'closed';
@@ -31,6 +34,10 @@ export function createTableKernel(binding: TableBinding, dependencies: TableDepe
 export function createTableKernelV2(binding: TableBinding, dependencies: TableDependencies, limits: Partial<TableLimits> = {}): TableKernel<2> {
   return new TableKernel(bindTable(binding), dependencies, limits, 2);
 }
+/** Dormant lease kernel: never upgrades or takes over an occupied partition. */
+export function createTableKernelV3(binding: TableBinding, dependencies: TableLeaseDependencies, limits: Partial<TableLimits> = {}): TableKernel<3> {
+  return new TableKernel(bindTable(binding), dependencies, limits, 3);
+}
 class TableKernel<F extends MetadataFormat> {
   private lifecycle: Lifecycle = 'unowned';
   private ownership: 'none' | 'possible' | 'owned' = 'none';
@@ -48,14 +55,27 @@ class TableKernel<F extends MetadataFormat> {
   private invalidated = false;
   private readonly writePermission = new AbortController();
   private drain?: () => void;
-  constructor(private readonly binding: BoundTable, dependencies: TableDependencies, limits: Partial<TableLimits>, private readonly format: F) {
+  private readonly lease?: LeaseController;
+  private renewing = false;
+  constructor(private readonly binding: BoundTable, dependencies: TableLeaseDependencies, limits: Partial<TableLimits>, private readonly format: F) {
     object(limits, Object.keys(DEFAULT_LIMITS)); this.limits = { ...DEFAULT_LIMITS, ...limits };
     integer(this.limits.maxPending, 1, 1024); integer(this.limits.maxPendingBytes, 1, 256 * 1024 * 1024);
     integer(this.limits.callTimeoutMs, 1, 300000); integer(this.limits.cleanupTimeoutMs, 1, 300000);
     integer(this.limits.reconciliationReads, 2, 16); integer(this.limits.scanPages, 1, 100000); integer(this.limits.scanBytes, 1, 256 * 1024 * 1024);
     this.client = new OwnedTableClient(binding, dependencies, format);
+    if (format === 3) this.lease = new LeaseController(dependencies.leaseClock, () => this.pump(), () => this.invalidate());
+  }
+  leaseAuthority(): LeaseAuthority {
+    if (!this.lease) throw new TableError('invalid-input');
+    return Object.freeze({ allowed: () => !this.closing && this.lease!.allowed(), lost: this.lease.lost.signal,
+      revalidate: async () => {
+        try { await this.enqueue(0, undefined, async context => { this.requireOwned(false); await this.authority(context); }); }
+        catch { return false; }
+        return !this.closing && this.lease!.allowed();
+      } });
   }
   status() {
+    if (this.lease && this.ownership !== 'none') this.lease.permit();
     return Object.freeze({ lifecycle: this.closing && this.lifecycle !== 'closed' ? 'closing' : this.invalidated && this.lifecycle !== 'closed' ? 'poisoned' : this.lifecycle,
       ownership: this.ownership, pending: this.pending, pendingBytes: this.pendingBytes });
   }
@@ -68,7 +88,7 @@ class TableKernel<F extends MetadataFormat> {
       const initId = randomUUID();
       const expected = makeMetadata(this.format, this.binding, { initId, initDigest: initDigest(this.format, this.binding, initId), owner: '', epoch: 0,
         invocation: initId, operation: 'initialize', plan: digest(['initialize', initId]), state: Buffer.alloc(0), result: Buffer.alloc(0),
-        ...(this.format === 1 ? { release: Buffer.alloc(0) } : { exit: undefined }) });
+        ...(this.format === 1 ? { release: Buffer.alloc(0) } : this.format === 2 ? { exit: undefined } : { exit: undefined, lease: undefined }) });
       try { await this.write(expected, undefined, [], context); } catch { /* ACK is not authority. */ }
       const cleanup = this.cleanup();
       try {
@@ -92,13 +112,17 @@ class TableKernel<F extends MetadataFormat> {
       if (!original) throw new TableError('missing'); const previous = m(original);
       if (previous.owner !== '') throw new TableError('busy');
       if (!eligible(context)) throw new TableError('not-submitted');
+      const epoch = integer(previous.epoch + 1, 1, Number.MAX_SAFE_INTEGER);
       this.owner = randomUUID(); const invocation = randomUUID();
-      const expected = makeMetadata(this.format, this.binding, { ...previous, owner: this.owner, epoch: integer(previous.epoch + 1, 1, Number.MAX_SAFE_INTEGER),
-        invocation, operation: 'acquire', plan: digest(['acquire', previous.digest, this.owner, invocation]) });
+      const frame = this.lease?.propose(1); if (frame) this.lease!.begin(frame);
+      const expected = makeMetadata(this.format, this.binding, { ...previous, owner: this.owner, epoch,
+        invocation, operation: 'acquire', plan: digest(['acquire', previous.digest, this.owner, invocation]),
+        ...(frame ? { lease: frame.value } : {}) });
       this.ownership = 'possible'; this.lifecycle = 'acquiring';
       const result = await this.transition(original, expected, [], context);
       this.fence = result.record;
-      if (result.kind === 'cancelled') { this.owner = ''; this.ownership = 'none'; this.lifecycle = 'unowned'; throw new TableError('not-submitted'); }
+      if (result.kind === 'cancelled') { this.lease?.cancel(); this.owner = ''; this.ownership = 'none'; this.lifecycle = 'unowned'; throw new TableError('not-submitted'); }
+      if (frame) this.lease!.confirm(frame);
       this.ownership = 'owned'; this.lifecycle = 'owned-unready';
     });
   }
@@ -110,7 +134,7 @@ class TableKernel<F extends MetadataFormat> {
       const current = this.ownership === 'owned' && !this.invalidated && this.lifecycle !== 'poisoned' ? await this.authority(context) : undefined;
       const record = row === 'M' && current ? current : await this.readRecord(row, context);
       if (current && row !== 'M') await this.authority(context);
-      return record as StoredFor<F> | undefined;
+      return (this.lease ? snapshotRecord(record) : record) as StoredFor<F> | undefined;
     });
   }
   scan(options?: CallOptions): Promise<readonly StoredFor<F>[]> {
@@ -119,8 +143,8 @@ class TableKernel<F extends MetadataFormat> {
       try {
         const before = await this.authority(context); const records = await this.collect(context);
         const control = records.find(r => r.row === 'M');
-        if (!control || !same(before, control)) this.poison();
-        const after = await this.authority(context); if (!same(before, after)) this.poison();
+        if (!control || !this.sameDomain(before, control)) this.poison();
+        const after = await this.authority(context); if (!this.sameDomain(before, after)) this.poison();
         if (!eligible(context)) throw new TableError('incomplete'); this.lifecycle = 'envelope-audited'; return records as StoredFor<F>[];
       } catch (error) {
         if (error instanceof TableError && ['corrupt', 'unresolved'].includes(error.code)) this.poison();
@@ -168,7 +192,7 @@ class TableKernel<F extends MetadataFormat> {
       let plan: Plan;
       try {
         // Planner never receives the authoritative M or retained input buffers.
-        const proposed = planner({ input: bytes(snapshot.input, MAX_PAYLOAD_BYTES), state: Buffer.from(m(original).state), records: records.map(snapshotRecord) } as Parameters<PlannerFor<F>>[0]);
+        const proposed = planner({ input: bytes(snapshot.input, MAX_PAYLOAD_BYTES), state: Buffer.from(m(original).state), records: records.map(snapshotRecord) } as unknown as Parameters<PlannerFor<F>>[0]);
         if (proposed instanceof Promise) {
           // Invalid trusted planners cannot surface a later raw rejection. Their external work is not a supported kernel operation.
           void Promise.prototype.then.call(proposed, () => undefined, () => undefined); fail();
@@ -187,14 +211,14 @@ class TableKernel<F extends MetadataFormat> {
   }
   /** Irreversible domain-audit failure. Completion cannot restore authority; close still drains. */
   invalidate(): void {
-    this.invalidated = true; if (this.lifecycle !== 'closed') this.lifecycle = 'poisoned'; this.writePermission.abort();
+    this.invalidated = true; if (this.lifecycle !== 'closed') this.lifecycle = 'poisoned'; this.writePermission.abort(); this.lease?.revoke();
     if (this.active?.kind === 'audit') this.cancel(this.active, new TableError('unresolved'));
   }
   close(): Promise<void> {
     this.guardAuditCallback();
     if (this.closing) return this.closing;
     // Set the intake fence before cancelling queued work or waiting on active promises.
-    const drained = new Promise<void>(resolve => { if (this.active) this.drain = resolve; else resolve(); });
+    const drained = new Promise<void>(resolve => { if (this.active || this.renewing) this.drain = resolve; else resolve(); });
     this.closing = drained.then(async () => {
       let error: TableError | undefined;
       try {
@@ -207,14 +231,14 @@ class TableKernel<F extends MetadataFormat> {
             const expected = makeMetadata(this.format, this.binding, cleanRelease(previous, invocation, plan));
             const result = await this.transition(original, expected, [], cleanup.context);
             if (result.kind !== 'committed') throw new TableError('unresolved');
-            this.fence = result.record; this.owner = ''; this.ownership = 'none';
+            this.fence = result.record; this.owner = ''; this.ownership = 'none'; this.lease?.cancel();
           } finally { cleanup.done(); }
         }
       } catch { error = new TableError('unresolved'); }
       this.lifecycle = 'closing';
       try { await this.client.close(); } catch { error ??= new TableError('unavailable'); }
       if (this.invalidated) error = new TableError('unresolved');
-      this.lifecycle = 'closed'; if (error) throw error;
+      this.lease?.cancel(); this.lifecycle = 'closed'; if (error) throw error;
     });
     for (const job of [...this.queue]) this.cancel(job, new TableError('not-submitted'));
     if (this.active?.kind === 'audit') this.cancel(this.active, new TableError('incomplete'));
@@ -259,7 +283,14 @@ class TableKernel<F extends MetadataFormat> {
     job.finished = true; clearTimeout(job.timer); job.removeAbort(); this.pending--; this.pendingBytes -= job.bytes;
   }
   private pump(): void {
-    if (this.active || this.closing || this.auditHandoff) return;
+    if (this.active || this.closing || this.auditHandoff || this.renewing) return;
+    // Reserved maintenance turn: never consumes a user queue/capacity slot.
+    if (this.ownership === 'owned' && this.lease?.due()) {
+      this.renewing = true;
+      void this.renew().catch(() => this.invalidate()).finally(() => {
+        this.renewing = false; if (this.closing) this.drain?.(); else this.pump();
+      }); return;
+    }
     const job = this.queue.shift(); if (!job) return;
     this.active = job; job.started = true;
     const invalidatedAtStart = this.invalidated;
@@ -294,6 +325,7 @@ class TableKernel<F extends MetadataFormat> {
   }
   private guardAuditCallback(): void { if (this.auditCallback) this.poison(); }
   private checkAudit(job: AuditJob): void {
+    if (this.lease && this.ownership === 'owned' && !this.lease.allowed()) this.invalidate();
     if (this.invalidated || this.lifecycle === 'poisoned') this.cancel(job, new TableError('unresolved'));
     else if (this.closing || !eligible(job.context)) this.cancel(job, new TableError('incomplete'));
     if (job.failure) throw job.failure;
@@ -319,10 +351,11 @@ class TableKernel<F extends MetadataFormat> {
     this.requireOwned(false); this.lifecycle = 'owned-unready';
     const fence = this.fence!; const value = m(fence);
     const frozen = { etag: fence.etag, digest: value.digest, owner: value.owner, epoch: value.epoch };
-    const matches = (record: StoredRecord | undefined): boolean => !!record && record.row === 'M' && record.etag === frozen.etag &&
-      record.value.kind === 'metadata' && record.value.digest === frozen.digest && record.value.owner === frozen.owner && record.value.epoch === frozen.epoch;
+    const matches = (record: StoredRecord | undefined): boolean => !!record && record.row === 'M' && record.value.kind === 'metadata' &&
+      (this.lease ? same(record, this.fence!) && this.sameDomain(fence, record) : record.etag === frozen.etag && record.value.digest === frozen.digest) &&
+      record.value.owner === frozen.owner && record.value.epoch === frozen.epoch;
     const authority = async () => {
-      const current = await this.client.read('M', this.auditRequest(job, config));
+      const current = this.lease ? await this.authority(this.auditRequest(job, config)) : await this.client.read('M', this.auditRequest(job, config));
       // Classify observed authority contradiction before selecting a prior benign
       // cancellation latch. No further I/O is issued just to obtain symmetry.
       if (!matches(current)) this.poison(); this.checkAudit(job);
@@ -330,7 +363,11 @@ class TableKernel<F extends MetadataFormat> {
     try {
       await runAuditTraversal(config, {
         check: () => this.checkAudit(job), authority, matches, contradiction: () => this.poison(),
-        page: (cursor, allowance) => this.client.page(this.auditRequest(job, config), cursor, allowance),
+        page: async (cursor, allowance) => {
+          this.checkAudit(job); await this.checkpoint();
+          // Traversal classifies observed M contradictions before benign aborts.
+          return this.client.page(this.auditRequest(job, config), cursor, allowance);
+        },
         exhaust: () => this.cancel(job, new TableError('incomplete')),
         record: (pass, record) => this.auditCall(job, config.record, pass, record),
         endPass: pass => this.auditCall(job, config.endPass, pass),
@@ -346,6 +383,7 @@ class TableKernel<F extends MetadataFormat> {
     if (this.ownership !== 'none') throw new TableError('busy');
   }
   private requireOwned(audited: boolean): void {
+    if (this.ownership === 'owned' && this.lease && !this.lease.allowed()) this.poison();
     if (this.invalidated || this.lifecycle === 'poisoned') throw new TableError('unresolved');
     if (this.ownership !== 'owned' || (audited && this.lifecycle !== 'envelope-audited')) throw new TableError('unready');
   }
@@ -356,12 +394,43 @@ class TableKernel<F extends MetadataFormat> {
       throw error;
     }
   }
+  private sameDomain(a: StoredRecord, b: StoredRecord): boolean {
+    return this.lease ? domainFingerprint(this.binding, m(a) as MetadataV3) === domainFingerprint(this.binding, m(b) as MetadataV3) : same(a, b);
+  }
+  private async checkpoint(): Promise<void> {
+    if (!this.lease || this.ownership !== 'owned') return;
+    if (!this.lease.allowed()) this.poison();
+    if (!this.closing && this.lease.due()) await this.renew();
+  }
+  private async renew(original?: StoredRecord): Promise<StoredRecord> {
+    // Maintenance belongs to the serialized job, not its caller's cancellation.
+    // Await its actual drain; the separate budget never extends lease authority.
+    const cleanup = this.cleanup();
+    try {
+      this.requireOwned(false); const before = original ?? await this.readAuthority(cleanup.context);
+      const previous = m(before) as MetadataV3; const frame = this.lease!.propose(previous.lease!.sequence + 1);
+      const expected = makeMetadata(3, this.binding, { ...previous, lease: frame.value });
+      const lifecycle = this.lifecycle; this.lifecycle = 'reconciling';
+      const result = await this.transition(before, expected, [], cleanup.context);
+      if (result.kind !== 'committed') this.poison();
+      this.fence = result.record; this.lease!.confirm(frame); this.lifecycle = lifecycle; return result.record;
+    } catch (error) { this.invalidate(); throw error; }
+    finally { cleanup.done(); }
+  }
   private async authority(context: WorkContext): Promise<StoredRecord> {
+    const current = await this.readAuthority(context);
+    return this.lease && !this.closing && this.lease.due() ? this.renew(current) : current;
+  }
+  private async readAuthority(context: WorkContext): Promise<StoredRecord> {
+    if (this.lease && !this.lease.allowed()) this.poison();
     let record: StoredRecord | undefined;
     try { record = await this.client.read('M', context); } catch (error) {
       if (error instanceof TableError && error.code === 'corrupt') return this.poison();
-      throw new TableError('unavailable');
+      // Refused/cancelled read admission says nothing new about a still-bounded
+      // grant. Actual eligible storage failures do revoke authority.
+      if (this.lease && eligible(context)) this.invalidate(); throw new TableError('unavailable');
     }
+    if (this.lease && !this.lease.allowed()) this.poison();
     if (!record || !this.fence || !same(record, this.fence) || m(record).owner !== this.owner) this.poison(); return record;
   }
   private cleanup(): { context: WorkContext; done: () => void } {
@@ -381,7 +450,9 @@ class TableKernel<F extends MetadataFormat> {
     if (this.writePermission.signal.aborted) forwardPermission();
     const caller = context.signal.aborted ? undefined : addAbortListener(context.signal, forwardCaller);
     const permission = this.writePermission.signal.aborted ? undefined : addAbortListener(this.writePermission.signal, forwardPermission);
-    try { await this.client.write(expected as MetadataFor<F>, originalETag, actions, { ...context, signal: controller.signal }); }
+    const authorizeWrite = () => !this.invalidated && (!this.lease || this.ownership === 'none' || this.lease.permit());
+    try { await this.client.write(expected as MetadataFor<F>, originalETag, actions,
+      { ...context, signal: controller.signal, ...(this.lease ? { authorizeWrite } : {}) }); }
     finally { caller?.[Symbol.dispose](); permission?.[Symbol.dispose](); }
   }
   private async transition(original: StoredRecord, expected: Metadata, actions: readonly DataAction[], context: WorkContext): Promise<Confirmed> {
@@ -416,9 +487,12 @@ class TableKernel<F extends MetadataFormat> {
     const records: StoredRecord[] = []; let cursor; let size = 0; let lastRow: string | undefined;
     const tokens = new Set<string>();
     for (let i = 0; i < this.limits.scanPages && eligible(context); i++) {
+      await this.checkpoint();
       const page = await this.client.page(context, cursor); size += page.size;
+      if (this.lease && this.ownership === 'owned' && !this.lease.allowed()) this.poison();
       if (size > this.limits.scanBytes) throw new TableError('incomplete');
       for (const record of page.records) {
+        if (this.lease && this.ownership === 'owned' && record.row === 'M' && !same(record, this.fence!)) this.poison();
         if (lastRow !== undefined && record.row <= lastRow) throw new TableError('incomplete'); lastRow = record.row; records.push(record);
       }
       if (!page.cursor) return records;

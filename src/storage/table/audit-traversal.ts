@@ -11,7 +11,9 @@ export function snapshotRecord(record: AnyStoredRecord | undefined): AnyStoredRe
   if (value.kind === 'data') return { ...record, value: { ...value, payload: Buffer.from(value.payload) } };
   const buffers = { state: Buffer.from(value.state), result: Buffer.from(value.result) };
   return 'release' in value ? { ...record, value: { ...value, ...buffers, release: Buffer.from(value.release) } } :
-    { ...record, value: { ...value, ...buffers, exit: value.exit ? { ...value.exit } : undefined } };
+    { ...record, value: { ...value, ...buffers,
+      ...('lease' in value ? { lease: value.lease ? { ...value.lease } : undefined } : {}),
+      exit: value.exit ? { ...value.exit } : undefined } };
 }
 
 /** Mechanics only: callers retain admission, authority policy, callback guards and publication. */

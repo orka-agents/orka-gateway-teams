@@ -14,7 +14,7 @@ import type { BoundTable, DataAction, DataRecord, MetadataV2, StoredRecordV2, Ta
 import { encodeMetadata, readPage, readRecord, receiptBytes } from './format.js';
 import type { MetadataFor, MetadataFormat, StoredFor } from './format.js';
 
-export interface WorkContext { signal: AbortSignal; deadline: number }
+export interface WorkContext { signal: AbortSignal; deadline: number; authorizeWrite?: () => boolean }
 export interface PageCursor { token: string; partition?: string; row?: string }
 export interface RawPage<F extends MetadataFormat = 1> { records: StoredFor<F>[]; size: number; cursor?: PageCursor }
 /** Internal owned-audit gate, never a legacy response-limit override. */
@@ -157,7 +157,7 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
     let transaction: TransactionAction[];
     try {
       // Recovery-shaped metadata is readable, not writable through this normal-owner transport.
-      if (this.format === 2 && (m.operation === 'recover') !== recover) fail();
+      if (this.format !== 1 && (m.operation === 'recover') !== recover) fail();
       if (!Array.isArray(actions) || actions.length > 99 || (originalETag === undefined && actions.length)) fail();
       if (originalETag !== undefined) etag(originalETag);
       const entity = encodeMetadata(this.format, this.binding, m) as TableEntity;
@@ -168,7 +168,8 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
         object(action, action.kind === 'replace' ? ['kind', 'key', 'payload', 'etag'] : ['kind', 'key', 'payload']);
         if (action.kind !== 'create' && action.kind !== 'replace') fail();
         const value = data(this.binding, action.key, action.payload); const row = dataRow(this.binding, action.key);
-        if (!recover && action.key.type === 'control' && action.key.id.startsWith('control_recovery:')) fail();
+        if (!recover && action.key.type === 'control' && (action.key.id.startsWith('control_recovery:') ||
+          (this.format === 3 && /^(?:control_lease_expiry:|control_format_upgrade:)/u.test(action.key.id)))) fail();
         if (rows.has(row)) fail(); rows.add(row);
         upper += 8192 + 4 * Math.ceil(value.payload.length / 3) + 16;
         if (upper > MAX_WIRE_BYTES) fail();
@@ -203,7 +204,7 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
           const body = request.body === undefined ? '' : request.body;
           if (typeof body !== 'string') throw unavailable();
           this.fence(request, body, kind);
-          if (!available(context)) throw unavailable();
+          if (!available(context) || (kind.kind === 'write' && context.authorizeWrite && !context.authorizeWrite())) throw unavailable();
           const signal = new AbortController(); const abort = () => signal.abort();
           context.signal.addEventListener('abort', abort, { once: true });
           const timer = setTimeout(abort, Math.max(1, context.deadline - performance.now()));
@@ -216,7 +217,7 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
             catch { throw unavailable(); }
             if (!available(context) || signal.signal.aborted || typeof token !== 'string' || token.length > 8192 || !/^[A-Za-z0-9._~+/-]+=*$/u.test(token)) throw unavailable();
             this.fence(request, body, kind);
-            response = await this.sdkWork.exit(() => this.native(request, body, token, { signal: signal.signal, deadline: context.deadline }, kind.kind === 'page' ? kind.allowance : undefined));
+            response = await this.sdkWork.exit(() => this.native(request, body, token, { ...context, signal: signal.signal }, kind.kind === 'page' ? kind.allowance : undefined));
           } finally { clearTimeout(timer); context.signal.removeEventListener('abort', abort); }
           if (kind.kind !== 'write') {
             if (response.status !== 200 && !(kind.kind === 'read' && response.status === 404)) throw unavailable();
@@ -297,6 +298,7 @@ export class OwnedTableClient<F extends MetadataFormat = 1> {
           accept: 'application/json;odata=fullmetadata', connection: 'keep-alive', 'content-length': String(Buffer.byteLength(body)) });
         delete headers['accept-encoding'];
         if (Object.entries(headers).reduce((n, [k, v]) => n + Buffer.byteLength(k) + Buffer.byteLength(v) + 4, 0) > 16384) throw unavailable();
+        if (context.authorizeWrite && request.method === 'POST' && !context.authorizeWrite()) throw unavailable();
         req = this.request(new URL(request.url), { method: request.method, headers, agent: this.agent, rejectUnauthorized: true, maxHeaderSize: 16384 }, res => {
           response = res; const chunks: Buffer[] = []; let size = 0;
           res.on('error', abort); res.on('aborted', abort);
