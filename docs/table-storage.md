@@ -146,6 +146,13 @@ than 5000 ms revokes authority; that cannot prove initial UTC accuracy. A paused
 writer checks these limits synchronously on waking, not only when timers run.
 No live Azure clock, stall or crash-recovery qualification is implied.
 
+Every renewal uses its own bounded cleanup context, including inline authority
+checks and page checkpoints. Caller cancellation does not cancel that maintenance
+write. The active FIFO job awaits actual renewal drain before releasing its slot,
+and close waits for it; legacy callers may still receive their cancellation early.
+Maintenance failures and expiry still irreversibly revoke authority. The existing
+cleanup limit is unchanged and supplies no extra lease time.
+
 Renewal has a reserved maintenance turn outside user queue capacity. Owned scans
 and streaming audits renew at page boundaries inside their existing serialized
 job, even before envelope audit completion. Only a self-confirmed M lease update

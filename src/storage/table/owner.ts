@@ -286,9 +286,9 @@ class TableKernel<F extends MetadataFormat> {
     if (this.active || this.closing || this.auditHandoff || this.renewing) return;
     // Reserved maintenance turn: never consumes a user queue/capacity slot.
     if (this.ownership === 'owned' && this.lease?.due()) {
-      this.renewing = true; const cleanup = this.cleanup();
-      void this.renew(cleanup.context).catch(() => this.invalidate()).finally(() => {
-        cleanup.done(); this.renewing = false; if (this.closing) this.drain?.(); else this.pump();
+      this.renewing = true;
+      void this.renew().catch(() => this.invalidate()).finally(() => {
+        this.renewing = false; if (this.closing) this.drain?.(); else this.pump();
       }); return;
     }
     const job = this.queue.shift(); if (!job) return;
@@ -364,7 +364,7 @@ class TableKernel<F extends MetadataFormat> {
       await runAuditTraversal(config, {
         check: () => this.checkAudit(job), authority, matches, contradiction: () => this.poison(),
         page: async (cursor, allowance) => {
-          const context = this.auditRequest(job, config); await this.checkpoint(context);
+          const context = this.auditRequest(job, config); await this.checkpoint();
           // Traversal classifies observed M contradictions before benign aborts.
           return this.client.page(context, cursor, allowance);
         },
@@ -397,23 +397,29 @@ class TableKernel<F extends MetadataFormat> {
   private sameDomain(a: StoredRecord, b: StoredRecord): boolean {
     return this.lease ? domainFingerprint(this.binding, m(a) as MetadataV3) === domainFingerprint(this.binding, m(b) as MetadataV3) : same(a, b);
   }
-  private async checkpoint(context: WorkContext): Promise<void> {
+  private async checkpoint(): Promise<void> {
     if (!this.lease || this.ownership !== 'owned') return;
     if (!this.lease.allowed()) this.poison();
-    if (!this.closing && this.lease.due()) await this.renew(context);
+    if (!this.closing && this.lease.due()) await this.renew();
   }
-  private async renew(context: WorkContext, original?: StoredRecord): Promise<StoredRecord> {
-    this.requireOwned(false); const before = original ?? await this.readAuthority(context);
-    const previous = m(before) as MetadataV3; const frame = this.lease!.propose(previous.lease!.sequence + 1);
-    const expected = makeMetadata(3, this.binding, { ...previous, lease: frame.value });
-    const lifecycle = this.lifecycle; this.lifecycle = 'reconciling';
-    const result = await this.transition(before, expected, [], context);
-    if (result.kind !== 'committed') this.poison();
-    this.fence = result.record; this.lease!.confirm(frame); this.lifecycle = lifecycle; return result.record;
+  private async renew(original?: StoredRecord): Promise<StoredRecord> {
+    // Maintenance belongs to the serialized job, not its caller's cancellation.
+    // Await its actual drain; the separate budget never extends lease authority.
+    const cleanup = this.cleanup();
+    try {
+      this.requireOwned(false); const before = original ?? await this.readAuthority(cleanup.context);
+      const previous = m(before) as MetadataV3; const frame = this.lease!.propose(previous.lease!.sequence + 1);
+      const expected = makeMetadata(3, this.binding, { ...previous, lease: frame.value });
+      const lifecycle = this.lifecycle; this.lifecycle = 'reconciling';
+      const result = await this.transition(before, expected, [], cleanup.context);
+      if (result.kind !== 'committed') this.poison();
+      this.fence = result.record; this.lease!.confirm(frame); this.lifecycle = lifecycle; return result.record;
+    } catch (error) { this.invalidate(); throw error; }
+    finally { cleanup.done(); }
   }
   private async authority(context: WorkContext): Promise<StoredRecord> {
     const current = await this.readAuthority(context);
-    return this.lease && !this.closing && this.lease.due() ? this.renew(context, current) : current;
+    return this.lease && !this.closing && this.lease.due() ? this.renew(current) : current;
   }
   private async readAuthority(context: WorkContext): Promise<StoredRecord> {
     if (this.lease && !this.lease.allowed()) this.poison();
@@ -481,7 +487,7 @@ class TableKernel<F extends MetadataFormat> {
     const records: StoredRecord[] = []; let cursor; let size = 0; let lastRow: string | undefined;
     const tokens = new Set<string>();
     for (let i = 0; i < this.limits.scanPages && eligible(context); i++) {
-      await this.checkpoint(context);
+      await this.checkpoint();
       const page = await this.client.page(context, cursor); size += page.size;
       if (this.lease && this.ownership === 'owned' && !this.lease.allowed()) this.poison();
       if (size > this.limits.scanBytes) throw new TableError('incomplete');
