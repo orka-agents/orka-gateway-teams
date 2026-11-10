@@ -84,6 +84,19 @@ test('foreign-clear proof preserves each caller request budget at the final nati
   await Promise.all([a.close(), b.close()]); delete s.controls.hook;
 });
 
+test('renewed read snapshots isolate nested expiry leases from the private fence used by later audits', async t => {
+  const { s, clock, deps, fence, factory } = await setup(t); clock.advance(125001, false);
+  const clear = factory(tableBinding, deps, fence); await clear.reclaim(visitor, budget(), disposition); await clear.close();
+  const next = createTableKernelV3(tableBinding, deps); t.after(() => next.close().catch(() => {})); await next.acquire();
+  let advanced = false;
+  s.controls.hook = e => { if (!advanced && e.req.method === 'GET') { advanced = true; clock.advance(40000, false); } e.reply(); };
+  const snapshot = await next.read('M'); delete s.controls.hook;
+  assert.ok(snapshot?.value.kind === 'metadata' && snapshot.value.exit?.kind === 'lease-expiry');
+  snapshot.value.exit.lease.sequence += 1;
+  await next.auditOwned(visitor, budget());
+  assert.equal(next.leaseAuthority().allowed(), true); await next.close();
+});
+
 test('changed M during expiry proof cannot create orphan audit', async t => {
   const { s, clock, deps, fence, factory } = await setup(t); clock.advance(125001, false);
   const before = s.stats.writes; const r = factory(tableBinding, deps, fence);

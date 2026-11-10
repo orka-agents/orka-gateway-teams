@@ -137,7 +137,8 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
         const decoded = decodeState(state); decodeResult(result);
         if (decoded.restartEpoch > m.epoch) throw new TableError('corrupt');
         if (decoded.handoffClockArm) Object.freeze(decoded.handoffClockArm);
-        header = Object.freeze({ metadata: Object.freeze({ ...m, state, result, exit: m.exit ? Object.freeze({ ...m.exit }) : undefined }),
+        header = Object.freeze({ metadata: Object.freeze({ ...m, state, result, exit: m.exit ? Object.freeze({ ...m.exit,
+          ...(m.exit.kind === 'lease-expiry' ? { lease: Object.freeze({ ...m.exit.lease }) } : {}) }) : undefined }),
           state: Object.freeze(decoded), version: Object.freeze({ etag: record.etag, digest: m.digest, timestamp: record.timestamp }) });
       }
       // No second-pass M copy. Kernel proves both snapshots against its same fence.
@@ -185,7 +186,8 @@ export function createInboxAuditProjection(snapshot: TableBinding & { kind: 'ing
           domainFingerprint(bound, header.metadata as MetadataV3) !== domainFingerprint(bound, record.value as MetadataV3)) throw new TableError('corrupt');
       const m = record.value;
       header = Object.freeze({ ...header,
-        metadata: Object.freeze({ ...m, state: Buffer.from(m.state), result: Buffer.from(m.result), exit: m.exit ? Object.freeze({ ...m.exit }) : undefined }),
+        metadata: Object.freeze({ ...m, state: Buffer.from(m.state), result: Buffer.from(m.result), exit: m.exit ? Object.freeze({ ...m.exit,
+          ...(m.exit.kind === 'lease-expiry' ? { lease: Object.freeze({ ...m.exit.lease }) } : {}) }) : undefined }),
         version: Object.freeze({ etag: record.etag, digest: m.digest, timestamp: record.timestamp }) });
     },
     proof(): Readonly<{ versions: string; count: number }> {

@@ -132,6 +132,18 @@ test('renewed ingress audit publishes current M fence while retaining exact doma
   audited.dispose(); delete s.controls.hook; await k.close();
 });
 
+test('published ingress expiry headers keep nested lease evidence immutable without poisoning their owner', async t => {
+  const { s, k, clock, dependencies } = await seeded(t); clock.advance(125001, false);
+  await expire(ingressBinding, dependencies, fence(s));
+  const next = createTableKernelV3(ingressBinding, dependencies); t.after(() => next.close().catch(() => undefined)); await next.acquire();
+  const audited = await auditInbox(next, ingressBinding, auditBudget, indexBudget);
+  const x = audited.header.metadata.exit; assert.ok(x?.kind === 'lease-expiry');
+  assert.throws(() => { x.lease.sequence += 1; }, TypeError);
+  audited.dispose();
+  const again = await auditInbox(next, ingressBinding, auditBudget, indexBudget); again.dispose();
+  assert.equal(next.leaseAuthority().allowed(), true); await next.close(); await assert.rejects(k.close(), code('unresolved'));
+});
+
 test('close cancels V3 ingress startup waiting on a live foreign lease without clearing it', async t => {
   const { s, k, clock, dependencies } = await seeded(t); const before = structuredClone(s.rows.get('M')); const writes = s.stats.writes;
   const next = create(ingressBinding, dependencies, options); const opening = next.open(); const rejected = assert.rejects(opening, code('incomplete'));
