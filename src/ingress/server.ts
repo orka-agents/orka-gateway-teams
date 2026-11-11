@@ -150,7 +150,7 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
       for (const slot of slots) {
         if (dispatchers.has(slot.id) || ('targets' in outbound && !/^[a-z][a-z0-9-]{0,62}$/u.test(slot.id))) throw new ConfigurationError();
         dispatchers.set(slot.id, createDeliveryDispatcher({ ...slot,
-          scope: { appId: config.appId, tenantId: config.tenantId }, serviceUrls: config.serviceUrls, recipientIds: config.recipientIds, sender: borrowed }));
+          scope: { appId: config.appId, tenantId: config.tenantId }, serviceUrls: config.serviceUrls, recipientIds: config.recipientIds, sender: 'targets' in outbound ? borrowed : shared }));
       }
       if (!('targets' in outbound)) dispatcher = dispatchers.get('');
     }

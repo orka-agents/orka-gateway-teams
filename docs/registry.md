@@ -14,7 +14,9 @@ on registry startup or relay.
 ## Manifest and environment
 
 Set `ORKA_REGISTRY_FILE` to an absolute, canonical path to an operator-owned JSON
-file. It has a closed schema (unknown keys, including `agents`, are rejected),
+file. Its owner and parent-directory owner must be the runtime user or root;
+neither may be group/world writable. Readable mode 0644 is allowed for the
+manifest, which contains no bearer values. It has a closed schema (unknown keys, including `agents`, are rejected),
 version 1, at most 32 targets and at most 256 KiB. For example:
 
 ```json
@@ -83,7 +85,9 @@ separate audited V3 upgrade procedure, not reinitialization.
 Stop and actually drain the previous owner before switching commands or editing
 registration, CA or startup credentials. A lease timeout alone is not proof of
 drain. One replica owns every configured store (2N leases); all must open and audit
-before readiness. Any unsafe or busy store prevents startup. Any lease loss or
+before readiness. Shared token capacity covers all 64 domains at 32 targets;
+independent lease revalidation reads run in parallel, retaining the all-target
+failure boundary. Any unsafe or busy store prevents startup. Any lease loss or
 storage poison stops every slot. An unreachable Orka only delays its own relay;
 no work moves between targets. Listener, SDK, token, provider and relay work drains
 before stores close; the shared storage token provider closes last.

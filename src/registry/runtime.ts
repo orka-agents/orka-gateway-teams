@@ -27,11 +27,12 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   let stopRuntime: (() => Promise<void>) | undefined; let closing: Promise<void> | undefined;
   const authority: LeaseAuthority = {
     allowed: () => !loss.signal.aborted && !abort.signal.aborted && authorities.every(a => a.allowed()),
-    revalidate: async () => { for (const a of authorities) if (!await a.revalidate()) return false; return authority.allowed(); }, lost: loss.signal,
+    revalidate: async () => (await Promise.all(authorities.map(a => a.revalidate()))).every(Boolean) && authority.allowed(), lost: loss.signal,
   };
   const clients = config.targets.map(t => createOrkaClient(t.config.scope, { bearerToken: t.config.bearerToken, authority,
     ...(t.config.caFile === undefined ? {} : { ca: readCaBundle(t.config.caFile) }) }));
-  const provider = prepareStorageIdentity(legacy.config.storage.identity).createProvider(deps.storageIdentity);
+  // Each serialized domain can hold one token caller; 32 targets own 64 domains.
+  const provider = prepareStorageIdentity(legacy.config.storage.identity).createProvider(deps.storageIdentity, Math.max(32, config.targets.length * 2));
   const unsubscribe = () => { for (const remove of subscriptions.splice(0)) remove(); };
   const closeStores = async () => {
     unsubscribe(); const results = await Promise.allSettled(handles.map(h => Promise.resolve().then(() => h.close())));

@@ -10,7 +10,7 @@ export interface StorageIdentityDependencies { request?: ImdsRequest }
 export interface StorageTokenProvider { token: TableDependencies['token']; close(): Promise<void> }
 export interface PreparedStorageIdentity {
   assertUsable(): void;
-  createProvider(dependencies?: StorageIdentityDependencies): StorageTokenProvider;
+  createProvider(dependencies?: StorageIdentityDependencies, maxCallers?: number): StorageTokenProvider;
 }
 interface CacheEntry { token: string; expiresAt: number; receivedAt: number; receivedMono: number }
 
@@ -35,8 +35,8 @@ export function prepareStorageIdentity(input: Readonly<StorageIdentityConfig>): 
       } catch { throw new Error('Invalid storage identity credentials'); }
     };
     assertUsable();
-    return { assertUsable, createProvider(dependencies = {}) {
-      if (created) throw new Error('Invalid storage identity credentials'); created = true;
+    return { assertUsable, createProvider(dependencies = {}, maxCallers = 32) {
+      if (created || !Number.isInteger(maxCallers) || maxCallers < 1 || maxCallers > 64) throw new Error('Invalid storage identity credentials'); created = true;
       assertUsable();
       let request = dependencies.request;
       if (request !== undefined && typeof request !== 'function') throw new Error('Invalid storage identity credentials');
@@ -56,7 +56,7 @@ export function prepareStorageIdentity(input: Readonly<StorageIdentityConfig>): 
       };
       const token: TableDependencies['token'] = (scope, context) => {
         try {
-          if (scope !== 'https://storage.azure.com/.default' || closing || callers.size >= 32) throw failure();
+          if (scope !== 'https://storage.azure.com/.default' || closing || callers.size >= maxCallers) throw failure();
           assertUsable();
           // Snapshot caller eligibility before awaiting shared work; never retain a mutable context.
           const signal = context.signal; const deadline = context.deadline;

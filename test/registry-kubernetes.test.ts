@@ -81,13 +81,26 @@ test('verified TLS refuses wrong CA', async t => {
   const request = ((url: URL, options: https.RequestOptions, callback: any) => native(new URL(url.pathname, server.baseUrl), options, callback)) as typeof https.request;
   const reader = createKubernetesReader(f.target, { request }); await assert.rejects(reader.getGateway()); await reader.close();
 });
+test('configured CA is captured and determines verified Kubernetes TLS without a transport CA override', async t => {
+  const f = await fixture(t); const server = await httpsFixture(t, (_req, res) => res.end('{"kind":"Gateway","metadata":{}}'));
+  const other = await httpsFixture(t, (_req, res) => res.end('{}')); const caFile = join(f.directory, 'kubernetes-ca.pem');
+  writeFileSync(caFile, server.ca); const target = { ...f.target, kubernetesCaFile: caFile }; const native = https.request;
+  const request = ((url: URL, options: https.RequestOptions, callback: any) => native(new URL(url.pathname, server.baseUrl), { ...options, servername: 'localhost' }, callback)) as typeof https.request;
+  const right = createKubernetesReader(target, { request }); writeFileSync(caFile, other.ca);
+  const wrong = createKubernetesReader(target, { request });
+  assert.equal((await right.getGateway()).kind, 'Gateway'); await assert.rejects(wrong.getGateway(), { message: 'Kubernetes read failed' });
+  await right.close(); await wrong.close();
+});
 test('close cancels and drains held native work; pre-abort and closed readers never hand off', async t => {
   const f = await fixture(t); const gate = deferred(); let entered = false;
   const server = await httpsFixture(t, async (_req, res) => { entered = true; await gate.promise; res.end('{}'); });
-  const native = https.request; let handoffs = 0;
-  const request = ((url: URL, options: https.RequestOptions, callback: any) => { handoffs++; return native(new URL(url.pathname, server.baseUrl), { ...options, ca: server.ca, servername: 'localhost' }, callback); }) as typeof https.request;
+  const native = https.request; let handoffs = 0; let closes = 0;
+  const request = ((url: URL, options: https.RequestOptions, callback: any) => {
+    handoffs++; const req = native(new URL(url.pathname, server.baseUrl), { ...options, ca: server.ca, servername: 'localhost' }, callback);
+    req.once('close', () => { closes++; }); return req;
+  }) as typeof https.request;
   const reader = createKubernetesReader(f.target, { request }); t.after(() => { gate.resolve(); });
   const pre = new AbortController(); pre.abort(); await assert.rejects(reader.getGateway(pre.signal)); assert.equal(handoffs, 0);
-  const pending = assert.rejects(reader.getGateway()); await eventually(() => entered); await reader.close(); await pending;
+  const pending = assert.rejects(reader.getGateway()); await eventually(() => entered); await reader.close(); assert.equal(closes, 1); await pending;
   await assert.rejects(reader.getAgent()); assert.equal(handoffs, 1); gate.resolve();
 });

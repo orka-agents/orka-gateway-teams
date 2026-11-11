@@ -16,8 +16,8 @@ import { runtimeIdentity } from './support/table-runtime.js';
 import { deferred, eventually, tableService } from './support/table-service.js';
 import { TestClock } from './support/table-v3.js';
 
-async function fixture(t: test.TestContext, initialize = true) {
-  const config = registryInput(); const identity = await runtimeIdentity(t);
+async function fixture(t: test.TestContext, initialize = true, count = 2, expirySeconds = 3600) {
+  const config = registryInput(count); const identity = await runtimeIdentity(t, expirySeconds);
   const domains: { target: string; kind: 'ingress' | 'delivery'; storeId: string; service: Awaited<ReturnType<typeof tableService>> }[] = [];
   for (const target of config.targets) for (const kind of ['ingress', 'delivery'] as const) {
     const storeId = kind === 'ingress' ? target.config.storage.ingressStoreId : target.config.storage.deliveryStoreId!;
@@ -30,7 +30,7 @@ async function fixture(t: test.TestContext, initialize = true) {
     const selected = domains.filter(d => data.includes(`v1_${d.kind}_${Buffer.from(d.storeId).toString('base64url')}`));
     if (selected.length !== 1) { contract = false; res.destroy(); return; }
     const service = selected[0]!.service;
-    const forward = native(new URL(req.url!, service.fixture.baseUrl), { method: req.method, headers: req.headers,
+    const forward = native({ hostname: '127.0.0.1', port: new URL(service.fixture.baseUrl).port, path: req.url!, method: req.method, headers: req.headers,
       agent: false, rejectUnauthorized: true, ca: service.fixture.ca, servername: 'localhost' }, response => { res.writeHead(response.statusCode!, response.headers); response.pipe(res); });
     forward.on('error', () => res.destroy()); forward.end(body);
   });
@@ -45,8 +45,42 @@ async function fixture(t: test.TestContext, initialize = true) {
       ...(kind === 'ingress' ? { audit: c.storage.audit, maxIndexBytes: c.storage.maxIndexBytes } : {}) } as never, { tableRequest: request, storageIdentity: deps.storageIdentity });
   }
   t.after(() => { assert.equal(contract, true); assert.equal(domains.some(d => d.service.stats.violation), false); });
-  return { config, deps, domains, auth };
+  return { config, deps, domains, auth, identity };
 }
+
+test('32 targets drain a shared held refresh and release all 64 domains cleanly', async t => {
+  const f = await fixture(t, true, 32, 30); const gate = deferred();
+  const runtime = await startRegistryRuntime(f.config, f.deps); let stopped = false;
+  try {
+    const before = f.identity.calls.storage; f.identity.delayStorage(gate.promise);
+    const result = runtime.stop().then(() => { stopped = true; return true; }, () => { stopped = true; return false; });
+    await eventually(() => f.identity.calls.storage > before); assert.equal(stopped, false);
+    gate.resolve(); assert.equal(await result, true, 'supported 64-domain release cannot overflow token admission'); await runtime.done;
+    assert.ok(f.domains.every(d => d.service.rows.get('M')!.Owner === ''));
+  } finally { gate.resolve(); await runtime.stop().catch(() => {}); }
+});
+
+test('callback all-target revalidation overlaps independent domains instead of serializing their network latency', async t => {
+  const f = await fixture(t); await seed(f); const gate = deferred(); let entered = 0;
+  const c = f.config.targets[0]!.config;
+  const { createTableDeliveryJournalV3 } = await import('../src/delivery/table-journal.js');
+  const samples = [createTableIngressStoreV3({ kind: 'ingress', account: c.storage.account, table: c.storage.table, storeId: c.storage.ingressStoreId, scope: c.scope },
+    { token: async () => 'unused' }, { audit: c.storage.audit, maxIndexBytes: c.storage.maxIndexBytes }),
+    createTableDeliveryJournalV3({ kind: 'delivery', account: c.storage.account, table: c.storage.table, storeId: c.storage.deliveryStoreId!, scope: { appId: c.scope.appId, tenantId: c.scope.tenantId } }, { token: async () => 'unused' })];
+  for (const sample of samples) {
+    const proto = Object.getPrototypeOf(sample); const original = proto.leaseAuthority;
+    t.mock.method(proto, 'leaseAuthority', function(this: typeof sample) {
+      const a = original.call(this); return { ...a, async revalidate() { entered++; if (entered === 1) await gate.promise; return a.revalidate(); } };
+    });
+  }
+  const runtime = await startRegistryRuntime(f.config, { ...f.deps, botToken: async () => 'synthetic-only',
+    providerPost: async () => ({ status: 201, data: Buffer.from('{"id":"receipt"}') }) });
+  t.after(async () => { gate.resolve(); await runtime.stop().catch(() => {}); });
+  const response = fetch(`http://127.0.0.1:${runtime.outboundPort}/targets/tools/v1/deliveries`, { method: 'POST', headers: {
+    authorization: 'Bearer callback-tools', 'content-type': 'application/json' }, body: JSON.stringify(finalDelivery) });
+  await eventually(() => entered > 0); const concurrent = entered; gate.resolve(); await response; await runtime.stop();
+  assert.equal(concurrent, 4, 'one held remote lease read must not defer reads of the other independent domains');
+});
 
 test('all four V3 audits precede listeners; only legacy admits new Teams tasks; no Kubernetes startup request', async t => {
   const f = await fixture(t); let listens = 0;

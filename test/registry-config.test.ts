@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { chmodSync, linkSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -45,6 +45,17 @@ for (const key of ['ORKA_BASE_URL', 'ORKA_GATEWAY_NAMESPACE', 'ORKA_GATEWAY_NAME
   });
 for (const env of [{ GATEWAY_STORAGE_BACKEND: 'table-v2' }, { OUTBOUND_ENABLED: 'false' }]) test(`registry requires full V3 ${JSON.stringify(env)}`, t => {
   const f = registryFixture(t); assert.throws(() => parseRegistryConfig({ ...f.env, ...env }), ConfigurationError);
+});
+
+for (const kind of ['manifest', 'parent'] as const) test(`registry refuses untrusted writable ${kind} while allowing an owned public-readable manifest`, t => {
+  const f = registryFixture(t); chmodSync(f.env.ORKA_REGISTRY_FILE, 0o644); assert.equal(parseRegistryConfig(f.env).targets.length, 2);
+  if (kind === 'manifest') chmodSync(f.env.ORKA_REGISTRY_FILE, 0o666);
+  else {
+    const directory = join(f.directory, 'manifest-dir'); mkdirSync(directory, { mode: 0o700 });
+    const path = join(directory, 'registry.json'); writeFileSync(path, JSON.stringify(f.manifest)); f.env.ORKA_REGISTRY_FILE = path;
+    chmodSync(directory, 0o777);
+  }
+  assert.throws(() => parseRegistryConfig(f.env), ConfigurationError);
 });
 
 test('registry rejects credential reuse across slots and directions without printing it', t => {

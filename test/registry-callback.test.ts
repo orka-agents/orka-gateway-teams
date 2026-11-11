@@ -67,6 +67,21 @@ test('body cannot select a different callback journal', async t => {
   assert.equal((await f.call('/v1/deliveries', 'callback-legacy', { ...finalDelivery, targetId: 'tools' })).status, 400);
   assert.deepEqual(f.routes, [0, 0]); assert.equal(f.posts(), 0);
 });
+test('single-target outbound.stop still drains the real sender after caller cancellation', async t => {
+  const directory = mkdtempSync(join(tmpdir(), 'single-sender-drain-')); const path = join(directory, 'journal');
+  const journalScope = { appId: scope.appId, tenantId: scope.tenantId }; initializeDeliveryJournal(path, journalScope);
+  const journal = openDeliveryJournal(path, journalScope); const auth = await authFixture(t); const gate = deferred<void>(); let entered = false;
+  const receiver = await startReceiver(receiverConfig, { scope, admit() { return { kind: 'full' }; } }, { ...auth.dependencies,
+    botToken: async () => { entered = true; await gate.promise; return 'synthetic-only'; } }, { journal, getRoute: () => ({ serviceUrl, channelId: 'msteams',
+      bot: { id: receiverConfig.recipientIds[0]!, role: 'bot' }, conversation: { id: finalDelivery.contextId, conversationType: 'personal', tenantId: scope.tenantId } }) });
+  t.after(async () => { gate.resolve(); await receiver.stop(); journal.close(); rmSync(directory, { recursive: true, force: true }); });
+  const abort = new AbortController(); const delivery = receiver.outbound!.deliver(finalDelivery, { signal: abort.signal });
+  await eventually(() => entered); abort.abort(); await delivery;
+  let stopped = false; const stopping = receiver.outbound!.stop().then(() => { stopped = true; });
+  await new Promise(resolve => setImmediate(resolve)); const early = stopped; gate.resolve(); await stopping;
+  assert.equal(early, false, 'single-target dispatcher retains actual SDK token work after logical send cancellation');
+});
+
 test('stopping one borrowed dispatcher does not stop the shared sender; receiver stop drains held actual token work', async t => {
   const f = await fixture(t, true); await f.receiver.outbounds!.get('legacy')!.stop();
   const response = f.call('/targets/tools/v1/deliveries', 'callback-tools', finalDelivery).then(r => r.arrayBuffer(), () => undefined);

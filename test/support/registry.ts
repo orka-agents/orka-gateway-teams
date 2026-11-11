@@ -5,8 +5,8 @@ import { receiverConfig, scope } from './ingress-auth.js';
 import type { FixtureHooks } from './ingress-https.js';
 import { storageClientId, tableRuntimeConfig } from './table-runtime.js';
 
-export function registryInput() {
-  return { schemaVersion: 1 as const, legacyTargetId: 'legacy', targets: ['legacy', 'tools'].map(id => {
+export function registryInput(count = 2) {
+  return { schemaVersion: 1 as const, legacyTargetId: 'legacy', targets: Array.from({ length: count }, (_, i) => i === 0 ? 'legacy' : i === 1 ? 'tools' : `target-${i}`).map(id => {
     const config = tableRuntimeConfig({ ...scope, ...(id === 'legacy' ? {} : { orkaBaseUrl: 'https://tools.example.invalid/' }) });
     config.receiver = { ...receiverConfig }; config.storage.backend = 'table-v3';
     config.storage.ingressStoreId = `${id}-inbox`; config.storage.deliveryStoreId = `${id}-delivery`;

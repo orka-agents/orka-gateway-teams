@@ -12,10 +12,11 @@ export function readRegistryFile(path: string, limit: number, privateFile = true
   let fd: number | undefined;
   try {
     absoluteFile(path); const parent = dirname(path); const directory = fs.lstatSync(parent);
-    if (!directory.isDirectory() || fs.realpathSync(parent) !== parent || (privateFile && ((directory.mode & 0o022) !== 0 || directory.uid !== process.getuid?.()))) throw new ConfigurationError();
+    const trusted = (s: Stats) => (s.uid === process.getuid?.() || (!privateFile && s.uid === 0)) && (s.mode & 0o022) === 0;
+    if (!directory.isDirectory() || fs.realpathSync(parent) !== parent || !trusted(directory)) throw new ConfigurationError();
     const before = fs.lstatSync(path);
     const check = (s: Stats) => {
-      if (!s.isFile() || s.nlink !== 1 || s.size > limit || (privateFile && ((s.mode & 0o077) !== 0 || s.uid !== process.getuid?.()))) throw new ConfigurationError();
+      if (!s.isFile() || s.nlink !== 1 || s.size > limit || !trusted(s) || (privateFile && (s.mode & 0o077) !== 0)) throw new ConfigurationError();
     };
     check(before); fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
     same(before, fs.fstatSync(fd)); const bytes = Buffer.alloc(limit + 1); let size = 0;
