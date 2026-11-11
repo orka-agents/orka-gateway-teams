@@ -63,6 +63,10 @@ for operator review; it does not authorize the sender or configure the Binding.
 handover procedure. Do not repeat first-install initialization, delete stores to
 make startup succeed, or replace an active storage owner.
 
+For operator-managed Table V3 targets behind one bot, see the
+[Orka registry](docs/registry.md). New Teams intake remains pinned to one legacy
+target; self-service connections and group policy are not implemented.
+
 ## Install from a release
 
 Download `orka-teams-app-kit-<version>.tar.gz` from

@@ -99,11 +99,11 @@ function checkEntity(e: Record<string, unknown>, expectedPartition: string, expe
     e.Digest === hash(['orka-data-v1', expectedBinding.toString('base64'), e.T, e.Id, payload.toString('base64')]);
 }
 export async function tableService(t: FixtureHooks, kind: 'delivery' | 'ingress' = 'delivery', metadataFormat: 1 | 2 | 3 = 1,
-  scopeOverride?: Partial<Extract<TableBinding, { kind: 'ingress' }>['scope']>, tlsFixture: typeof httpsFixture = httpsFixture) {
-  const partition = kind === 'delivery' ? 'v1_delivery_c3RhYmxl' : 'v1_ingress_c3RhYmxl';
+  scopeOverride?: Partial<Extract<TableBinding, { kind: 'ingress' }>['scope']>, tlsFixture: typeof httpsFixture = httpsFixture, storeId = 'stable') {
+  const partition = `v1_${kind}_${Buffer.from(storeId).toString('base64url')}`;
   const scope = { appId: 'App', tenantId: 'Tenant', orkaBaseUrl: 'https://orka.example.invalid/', gatewayNamespace: 'gateway', gatewayName: 'teams', ...scopeOverride };
   // Keep wire expectations fixture-owned, including the ordered full ingress scope.
-  const expectedBinding = Buffer.from(JSON.stringify(['orka-table-v1', 'example123', 'journal', kind, 'stable', kind === 'delivery' ?
+  const expectedBinding = Buffer.from(JSON.stringify(['orka-table-v1', 'example123', 'journal', kind, storeId, kind === 'delivery' ?
     [scope.appId, scope.tenantId] : [scope.appId, scope.tenantId, scope.orkaBaseUrl, scope.gatewayNamespace, scope.gatewayName]]));
   const rows = new Map<string, Record<string, unknown>>(); let version = 0;
   const stats = { requests: 0, writes: 0, reads: 0, pages: 0, tokens: 0, requestCloses: 0, socketCloses: 0, sockets: 0, physicalSocketCloses: 0, bytes: 0, violation: false, lastActions: 0, conditionFailure: '' };

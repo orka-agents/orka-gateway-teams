@@ -1,0 +1,131 @@
+# Operator-managed Orka registry
+
+`node dist/ingress/main.js serve-registry` runs one Teams bot with separate
+Table V3 inboxes, delivery journals, callback bearers and relay loops for registered
+Orkas. Existing `serve` modes (SQLite, Table V2 and Table V3) are unchanged.
+
+New Teams messages still go **only to `legacyTargetId`**. Other slots can drain
+previously accepted work and serve their own callbacks; registering one does not
+authorize new Teams requests to it. Group policy, discovery, chat connections,
+Binding provisioning and the generic no-access reply are separate features, not
+implemented by this command. No Kubernetes request or token-file read happens
+on registry startup or relay.
+
+## Manifest and environment
+
+Set `ORKA_REGISTRY_FILE` to an absolute, canonical path to an operator-owned JSON
+file. Its owner and parent-directory owner must be the runtime user or root;
+neither may be group/world writable. Readable mode 0644 is allowed for the
+manifest, which contains no bearer values. It has a closed schema (unknown keys, including `agents`, are rejected),
+version 1, at most 32 targets and at most 256 KiB. For example:
+
+```json
+{
+  "schemaVersion": 1,
+  "legacyTargetId": "platform",
+  "targets": [{
+    "id": "platform",
+    "label": "Platform",
+    "orkaBaseUrl": "https://orka.example.invalid/",
+    "gatewayNamespace": "default",
+    "gatewayName": "teams",
+    "gatewayUid": "expected-gateway-uid",
+    "frontAgent": { "namespace": "default", "name": "front" },
+    "ingressStoreId": "platform-inbox",
+    "deliveryStoreId": "platform-delivery",
+    "ingressTokenFile": "/run/orka/platform-ingress",
+    "callbackTokenFile": "/run/orka/platform-callback",
+    "kubernetesBaseUrl": "https://kubernetes.example.invalid/",
+    "kubernetesTokenFile": "/run/orka/platform-kubernetes.json"
+  }]
+}
+```
+
+Optional per-target `orkaCaFile` and `kubernetesCaFile` select PEM CA bundles;
+otherwise system trust applies. All file references are absolute and canonical.
+Orka URLs must have their canonical trailing slash. Kubernetes URLs are HTTPS
+origins with a trailing slash, without credentials, query, fragment or path prefix.
+The front Agent must be in the Gateway namespace. IDs match
+`[a-z][a-z0-9-]{0,62}`. Labels are display values, not routing keys.
+
+Ingress and callback files contain only their bearer (an outer newline is allowed),
+not JSON. Each is a regular, single-link private file owned by the runtime user
+(mode 0600 or stricter), bounded to 16 KiB, under an owned directory not writable
+by group or others. Symlinks and aliased parent paths are rejected. Directional
+bearers must be distinct across every slot. No credential belongs in the manifest.
+
+Use the existing shared bot, listener, policy and Table environment settings from
+the [runtime reference](runtime-reference.md) and [Table guide](table-runtime.md):
+`GATEWAY_STORAGE_BACKEND=table-v3`, `OUTBOUND_ENABLED=true`, `TEAMS_*`,
+`INGRESS_HOST/PORT`, `INGRESS_MAX_*`, `INGRESS_REPLAY_WINDOW_MS`,
+`OUTBOUND_HOST/PORT`, `INTERIM_DELIVERY_ENABLED`, `MEETING_DRAFTS_ENABLED`,
+`TABLE_ACCOUNT`, `TABLE_NAME`, `TABLE_MANAGED_IDENTITY_*`, `TABLE_AUDIT_*`
+and `TABLE_MAX_INDEX_BYTES`. All slots share one storage account, table and identity.
+Do not also set `ORKA_BASE_URL`, `ORKA_GATEWAY_NAMESPACE`, `ORKA_GATEWAY_NAME`,
+`ORKA_BEARER_TOKEN`, `ORKA_OUTBOUND_BEARER_TOKEN`, `ORKA_CA_FILE`,
+`TABLE_INGRESS_STORE_ID` or `TABLE_DELIVERY_STORE_ID`: those come from each target.
+SQLite paths, recovery and upgrade inputs remain invalid for Table serving.
+
+## Storage and handover
+
+Initialize **new** slots explicitly, once per domain, using the existing
+`node dist/ingress/main.js init` and `init-delivery` commands. For those commands,
+supply that target's `ORKA_BASE_URL`, `ORKA_GATEWAY_NAMESPACE`,
+`ORKA_GATEWAY_NAME`, `TABLE_INGRESS_STORE_ID` and `TABLE_DELIVERY_STORE_ID` alongside
+the shared app, tenant, Table V3 storage and audit configuration. Initialization
+does not consume `ORKA_REGISTRY_FILE`; it retains the existing command contracts.
+Never initialize, reset or repair stores through `serve-registry`.
+
+Preserve the legacy target's exact app/tenant/Orka/Gateway scope and both stable
+store IDs, so it opens the same history. Inbox IDs must be unique among inboxes;
+delivery IDs must be unique among journals. The two domains may retain the same
+legacy ID because their partition kinds differ. Existing V2 data requires the
+separate audited V3 upgrade procedure, not reinitialization.
+
+Stop and actually drain the previous owner before switching commands or editing
+registration, CA or startup credentials. A lease timeout alone is not proof of
+drain. One replica owns every configured store (2N leases); all must open and audit
+before readiness. Shared token capacity covers all 64 domains at 32 targets;
+independent lease revalidation reads run in parallel, retaining the all-target
+failure boundary. Any unsafe or busy store prevents startup. Any lease loss or
+storage poison stops every slot. An unreachable Orka only delays its own relay;
+no work moves between targets. Listener, SDK, token, provider and relay work drains
+before stores close; the shared storage token provider closes last.
+
+The routing digest hashes the versioned app/tenant/target/Orka/Kubernetes/Gateway
+and front-Agent tuple. Changing those fields requires explicit history
+reconciliation, not reassignment. Labels and credential/CA paths or values do not
+change it. Kubernetes configuration is structural metadata until a caller uses
+the read library; registration does not verify a live Gateway UID or Agent.
+
+## Callback paths
+
+The legacy slot keeps `/v1/deliveries`, `/v1/health`, `/v1/capabilities` and its
+existing callback bearer. Other slots use `/targets/<id>/v1/deliveries`,
+`/targets/<id>/v1/health`, `/targets/<id>/v1/capabilities`. Configure each Orka's
+callback base accordingly. These are on the shared outbound listener, not the
+SDK's `/api/messages` listener. A slot's bearer cannot authorize another slot's
+path. Authentication precedes body parsing, readiness and storage; unknown paths
+return authenticated 404 without storage access. Delivery bodies cannot select a
+slot. The existing 32-active-delivery budget is listener-wide, not per target.
+
+## Standalone Kubernetes reads
+
+`createKubernetesReader` in `src/registry/kubernetes.ts` is a library, not a
+provisioner or a background loop. It exposes GET-only reads for the named Gateway,
+front Agent and namespaced GatewayBindings. Callers must still validate CRD
+semantics, identity, readiness and overlap. HTTPS is verified, redirects are
+refused, each request is bounded to ten seconds/1 MiB, and lists to 100 pages and
+10,000 Bindings. Continuation values are encoded into the fixed resource path;
+response URLs never receive a token. `close()` aborts and drains actual requests.
+
+Before every GET (including each list page), it rereads a protected regular JSON
+file of at most 16 KiB containing exactly `{ "token": "...", "expiresAt": "..." }`.
+Expiry is the issued UTC timestamp, not the requested token lifetime. Operations
+stop five minutes before expiry with `credential-expiring`. An unreadable,
+malformed, public, expired or missing file fails closed without cached fallback.
+An operator atomically replaces it with a privately issued valid token and its
+returned expiry; the next read uses the replacement without restart. The reader
+cannot issue tokens, change roles or renew access. Endpoint/CA changes still need
+a drained restart. No live token issuance, revocation or Teams walk is established
+by synthetic tests.

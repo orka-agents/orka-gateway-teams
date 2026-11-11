@@ -73,13 +73,14 @@ export async function runtimeTableService(t: FixtureHooks, scope: Readonly<Ingre
 /** Fixed-purpose ACA fixture for the REAL storage provider and bot federation. */
 export async function runtimeIdentity(t: FixtureHooks, expirySeconds = 3600) {
   acaEnvironment(t);
-  const calls = { storage: 0, bot: 0, contract: true };
-  const fixture = await identityFixture(t, (req, res) => {
+  const calls = { storage: 0, bot: 0, contract: true }; let storageGate: Promise<void> | undefined;
+  const fixture = await identityFixture(t, async (req, res) => {
     const url = new URL(req.url!, 'http://127.0.0.1');
     calls.contract &&= req.headers['x-identity-header'] === acaHeader && url.pathname === '/msi/token' && url.searchParams.get('api-version') === '2019-08-01';
     const resource = url.searchParams.get('resource');
     if (resource === 'https://storage.azure.com/') {
       calls.storage++; calls.contract &&= url.searchParams.get('client_id') === storageClientId;
+      if (storageGate) await storageGate;
       res.end(JSON.stringify({ access_token: syntheticToken, resource, token_type: 'Bearer',
         client_id: storageClientId, expires_on: Math.floor(Date.now() / 1000) + expirySeconds }));
     } else if (resource === 'api://AzureADTokenExchange') {
@@ -87,5 +88,6 @@ export async function runtimeIdentity(t: FixtureHooks, expirySeconds = 3600) {
       res.end(JSON.stringify({ access_token: assertion() }));
     } else { calls.contract = false; res.writeHead(400); res.end(); }
   });
-  return { ...fixture, calls, drained() { assert.equal(calls.contract, true); fixture.drained(); } };
+  return { ...fixture, calls, delayStorage(gate: Promise<void> | undefined) { storageGate = gate; },
+    drained() { assert.equal(calls.contract, true); fixture.drained(); } };
 }

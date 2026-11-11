@@ -1,5 +1,7 @@
-import { lstatSync, readFileSync } from 'node:fs';
-import { X509Certificate } from 'node:crypto';
+import { lstatSync } from 'node:fs';
+import { LeaseRuntimeFailure, readCaBundle } from './runtime-shared.js';
+import { parseRegistryConfig } from '../registry/config.js';
+import { startRegistryRuntime } from '../registry/runtime.js';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -42,9 +44,6 @@ export interface IngressRuntime { port: number; done: Promise<void>; stop(): Pro
 export type RecoveryReason = 'owner-or-epoch-mismatch' | 'already-unowned' | 'audit-or-storage-failed' | 'outcome-uncertain' | 'cancelled';
 export class RecoveryFailure extends Error {
   constructor(readonly reason: RecoveryReason) { super(`operator-recovery-failed: ${reason}`); }
-}
-class LeaseRuntimeFailure extends Error {
-  constructor(readonly category: 'lease-authority-lost' | 'lease-transition-uncertain') { super('Ingress storage failed'); }
 }
 export type StartupCategory = 'lease-owned-busy' | 'lease-authority-lost' | 'lease-transition-uncertain' | 'lease-format-unsupported' | 'store-open-failed' | 'store-owned-requires-operator-recovery' | 'listener-failed' | 'startup-failed' | 'startup-cleanup-failed';
 export type StartupReason = 'missing' | 'occupied' | 'corrupt' | 'incomplete' | 'unresolved' | 'unavailable' | 'cancelled' | 'ingress' | 'outbound';
@@ -367,26 +366,12 @@ function prepareTableProvider(identity: TableInitConfig['storage']['identity'], 
   } catch { throw new ConfigurationError(); }
 }
 
-function readCaBundle(path: string): Buffer {
-  try {
-    const bytes = readFileSync(path);
-    const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
-    const pem = /-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/gu;
-    const certificates = text.match(pem);
-    // Parse each certificate, not only the first one OpenSSL finds, and refuse
-    // incomplete blocks or arbitrary trailing content instead of silently trusting a partial bundle.
-    if (!certificates?.length || !/^[\t\r\n ]*$/u.test(text.replace(pem, ''))) throw new ConfigurationError();
-    for (const certificate of certificates) new X509Certificate(certificate);
-    return bytes;
-  } catch { throw new ConfigurationError(); }
-}
-
 async function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
   let runtime: IngressRuntime | undefined; const abort = new AbortController();
   let stopDiagnostics: (() => void) | undefined;
   const shutdown = () => { stopDiagnostics?.(); abort.abort(); if (runtime) void runtime.stop().catch(() => {}); };
   try {
-    if (args.length !== 1 || !['init', 'init-delivery', 'init-correlation', 'serve', 'recover-ingress', 'recover-delivery', 'upgrade-ingress', 'upgrade-delivery'].includes(args[0]!)) throw new ConfigurationError();
+    if (args.length !== 1 || !['init', 'init-delivery', 'init-correlation', 'serve', 'serve-registry', 'recover-ingress', 'recover-delivery', 'upgrade-ingress', 'upgrade-delivery'].includes(args[0]!)) throw new ConfigurationError();
     if (args[0] === 'init-correlation') {
       const config = parseCorrelationConfig(env);
       initializeSessionCorrelation(config.dbPath, config.scope); logIngress('initialized'); return 0;
@@ -413,10 +398,11 @@ async function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<number> {
       else initializeDeliveryJournal(config.dbPath, { appId: config.scope.appId, tenantId: config.scope.tenantId });
       logIngress('initialized'); return 0;
     }
-    const config = parseRuntimeConfig(env, 'serve');
+    const registry = args[0] === 'serve-registry' ? parseRegistryConfig(env) : undefined;
+    const config = registry ? undefined : parseRuntimeConfig(env, 'serve');
     process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
     // No environment-controlled cloud, JWKS or authentication override enters here.
-    runtime = await startIngressRuntime(config, {}, abort.signal);
+    runtime = registry ? await startRegistryRuntime(registry, {}, abort.signal) : await startIngressRuntime(config!, {}, abort.signal);
     if (!abort.signal.aborted) { logIngress('listening'); stopDiagnostics = startProcessMemoryDiagnostics(); }
     else shutdown();
     await runtime.done; logIngress('stopped'); return 0;

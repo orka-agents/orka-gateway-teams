@@ -13,7 +13,7 @@ import type { DeliveryJournalPort } from '../delivery/types.js';
 import { createDeliveryDispatcher } from '../outbound/dispatcher.js';
 import { createProviderSender } from '../outbound/sender.js';
 import type { ProviderGet, ProviderPost } from '../outbound/sender.js';
-import type { DeliveryDispatcher } from '../outbound/types.js';
+import type { DeliveryDispatcher, ProviderSender } from '../outbound/types.js';
 import { convertActivity } from '../teams/convert.js';
 import { createStrictAuth } from './auth.js';
 import { NativeAdapter } from './http-adapter.js';
@@ -28,8 +28,9 @@ export interface ReceiverDependencies { sdkCloud?: CloudEnvironment; fetchKeys?:
 export interface AdmissionSink { readonly scope: IngressStore['scope'];
   admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>): AdmissionResult | Promise<AdmissionResult> }
 export interface ReceiverOutbound { authority?: import('../storage/table/types.js').LeaseAuthority; interimDelivery?: boolean; meetingDrafts?: boolean; journal: DeliveryJournalPort; correlation?: SessionCorrelationPort; getRoute: (key: string) => ReplyRoute | undefined | Promise<ReplyRoute | undefined> }
-export interface Receiver { port: number; stop(): Promise<void>; failed: Promise<never>; outbound?: DeliveryDispatcher }
-export interface PreparedReceiver { start(sink: AdmissionSink, outbound?: ReceiverOutbound, signal?: AbortSignal): Promise<Receiver> }
+export type ReceiverOutbounds = ReceiverOutbound | { targets: readonly (ReceiverOutbound & { id: string })[] };
+export interface Receiver { port: number; stop(): Promise<void>; failed: Promise<never>; outbound?: DeliveryDispatcher; outbounds?: ReadonlyMap<string, DeliveryDispatcher> }
+export interface PreparedReceiver { start(sink: AdmissionSink, outbound?: ReceiverOutbounds, signal?: AbortSignal): Promise<Receiver> }
 
 /** Call before owning any datastore. Preparation has no listener, CCA or live file descriptors. */
 export function prepareReceiver(input: ReceiverConfig, dependencies: ReceiverDependencies = {}): PreparedReceiver {
@@ -51,18 +52,18 @@ export function prepareReceiver(input: ReceiverConfig, dependencies: ReceiverDep
     }
   } catch { throw new ConfigurationError(); }
   let started = false;
-  return Object.freeze({ async start(sink: AdmissionSink, outbound?: ReceiverOutbound, signal?: AbortSignal) {
+  return Object.freeze({ async start(sink: AdmissionSink, outbound?: ReceiverOutbounds, signal?: AbortSignal) {
     if (started) throw new ConfigurationError(); started = true;
     return startPreparedReceiver(config, sink, deps, credential, outbound, signal);
   } });
 }
 
-export async function startReceiver(input: ReceiverConfig, sink: AdmissionSink, dependencies: ReceiverDependencies = {}, outbound?: ReceiverOutbound): Promise<Receiver> {
+export async function startReceiver(input: ReceiverConfig, sink: AdmissionSink, dependencies: ReceiverDependencies = {}, outbound?: ReceiverOutbounds): Promise<Receiver> {
   return prepareReceiver(input, dependencies).start(sink, outbound);
 }
 
 async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink, dependencies: ReceiverDependencies,
-  credential: { assertUsable(): void; createToken(): TokenCredentials['token'] } | undefined, outbound?: ReceiverOutbound, signal?: AbortSignal): Promise<Receiver> {
+  credential: { assertUsable(): void; createToken(): TokenCredentials['token'] } | undefined, outbound?: ReceiverOutbounds, signal?: AbortSignal): Promise<Receiver> {
   if (signal?.aborted) throw new Error('Ingress startup failed');
   if (sink.scope.appId !== config.appId || sink.scope.tenantId !== config.tenantId) throw new Error('Invalid receiver configuration');
   const recipients = new Set(config.recipientIds); const services = new Set(config.serviceUrls);
@@ -120,9 +121,10 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
       return { status: 503 };
     }
   };
-  let dispatcher: DeliveryDispatcher | undefined; let stopping: Promise<void> | undefined;
+  let dispatcher: DeliveryDispatcher | undefined; let sender: ProviderSender | undefined; let stopping: Promise<void> | undefined;
+  const dispatchers = new Map<string, DeliveryDispatcher>();
   const stop = () => stopping ??= (async () => {
-    const results = await Promise.allSettled([adapter.stop(), dispatcher?.stop()]);
+    const results = await Promise.allSettled([adapter.stop(), ...[...dispatchers.values()].map(d => d.stop()), sender?.stop()]);
     if (results.some((result) => result.status === 'rejected')) throw new Error('Ingress shutdown failed');
   })();
   try {
@@ -130,7 +132,7 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
       // Constructor clientSecret takes precedence over its token option. Tests
       // replace only this SAME App's public factory; production retains the SDK factory.
       if (dependencies.botToken !== undefined) app.api.http.token = dependencies.botToken;
-      const sender = createProviderSender(async () => {
+      sender = createProviderSender(async () => {
         try {
           const factory = app.api.http.token;
           const value = typeof factory === 'function' ? await factory({}) : factory;
@@ -140,11 +142,17 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
         } catch { return undefined; }
       }, { ...(dependencies.providerPost === undefined ? {} : { post: dependencies.providerPost }),
         ...(dependencies.providerGet === undefined ? {} : { get: dependencies.providerGet }) });
-      dispatcher = createDeliveryDispatcher({ ...(outbound.authority === undefined ? {} : { authority: outbound.authority }), journal: outbound.journal, getRoute: outbound.getRoute,
-        ...(outbound.interimDelivery === undefined ? {} : { interimDelivery: outbound.interimDelivery }),
-        ...(outbound.meetingDrafts === undefined ? {} : { meetingDrafts: outbound.meetingDrafts }),
-        ...(outbound.correlation === undefined ? {} : { correlation: outbound.correlation }),
-        scope: { appId: config.appId, tenantId: config.tenantId }, serviceUrls: config.serviceUrls, recipientIds: config.recipientIds, sender });
+      const shared = sender;
+      const borrowed: ProviderSender = { send: (...args) => shared.send(...args), stop: async () => {},
+        ...(shared.getMembers === undefined ? {} : { getMembers: (...args: Parameters<NonNullable<ProviderSender['getMembers']>>) => shared.getMembers!(...args) }) };
+      const slots = 'targets' in outbound ? outbound.targets : [{ ...outbound, id: '' }];
+      if (!slots.length || slots.length > 32) throw new ConfigurationError();
+      for (const slot of slots) {
+        if (dispatchers.has(slot.id) || ('targets' in outbound && !/^[a-z][a-z0-9-]{0,62}$/u.test(slot.id))) throw new ConfigurationError();
+        dispatchers.set(slot.id, createDeliveryDispatcher({ ...slot,
+          scope: { appId: config.appId, tenantId: config.tenantId }, serviceUrls: config.serviceUrls, recipientIds: config.recipientIds, sender: 'targets' in outbound ? borrowed : shared }));
+      }
+      if (!('targets' in outbound)) dispatcher = dispatchers.get('');
     }
     await app.initialize();
     credential?.assertUsable();
@@ -153,7 +161,8 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
     if (signal?.aborted) throw new Error('Ingress startup failed');
     const port = await adapter.listen(config.host, config.port);
     if (signal?.aborted) throw new Error('Ingress startup failed');
-    return { port, failed, stop, ...(dispatcher === undefined ? {} : { outbound: dispatcher }) };
+    return { port, failed, stop, ...(dispatcher === undefined ? {} : { outbound: dispatcher }),
+      ...(outbound && 'targets' in outbound ? { outbounds: dispatchers as ReadonlyMap<string, DeliveryDispatcher> } : {}) };
   } catch (error) {
     await stop(); throw error instanceof ConfigurationError ? error : new Error('Ingress startup failed');
   }

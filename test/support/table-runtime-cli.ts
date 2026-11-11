@@ -116,7 +116,7 @@ export function hasTableCanary(rows: readonly Record<string, unknown>[], canarie
 
 /** Same qualification for a private fresh tsc output and the actual compiled image.
  * Docker is selected only by the explicit support-file runner, never npm test. */
-export async function qualifyTableCli(t: CliFixtureHooks, image?: string, backend: 'table-v2' | 'table-v3' = 'table-v2'): Promise<void> {
+export async function qualifyTableCli(t: CliFixtureHooks, image?: string, backend: 'table-v2' | 'table-v3' = 'table-v2', registry = false): Promise<void> {
   const directory = mkdtempSync(join(tmpdir(), 'teams-table-cli-'));
   const fixtureDir = join(directory, 'fixture'); const work = join(directory, 'work');
   const runs: ProcessRun[] = []; let fixtureOwners = 0;
@@ -254,7 +254,23 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string, backen
     assert.deepEqual(readdirSync(work), [], 'no SQLite or other CLI artifacts'); return counts;
   }
   async function start() {
-    const run = launch('serve', serving);
+    const settings: Record<string, string> = { ...serving };
+    if (registry) {
+      assert.equal(image, undefined); assert.equal(backend, 'table-v3');
+      const ingressTokenFile = join(directory, 'ingress-token'); const callbackTokenFile = join(directory, 'callback-token');
+      writeFileSync(ingressTokenFile, serving.ORKA_BEARER_TOKEN, { mode: 0o600 });
+      writeFileSync(callbackTokenFile, serving.ORKA_OUTBOUND_BEARER_TOKEN, { mode: 0o600 });
+      settings.ORKA_REGISTRY_FILE = join(directory, 'registry.json');
+      writeFileSync(settings.ORKA_REGISTRY_FILE, JSON.stringify({ schemaVersion: 1, legacyTargetId: 'legacy', targets: [{
+        id: 'legacy', label: 'Legacy', orkaBaseUrl: scope.orkaBaseUrl, gatewayNamespace: scope.gatewayNamespace, gatewayName: scope.gatewayName,
+        gatewayUid: 'synthetic-uid', frontAgent: { namespace: scope.gatewayNamespace, name: 'front' },
+        ingressStoreId: 'stable', deliveryStoreId: 'stable', ingressTokenFile, callbackTokenFile,
+        kubernetesBaseUrl: 'https://kubernetes.example.invalid/', kubernetesTokenFile: join(directory, 'missing-kubernetes-token'),
+      }] }));
+      for (const key of ['ORKA_BASE_URL', 'ORKA_GATEWAY_NAMESPACE', 'ORKA_GATEWAY_NAME', 'ORKA_BEARER_TOKEN', 'ORKA_OUTBOUND_BEARER_TOKEN', 'TABLE_INGRESS_STORE_ID', 'TABLE_DELIVERY_STORE_ID']) delete settings[key];
+      await finished(launch('serve-registry', { ...settings, ORKA_BASE_URL: scope.orkaBaseUrl }), 1, 'configuration-failed', false);
+    }
+    const run = launch(registry ? 'serve-registry' : 'serve', settings);
     await until(() => run.output().includes('teams-ingress: listening\n') || run.child.exitCode !== null, 'compiled CLI listening');
     assert.equal(run.output().includes('teams-ingress: listening\n'), true, 'compiled CLI readiness');
     return run;

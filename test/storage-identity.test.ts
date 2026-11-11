@@ -166,6 +166,22 @@ for (const expiry of ['cancellation', 'deadline']) test(`storage singleflight ke
   } finally { gate.resolve(); await provider.close(); }
 });
 
+test('registry capacity admits 64 actual token callers, rejects the 65th, and drains one shared held refresh', async t => {
+  acaEnvironment(t); const reached = deferred<void>(); const gate = deferred<void>();
+  const local = await identityFixture(t, async (_req, res) => { reached.resolve(); await gate.promise; res.end(JSON.stringify(envelope())); });
+  const provider = prepareStorageIdentity({ host: 'azure-container-apps', clientId }).createProvider({ request: local.request }, 64);
+  const pending = Array.from({ length: 64 }, () => provider.token(scope, context()));
+  const results = Promise.allSettled(pending); await reached.promise;
+  try {
+    await assert.rejects(provider.token(scope, context()), unavailable); assert.equal(local.stats.calls, 1);
+    gate.resolve(); assert.equal((await results).filter(r => r.status === 'fulfilled').length, 64);
+    await provider.close(); local.drained();
+  } finally { gate.resolve(); await provider.close(); }
+});
+for (const capacity of [0, -1, 65, 1.5, NaN]) test(`invalid storage token capacity ${capacity} is refused before acquisition`, () => {
+  assert.throws(() => prepareStorageIdentity({ host: 'imds', clientId }).createProvider({}, capacity));
+});
+
 for (const variant of ['deadline', 'close', 'source changed', 'late envelope']) {
   test('storage retains actual work across ' + variant + ' and never publishes an ineligible result', { timeout: 8000 }, async (t) => {
     acaEnvironment(t); const reached = deferred<void>(); const gate = deferred<void>();
