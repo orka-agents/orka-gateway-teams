@@ -48,6 +48,8 @@ for (const domain of ['ingress', 'delivery'] as const) for (const phase of ['cla
     else assert.equal((await old.next()).kind, phase === 'claimed' ? domain === 'ingress' ? 'armed' : 'claimed' : domain === 'ingress' ? 'ready' : 'result');
     const oldOwner = s.rows.get('M')!.Owner;
     if (phase === 'persisted') { assert.equal(old.child.kill('SIGKILL'), true); await old.exit; }
+    // Posting workers stop themselves after native flush; a parent SIGSTOP could precede that stop and cause another after SIGCONT.
+    else if (phase === 'posting') await eventually(() => /^State:\s+T/mu.test(readFileSync(`/proc/${old.child.pid}/status`, 'utf8')));
     else await old.pause();
     writeFileSync(clockFile, '125001');
     const next = worker(t, domain, { ...config, mode: domain === 'ingress' ? 'probe' : 'replay' });
