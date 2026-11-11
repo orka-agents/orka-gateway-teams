@@ -103,6 +103,9 @@ is not test or CI success. A changed branch can race with PR creation. Cards,
 durable approval, one-use PR creation and uncertain-result recovery are later
 integration work, not capabilities supplied by this manifest.
 
-Revoke the publication token on completion or abort, then clean up only approved
-owned resources. Secret deletion alone is not revocation. No cloud, credential,
-Teams or cluster operation is authorized by copying these templates.
+Revoke the publication token on completion or abort. Revocation does not stop a
+running child: stop it or wait for it to finish, then check whether publication
+completed or is still uncertain before removing any control records. Retain
+unresolved publication records. Clean up only approved owned resources; Secret
+deletion alone is not revocation. No cloud, credential, Teams or cluster operation
+is authorized by copying these templates.
