@@ -23,7 +23,7 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   const prepared = prepareReceiver(legacy.config.receiver, deps);
   const abort = new AbortController(); const loss = new AbortController(); const authorities: LeaseAuthority[] = [];
   const subscriptions: (() => void)[] = []; const handles: { open(): Promise<unknown>; close(): Promise<unknown> }[] = [];
-  let ready = false; let fatal = false; let receiver: Receiver | undefined; let api: OutboundServer | undefined;
+  let ready = false; let fatal = false; let opening = true; let receiver: Receiver | undefined; let api: OutboundServer | undefined;
   let stopRuntime: (() => Promise<void>) | undefined; let closing: Promise<void> | undefined;
   const authority: LeaseAuthority = {
     allowed: () => !loss.signal.aborted && !abort.signal.aborted && authorities.every(a => a.allowed()),
@@ -40,9 +40,10 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   const cancel = () => {
     ready = false; abort.abort();
     if (stopRuntime) void stopRuntime().catch(() => {});
-    else {
-      // All retained handles cancel actual startup, including later foreign-lease waits.
-      setImmediate(() => { if (!stopRuntime) { unsubscribe(); for (const h of handles) void Promise.resolve().then(() => h.close()).catch(() => {}); } });
+    else if (opening) {
+      // Cancel foreign-lease waits only during store opening. Listener/SDK startup
+      // must unwind and drain before catch releases any store.
+      setImmediate(() => { if (!stopRuntime && opening) { unsubscribe(); for (const h of handles) void Promise.resolve().then(() => h.close()).catch(() => {}); } });
     }
   };
   const lost = () => { fatal = true; loss.abort(); cancel(); };
@@ -68,6 +69,7 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
     }
     // Every handle is retained and subscribed before the first ownership await.
     for (const h of handles) { assertStarting(); await h.open(); assertStarting(); }
+    opening = false;
     const admission = slots.find(s => s.target.id === config.legacyTargetId)!.inbox;
     receiver = await prepared.start({ scope: admission.scope, admit: (event, route) => active() ? admission.admit(event, route) : { kind: 'full' } },
       { targets: slots.map(s => ({ id: s.target.id, journal: s.journal, correlation: s.journal, authority,
@@ -90,9 +92,12 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   const relays = slots.map((s, i) => (async () => {
     try {
       while (!abort.signal.aborted) {
-        if (!await relayOne(s.inbox, clients[i]!, abort.signal, active)) await sleep(100, undefined, { signal: abort.signal });
+        if (!await relayOne(s.inbox, clients[i]!, abort.signal, active)) {
+          try { await sleep(100, undefined, { signal: abort.signal }); }
+          catch { if (!abort.signal.aborted) throw new Error('Relay scheduling failed'); }
+        }
       }
-    } catch { if (!abort.signal.aborted) { fatal = true; cancel(); } }
+    } catch { fatal = true; cancel(); }
   })());
   const stop = (): Promise<void> => closing ??= (async () => {
     ready = false; abort.abort();

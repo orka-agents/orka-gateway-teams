@@ -91,6 +91,43 @@ test('cancellation during a later live foreign-lease wait closes every retained 
   assert.ok(f.domains.slice(0, 3).every(d => d.service.rows.get('M')?.Owner === ''));
   await foreign.close(); await provider.close();
 });
+test('startup cancellation never closes stores before held actual listener startup drains', async t => {
+  const f = await fixture(t); const abort = new AbortController(); const gate = deferred(); let entered = false; let drained = false; let earlyCloses = 0;
+  const listen = NativeAdapter.prototype.listen;
+  t.mock.method(NativeAdapter.prototype, 'listen', async function(this: NativeAdapter, ...args: Parameters<typeof listen>) {
+    const port = await listen.apply(this, args); entered = true; await gate.promise; drained = true; return port;
+  });
+  const c = f.config.targets[0]!.config;
+  const sample = createTableIngressStoreV3({ kind: 'ingress', account: c.storage.account, table: c.storage.table, storeId: c.storage.ingressStoreId, scope: c.scope },
+    { token: async () => 'unused' }, { audit: c.storage.audit, maxIndexBytes: c.storage.maxIndexBytes });
+  const proto = Object.getPrototypeOf(sample); const close = proto.close;
+  t.mock.method(proto, 'close', function(this: typeof sample) { if (!drained) earlyCloses++; return close.call(this); });
+  const startup = startRegistryRuntime(f.config, f.deps, abort.signal); const failure = assert.rejects(startup, { message: 'Ingress storage failed' });
+  await eventually(() => entered); abort.abort(); await new Promise(resolve => setImmediate(resolve));
+  const early = earlyCloses; gate.resolve(); await failure;
+  assert.equal(early, 0, 'store close cannot start while actual listener startup is held');
+  assert.ok(f.domains.every(d => d.service.rows.get('M')?.Owner === ''));
+});
+
+test('relay storage rejection during shutdown rejects done even when the store remains healthy', async t => {
+  const f = await fixture(t); await seed(f); const gate = deferred(); let entered = false;
+  const c = f.config.targets[0]!.config;
+  const sample = createTableIngressStoreV3({ kind: 'ingress', account: c.storage.account, table: c.storage.table, storeId: c.storage.ingressStoreId, scope: c.scope },
+    { token: async () => 'unused' }, { audit: c.storage.audit, maxIndexBytes: c.storage.maxIndexBytes });
+  const proto = Object.getPrototypeOf(sample); const retry = proto.retry;
+  // Model an async storage-port rejection with no poisoned lease, after actual durable settlement.
+  t.mock.method(proto, 'retry', async function(this: typeof sample, ...args: Parameters<typeof sample.retry>) {
+    await retry.apply(this, args); entered = true; await gate.promise; throw new Error('synthetic storage-port rejection');
+  });
+  const upstream = await httpsFixture(t, (_req, res) => { res.writeHead(503); res.end(); }); const native = https.request;
+  t.mock.method(https, 'request', (url: URL, options: https.RequestOptions, callback: any) =>
+    ['orka.example.invalid', 'tools.example.invalid'].includes(url.hostname) ? native(new URL(url.pathname, upstream.baseUrl), { ...options, ca: upstream.ca, servername: 'localhost' }, callback) : native(url, options, callback));
+  syncBuiltinESMExports(); t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); gate.resolve(); });
+  const runtime = await startRegistryRuntime(f.config, f.deps); await eventually(() => entered);
+  const done = assert.rejects(runtime.done, { message: 'Ingress storage failed' });
+  const stopping = assert.rejects(runtime.stop(), { message: 'Ingress storage failed' }); gate.resolve(); await Promise.all([stopping, done]);
+});
+
 test('missing later domain unwinds acquired earlier domains and never listens', async t => {
   const f = await fixture(t); f.domains[3]!.service.rows.clear();
   await assert.rejects(startRegistryRuntime(f.config, f.deps), { message: 'Ingress storage failed' });
