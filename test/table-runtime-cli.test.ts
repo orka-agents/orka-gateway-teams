@@ -7,3 +7,6 @@ test('actual freshly compiled Table CLI: native ACA/authenticated SDK/provider, 
 test('compiled V3 commands: explicit upgrades, mixed-store refusal, recovery, native sends and retained replay', async t => {
   await qualifyTableCli(t, undefined, 'table-v3');
 });
+test('compiled serve-registry: legacy native send/replay, no Kubernetes credential, config refusal and SIGTERM drain', async t => {
+  await qualifyTableCli(t, undefined, 'table-v3', true);
+});

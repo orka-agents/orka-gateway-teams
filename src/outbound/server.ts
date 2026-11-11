@@ -21,14 +21,27 @@ class HttpFailure extends Error { constructor(readonly status: number) { super('
 
 /** Separate bearer boundary; never registers a route on the Teams SDK listener. */
 export async function startOutboundServer(config: OutboundServerConfig, dispatcher: DeliveryDispatcher, inputScope: Readonly<JournalScope>, isReady: () => boolean): Promise<OutboundServer> {
-  const interimDelivery = config.interimDelivery; const meetingDrafts = config.meetingDrafts;
-  if ((meetingDrafts !== undefined && typeof meetingDrafts !== 'boolean') || (meetingDrafts === true && interimDelivery !== true) ||
-      (interimDelivery !== undefined && typeof interimDelivery !== 'boolean') || !tlsVerificationEnabled() || !isIP(config.host) || !Number.isInteger(config.port) || config.port < 0 || config.port > 65535 ||
-      typeof config.bearerToken !== 'string' || !config.bearerToken || config.bearerToken.length > 8192 || !/^[A-Za-z0-9._~+/-]+=*$/u.test(config.bearerToken)) throw new ConfigurationError();
-  // Omit the additive field when off: older strict V1 controllers reject even false.
-  const capabilities = { ...baselineCapabilities, capabilities: { ...baselineCapabilities.capabilities,
-    ...(interimDelivery === true ? { interimDelivery: true } : {}), ...(meetingDrafts === true ? { meetingDrafts: true } : {}) } };
-  const scope = validateScope(inputScope); const expected = digest(config.bearerToken);
+  return startTargetOutboundServer(config, [{ ...config, prefix: '', dispatcher, scope: inputScope }], isReady);
+}
+export interface OutboundTarget {
+  prefix: string; bearerToken: string; dispatcher: DeliveryDispatcher; scope: Readonly<JournalScope>; interimDelivery?: boolean; meetingDrafts?: boolean;
+}
+export async function startTargetOutboundServer(config: { host: string; port: number }, targets: readonly OutboundTarget[], isReady: () => boolean): Promise<OutboundServer> {
+  if (!tlsVerificationEnabled() || !isIP(config.host) || !Number.isInteger(config.port) || config.port < 0 || config.port > 65535 || !targets.length || targets.length > 32) throw new ConfigurationError();
+  const prefixes = new Set<string>(); const bearers = new Set<string>();
+  const slots = targets.map(target => {
+    const { prefix, bearerToken, dispatcher, interimDelivery, meetingDrafts } = target;
+    if ((prefix !== '' && !/^\/targets\/[a-z][a-z0-9-]{0,62}$/u.test(prefix)) || prefixes.has(prefix) || bearers.has(bearerToken) ||
+        typeof bearerToken !== 'string' || !bearerToken || bearerToken.length > 8192 || !/^[A-Za-z0-9._~+/-]+=*$/u.test(bearerToken) ||
+        (interimDelivery !== undefined && typeof interimDelivery !== 'boolean') || (meetingDrafts !== undefined && typeof meetingDrafts !== 'boolean') ||
+        (meetingDrafts === true && interimDelivery !== true)) throw new ConfigurationError();
+    prefixes.add(prefix); bearers.add(bearerToken);
+    // Omit additive fields when off: older strict V1 controllers reject even false.
+    return { prefix, dispatcher, scope: validateScope(target.scope), expected: digest(bearerToken),
+      capabilities: { ...baselineCapabilities, capabilities: { ...baselineCapabilities.capabilities,
+        ...(interimDelivery === true ? { interimDelivery: true } : {}), ...(meetingDrafts === true ? { meetingDrafts: true } : {}) } } };
+  });
+  const healthy = () => slots.every(slot => slot.dispatcher.healthy);
   const starts = new WeakMap<Socket, number>(); const work = new Set<Promise<void>>(); const controllers = new Set<AbortController>();
   let active = 0; let stopping = false; let closing: Promise<void> | undefined; let bound = false;
   let fail!: (error: Error) => void; const failed = new Promise<never>((_resolve, reject) => { fail = reject; });
@@ -60,12 +73,16 @@ export async function startOutboundServer(config: OutboundServerConfig, dispatch
       // Authenticate even unavailable/unknown routes, before consuming any body or consulting readiness/storage.
       const values = req.headersDistinct.authorization;
       const token = values?.length === 1 ? /^Bearer ([A-Za-z0-9._~+/-]+=*)$/iu.exec(values[0]!)?.[1] : undefined;
-      if (!token || token.length > 8192 || !timingSafeEqual(expected, digest(token))) throw new HttpFailure(401);
+      const slot = slots.find(s => ['/v1/health', '/v1/capabilities', '/v1/deliveries'].some(path => req.url === s.prefix + path));
+      const candidates = slot ? [slot] : slots;
+      if (!token || token.length > 8192 || !candidates.some(s => timingSafeEqual(s.expected, digest(token)))) throw new HttpFailure(401);
+      if (!slot) throw new HttpFailure(404);
       authenticated = true;
-      if (stopping || !tlsVerificationEnabled() || !dispatcher.healthy || !isReady()) throw new HttpFailure(503);
-      if (req.method === 'GET' && req.url === '/v1/health') { respond(res, 200, { status: 'ok' }); return; }
-      if (req.method === 'GET' && req.url === '/v1/capabilities') { respond(res, 200, capabilities); return; }
-      if (req.method !== 'POST' || req.url !== '/v1/deliveries') throw new HttpFailure(404);
+      const { dispatcher, scope, capabilities, prefix } = slot;
+      if (stopping || !tlsVerificationEnabled() || !healthy() || !isReady()) throw new HttpFailure(503);
+      if (req.method === 'GET' && req.url === prefix + '/v1/health') { respond(res, 200, { status: 'ok' }); return; }
+      if (req.method === 'GET' && req.url === prefix + '/v1/capabilities') { respond(res, 200, capabilities); return; }
+      if (req.method !== 'POST' || req.url !== prefix + '/v1/deliveries') throw new HttpFailure(404);
       if (active >= 32) { respond(res, 200, retryable); return; }
       active++; admitted = true;
       const type = req.headersDistinct['content-type']; const encoding = req.headersDistinct['content-encoding'];
@@ -73,7 +90,7 @@ export async function startOutboundServer(config: OutboundServerConfig, dispatch
           (encoding !== undefined && (encoding.length !== 1 || encoding[0] !== 'identity'))) throw new HttpFailure(415);
       if (Number(req.headers['content-length'] ?? 0) > MAX_HTTP_BODY_BYTES) throw new HttpFailure(413);
       const bytes = await readBody(req, controller.signal);
-      let delivery;
+      let delivery: ReturnType<typeof decodeDelivery>;
       try { delivery = decodeDelivery(bytes, scope); } catch { throw new HttpFailure(400); }
       // Body/header time consumes the same absolute budget. Reserve 1s for settlement/response.
       const dispatchDeadline = Math.min(performance.now() + 9000, deadline - 1000);
@@ -85,7 +102,7 @@ export async function startOutboundServer(config: OutboundServerConfig, dispatch
       respond(res, status, status >= 500 || status === 408 ? retryable : rejected);
     } finally {
       // A poisoned dispatcher must not let runtime shutdown preempt its fixed response.
-      if (authenticated && !dispatcher.healthy) void finished.then(() => fail(new Error('Outbound storage failed')));
+      if (authenticated && !healthy()) void finished.then(() => fail(new Error('Outbound storage failed')));
       clearTimeout(timer); controllers.delete(controller); res.off('close', disconnected); if (admitted) active--;
     }
   }
