@@ -2,20 +2,23 @@ import type { IngressClaim, IngressPort, IngressStore, OrkaClient, OrkaPostResul
 
 /** One persisted attempt, one POST, one fenced settlement. Composition owns serialization and shutdown/drain. */
 export async function relayOne(store: IngressStore | IngressPort, client: OrkaClient, signal?: AbortSignal,
-  isReady: () => boolean = () => true): Promise<boolean> {
+  isReady: () => boolean = () => true, preflight?: (claim: Readonly<IngressClaim>, signal?: AbortSignal) => Promise<boolean>): Promise<boolean> {
   const active = () => !signal?.aborted && isReady();
   if (!active()) return false;
   const isPort = 'claimForForwarding' in store;
-  let claim: Readonly<IngressClaim>;
+  let claim: Readonly<IngressClaim>; let preflightFailed = false;
   if (isPort) {
     const grant = await store.claimForForwarding();
     if (!grant) return false;
     try {
       claim = structuredClone(grant.claim);
-      if (!active() || !await grant.revalidate()) return false;
-      // Reconciliation may have outlived cancellation, expiry or quarantine.
-      // No await is allowed between the owner's final take and client handoff.
-      if (!active() || !grant.take() || !active()) return false;
+      if (preflight && !await preflight(claim, signal)) preflightFailed = true;
+      if (!preflightFailed) {
+        if (!active() || !await grant.revalidate()) return false;
+        // Reconciliation may have outlived cancellation, expiry or quarantine.
+        // No await is allowed between the owner's final take and client handoff.
+        if (!active() || !grant.take() || !active()) return false;
+      }
     } finally { grant.retire(); }
   } else {
     // Compatibility is deliberately synchronous, not Promise<legacy claim>:
@@ -27,8 +30,11 @@ export async function relayOne(store: IngressStore | IngressPort, client: OrkaCl
     if (!active()) return false;
   }
   let result: OrkaPostResult;
-  try { result = await client.post(claim.event, signal); }
-  catch { result = { kind: 'retry' }; }
+  if (preflightFailed) result = { kind: 'retry' };
+  else {
+    try { result = await client.post(claim.event, signal); }
+    catch { result = { kind: 'retry' }; }
+  }
   if (signal?.aborted && result.kind !== 'retry') result = { kind: 'retry' };
   let settled: boolean;
   if (result.kind === 'receipt') settled = await store.complete(claim, result.receipt);

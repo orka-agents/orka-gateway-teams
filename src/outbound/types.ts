@@ -12,9 +12,10 @@ export interface DeliveryResponse {
 }
 export interface DeliveryContext { signal?: AbortSignal; deadline?: number; authority?: import('../storage/table/types.js').LeaseAuthority }
 export type ProviderResult = { kind: 'delivered'; providerMessageId: string } | { kind: 'retryable' | 'unknown' };
+export type ProviderRoute = Pick<ReplyRoute, 'serviceUrl' | 'conversation'>;
 export interface ProviderSender {
   getMembers?(route: Readonly<ReplyRoute>, context?: DeliveryContext): Promise<MembersResult>;
-  send(route: Readonly<ReplyRoute>, message: Readonly<OutgoingTeamsMessage>, context?: DeliveryContext): Promise<ProviderResult>;
+  send(route: Readonly<ProviderRoute>, message: Readonly<OutgoingTeamsMessage>, context?: DeliveryContext): Promise<ProviderResult>;
   stop(): Promise<void>;
 }
 export interface DispatcherOptions {

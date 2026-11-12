@@ -11,7 +11,7 @@ class HttpFailure extends Error { constructor(readonly status: number) { super('
 /** Only the SDK-registered handler is callable; there is no alternate ingress route. */
 export class NativeAdapter implements IHttpServerAdapter {
   private handler: HttpRouteHandler | undefined;
-  private readonly context = new AsyncLocalStorage<{ signal: AbortSignal; finished: Promise<void> }>();
+  private readonly context = new AsyncLocalStorage<{ signal: AbortSignal; deadline: number; finished: Promise<void> }>();
   private readonly work = new Set<Promise<void>>();
   private readonly controllers = new Set<AbortController>();
   private stopping = false;
@@ -47,6 +47,12 @@ export class NativeAdapter implements IHttpServerAdapter {
 
   get active(): boolean { return !this.stopping && this.context.getStore()?.signal.aborted === false; }
 
+  get requestContext(): Readonly<{ signal: AbortSignal; deadline: number }> {
+    const context = this.context.getStore();
+    if (!context) throw new Error('Missing ingress request context');
+    return Object.freeze({ signal: context.signal, deadline: context.deadline });
+  }
+
   afterResponse(callback: () => void): void {
     const context = this.context.getStore();
     if (!context) throw new Error('Missing ingress request context');
@@ -76,6 +82,7 @@ export class NativeAdapter implements IHttpServerAdapter {
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const deadline = performance.now() + DEADLINE_MS;
     const controller = new AbortController(); this.controllers.add(controller);
     const finished = new Promise<void>((resolve) => { res.once('finish', resolve); res.once('close', resolve); });
     const timer = setTimeout(() => { controller.abort(); respond(res, 408); }, DEADLINE_MS); timer.unref();
@@ -95,7 +102,7 @@ export class NativeAdapter implements IHttpServerAdapter {
       const verified = await this.verify(headers.authorization, body);
       if (!verified) throw new HttpFailure(401);
       if (controller.signal.aborted || this.stopping) throw new HttpFailure(503);
-      const result = await this.context.run({ signal: controller.signal, finished }, () => this.handler!({ body, headers }));
+      const result = await this.context.run({ signal: controller.signal, deadline, finished }, () => this.handler!({ body, headers }));
       respond(res, result.status, result.body);
     } catch (error) { respond(res, error instanceof HttpFailure ? error.status : 503); }
     finally {

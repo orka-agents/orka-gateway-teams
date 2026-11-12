@@ -65,11 +65,12 @@ make startup succeed, or replace an active storage owner.
 
 For operator-managed Table V3 targets behind one bot, see the
 [Orka registry](docs/registry.md). There is no legacy target. Multi-target mode
-refuses new intake, including channels, until self-service routing is wired;
-the existing SQLite, Table V2 and Table V3 `serve` modes are unchanged. The [group-policy library](docs/group-policy.md)
-supplies membership and admission decisions. The separate
-[connection directory](docs/directory.md) supplies permanent target reservations
-and control-send state; live handler and provisioning integration are still required.
+supports personal/group discovery and permanent chat connections using
+[group access policy](docs/group-policy.md) and the separate
+[connection directory](docs/directory.md). Each sender needs current access;
+`use <targetId>` connects the chat without starting a Task. Channels remain
+unsupported. Existing SQLite, Table V2 and Table V3 `serve` modes are unchanged.
+Synthetic checks do not establish a live Teams walk.
 
 ## Install from a release
 

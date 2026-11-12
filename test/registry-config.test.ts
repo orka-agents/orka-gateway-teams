@@ -88,6 +88,19 @@ test('digest excludes mutable labels/files/credentials but includes each routing
   ]) { const input = structuredClone(original); change(input.targets[0]);
     assert.notEqual(snapshotRegistry(input).targets[0]!.identityDigest, digest); }
 });
+test('registry labels share the directory UTF-8 byte limit before serving', () => {
+  const input = registryInput(); input.targets[0]!.label = '界'.repeat(100);
+  assert.throws(() => snapshotRegistry(input), ConfigurationError);
+  input.targets[0]!.label = '界'.repeat(85) + 'a';
+  assert.equal(snapshotRegistry(input).targets[0]!.label, input.targets[0]!.label);
+  input.targets[0]!.label += 'b'; assert.throws(() => snapshotRegistry(input), ConfigurationError);
+});
+
+test('registry CLI requires an explicit absolute policy file reference', t => {
+  const f = registryFixture(t);
+  for (const value of [undefined, '', 'relative.json']) assert.throws(() => parseRegistryConfig({ ...f.env, ORKA_GROUP_POLICY_FILE: value }), ConfigurationError);
+});
+
 test('library snapshot rejects mismatched shared bot, listener, policy and storage identities', () => {
   for (const change of [
     (v: any) => { v.receiver.clientSecret = 'other'; }, (v: any) => { v.receiver.port = 4000; },

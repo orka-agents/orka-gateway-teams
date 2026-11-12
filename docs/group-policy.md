@@ -1,10 +1,10 @@
-# Group access policy library
+# Group access policy
 
 The group-policy library evaluates access to registered Orkas by Entra group and
-chat kind. It is not yet wired into `serve-registry`, which refuses new intake
-without choosing a target. This library alone
-does not enable self-service, enforce policy on live traffic, create Bindings or
-send no-access replies.
+chat kind. `serve-registry` loads it from the required absolute
+`ORKA_GROUP_POLICY_FILE` before acquiring stores. Every supported new activity,
+including duplicate commands, is checked before any connection, Task or control
+send effect. Channels remain unsupported.
 
 ## Operator policy snapshot
 
@@ -101,7 +101,7 @@ same-target choices. Its only outcomes are:
   Orka Task or connection.
 - `unavailable`, category `graph-unavailable`: failed, partial or expired lookup
   without usable complete cache, cancellation or exhausted capacity. This is a
-  transient 503 outcome at future integration, not storage poison or denial.
+  transient HTTP 503 outcome, not storage poison or denial.
   Graph 404 for an unknown/guest user also remains transient, not inferred denial.
 
 Only complete successful membership results, including complete denials, are
@@ -113,10 +113,11 @@ tool identity is created. An unexpired complete result can remain usable during
 an outage; group removal stops new admission after this window plus directory
 propagation. It does not cancel already accepted Tasks or reauthorize queued work.
 
-The separate directory must reserve durable control routes/attempts before any
-no-access, discovery or command reply. Its control sender must preserve replay and
-unknown-send rules. Runtime integration must expose the existing handler deadline,
-map Graph unavailability without poisoning storage, authorize before new durable
-effects, and drain policy work before releasing stores. Those integrations are not
-implemented here; do not send this text from an HTTP error handler. Synthetic
-library tests do not establish live consent, Teams behavior or reachability.
+The runtime uses directory-reserved routes and attempts for no-access, discovery
+and command replies through the same confined Teams sender as Task replies.
+The original ten-second handler deadline and cancellation cover policy,
+provisioning and controls; late results cannot start admission. Failed Graph
+lookups return HTTP 503 without poisoning healthy storage. Policy work and native
+requests drain before store release. Saved control receipts never restore revoked
+access; a conflicting duplicate cannot overwrite a former reply. Synthetic tests
+do not establish live consent, Teams behavior or reachability.

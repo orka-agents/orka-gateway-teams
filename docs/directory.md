@@ -3,9 +3,9 @@
 The directory is a separate Azure Table storage domain for personal and group
 chat connections and control replies. It is not an inbox, a delivery journal or
 a third V3 kernel domain. The registry runtime opens and recovers it before listening, and drains it before
-releasing V3 ownership or its shared storage identity. It does not yet admit an
-Orka Task or send a Teams control message. The separate provisioning library below
-can create and check Bindings, but is not wired into serving yet.
+releasing V3 ownership or its shared storage identity. Live admission composes it
+with policy and provisioning; control replies use the centrally owned confined
+Teams sender without an Orka delivery or Task.
 
 ## Identity and permanent choice
 
@@ -108,8 +108,9 @@ an already-reserved connection and the registered target's confined Kubernetes
 client. `reconcile(connection, context)` returns current `BindingEvidence`;
 the caller then uses `markProvisioned`. `check(connection, context)` requires a
 provisioned row and never creates anything. Neither method reserves a choice,
-changes a row, starts a Task or sends a notification. Serving does not call either
-method yet; self-service still requires live integration.
+changes a row, starts a Task or sends a notification. Serving reconciles on an
+authorized same-target choice, marks fresh evidence, and checks again on ordinary
+admission and before every queued event's Orka handoff.
 
 New Bindings use the existing deterministic `bindingName` helper, exact tenant
 and conversation, the registered Gateway/front Agent, priority zero, all senders,
@@ -137,8 +138,9 @@ The caller supplies cancellation, an absolute monotonic deadline and combined
 lease authority, owns client close/drain, and rechecks authority before publishing
 connection readiness or forwarding. A late received create can leave an unused
 deterministic Binding; cancellation cannot undo it. Fixed failures are
-`target-paused`, `binding-conflict` or `credential-expiring`; live HTTP mapping,
-coalesced/rate-limited recovery and operator diagnostics remain caller work.
+`target-paused`, `binding-conflict` or `credential-expiring`. Serving maps these
+to transient HTTP 503 or relay no-effect backoff, with coalesced/rate-limited
+recovery and fixed diagnostics. These failures do not poison healthy storage.
 
 Checks are not atomic with Orka ingress or other Binding writers. While serving,
 only this provisioner may write the registered Gateway's Bindings; operators must
@@ -149,9 +151,19 @@ RBAC, controller reconciliation, concurrent-writer safety or a Teams walk.
 
 Registry startup now requires an operator-precreated distinct directory table;
 see [configuration and handover](registry.md#storage-and-handover). Its startup and
-drain are live, but new Teams intake remains refused and retained relays do not
-consult the directory yet. Subsequent integration owns current-policy handler
-wiring, calling the Binding provisioner, recurring relay readiness/overlap
-checks, transient HTTP outcome mapping, and actual control sends
-through the shared confined Teams sender. The directory library alone does not
-make self-service connection available.
+drain include all supported personal/group handlers, controls and relay checks.
+Current authorization runs before replaying a control result. Ready retries of
+connected notifications recheck readiness; terminal controls are suppressed, not
+sent again. A revoked duplicate cannot reuse an old discovery or connection
+notification. Different content under the same activity identity conflicts, even after failed
+provisioning. A new choice reserves its ready control descriptor before the
+connection write; it is not armed or sent until fresh provisioning succeeds.
+A same-command retry can resume an interrupted connection write.
+
+The runtime retains one of four whole-operation places through reserve, arm,
+send and settle, so other consumers cannot crowd out its receipt settlement.
+A disconnect/deadline or authority loss can still leave an armed attempt: there
+is no extended request budget, and startup makes it unknown. Connection truth
+survives that lost notification; a fresh same-target command can report it again.
+Control cards use literal rich text for configured labels and a bounded fallback,
+remaining within the confined sender's 20 KiB total-message limit.

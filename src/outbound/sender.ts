@@ -11,7 +11,7 @@ import type { ReplyRoute } from '../ingress/types.js';
 import { MAX_ADAPTER_RESPONSE_BYTES } from '../protocol/types.js';
 import { MAX_OUTGOING_MESSAGE_BYTES } from '../teams/format.js';
 import type { OutgoingTeamsMessage } from '../teams/format.js';
-import type { DeliveryContext, ProviderResult, ProviderSender } from './types.js';
+import type { DeliveryContext, ProviderResult, ProviderSender, ProviderRoute } from './types.js';
 import { decodeMeetingMembers, MAX_ROSTER_BYTES } from './meeting-roster.js';
 import type { MembersResult } from './meeting-roster.js';
 
@@ -48,7 +48,7 @@ export function createProviderSender(acquireToken: () => Promise<string | undefi
     }
   }
 
-  function send(route: Readonly<ReplyRoute>, message: Readonly<OutgoingTeamsMessage>, context: DeliveryContext = {}): Promise<ProviderResult> {
+  function send(route: Readonly<ProviderRoute>, message: Readonly<OutgoingTeamsMessage>, context: DeliveryContext = {}): Promise<ProviderResult> {
     const deadline = Math.min(performance.now() + 9000, context.deadline ?? Infinity);
     let url: string; let body: Buffer;
     try {

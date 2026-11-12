@@ -265,6 +265,9 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string, backen
       writeFileSync(ingressTokenFile, serving.ORKA_BEARER_TOKEN, { mode: 0o600 });
       writeFileSync(callbackTokenFile, serving.ORKA_OUTBOUND_BEARER_TOKEN, { mode: 0o600 });
       settings.ORKA_REGISTRY_FILE = join(directory, 'registry.json'); settings.TABLE_DIRECTORY_TABLE = 'Directory';
+      settings.ORKA_GROUP_POLICY_FILE = join(directory, 'group-policy.json');
+      writeFileSync(settings.ORKA_GROUP_POLICY_FILE, JSON.stringify({ schemaVersion: 1,
+        graphIdentityClientId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', policies: [] }));
       writeFileSync(settings.ORKA_REGISTRY_FILE, JSON.stringify({ schemaVersion: 1, targets: [{
         id: 'primary', label: 'Primary', orkaBaseUrl: scope.orkaBaseUrl, gatewayNamespace: scope.gatewayNamespace, gatewayName: scope.gatewayName,
         gatewayUid: 'synthetic-uid', frontAgent: { namespace: scope.gatewayNamespace, name: 'front' },
@@ -359,7 +362,9 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string, backen
   }
   assert.equal((await post(ingressPort, auth.token({ aud: 'wrong-audience' }))).status, 401);
   if (registry) {
-    assert.equal((await post(ingressPort, incomingToken)).status, 409);
+    const channel = activity(); channel.conversation.conversationType = 'channel'; channel.from.aadObjectId = 'aad-channel';
+    channel.text = '<at>Orka</at> channel request'; channel.entities = [{ type: 'mention', text: '<at>Orka</at>', mentioned: { id: channel.recipient.id } }];
+    assert.equal((await post(ingressPort, incomingToken, channel)).status, 409);
     for (const path of ['/v1/health', '/v1/capabilities', '/v1/deliveries']) {
       assert.equal((await fetch(`http://127.0.0.1:${outboundPort}${path}`, { headers: {
         Authorization: `Bearer ${serving.ORKA_OUTBOUND_BEARER_TOKEN}` } })).status, 404);
@@ -368,7 +373,7 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string, backen
       headers: { Authorization: `Bearer ${serving.ORKA_OUTBOUND_BEARER_TOKEN}` } })).status, 200);
     await stop(running);
     const restarted = await start();
-    assert.equal((await post(ingressPort, incomingToken)).status, 409); await stop(restarted);
+    assert.equal((await post(ingressPort, incomingToken, channel)).status, 409); await stop(restarted);
     assert.equal(payloads(tables.inbox.rows, 'event').length, 0);
     assert.equal(payloads(tables.delivery.rows, 'delivery').length, 0);
     assert.equal(effects.orka, 0); assert.equal(effects.provider, 0);
