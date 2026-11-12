@@ -6,7 +6,7 @@ import type { FixtureHooks } from './ingress-https.js';
 import { storageClientId, tableRuntimeConfig } from './table-runtime.js';
 
 export function registryInput(count = 2) {
-  return { schemaVersion: 1 as const, targets: Array.from({ length: count }, (_, i) => i === 0 ? 'primary' : i === 1 ? 'tools' : `target-${i}`).map(id => {
+  return { schemaVersion: 1 as const, directoryTable: 'Directory', targets: Array.from({ length: count }, (_, i) => i === 0 ? 'primary' : i === 1 ? 'tools' : `target-${i}`).map(id => {
     const config = tableRuntimeConfig({ ...scope, ...(id === 'primary' ? {} : { orkaBaseUrl: 'https://tools.example.invalid/' }) });
     config.receiver = { ...receiverConfig }; config.storage.backend = 'table-v3';
     config.storage.ingressStoreId = `${id}-inbox`; config.storage.deliveryStoreId = `${id}-delivery`;
@@ -31,7 +31,7 @@ export function registryFixture(t: FixtureHooks) {
   const env = { ORKA_REGISTRY_FILE: path, GATEWAY_STORAGE_BACKEND: 'table-v3', OUTBOUND_ENABLED: 'true',
     TEAMS_APP_ID: scope.appId, TEAMS_TENANT_ID: scope.tenantId, TEAMS_CLIENT_SECRET: receiverConfig.clientSecret,
     TEAMS_RECIPIENT_IDS: JSON.stringify(receiverConfig.recipientIds), TEAMS_SERVICE_URLS: JSON.stringify(receiverConfig.serviceUrls),
-    TABLE_ACCOUNT: 'example123', TABLE_NAME: 'journal', TABLE_MANAGED_IDENTITY_HOST: 'azure-container-apps', TABLE_MANAGED_IDENTITY_CLIENT_ID: storageClientId,
+    TABLE_ACCOUNT: 'example123', TABLE_NAME: 'journal', TABLE_DIRECTORY_TABLE: 'Directory', TABLE_MANAGED_IDENTITY_HOST: 'azure-container-apps', TABLE_MANAGED_IDENTITY_CLIENT_ID: storageClientId,
     TABLE_AUDIT_MAX_PAGES: '100', TABLE_AUDIT_MAX_BYTES: '10485760', TABLE_AUDIT_MAX_DURATION_MS: '30000',
     TABLE_AUDIT_MAX_TRACKING_BYTES: '1048576', TABLE_MAX_INDEX_BYTES: '16777216' };
   return { directory, manifest, env, save };

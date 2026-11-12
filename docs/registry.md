@@ -63,6 +63,10 @@ the [runtime reference](runtime-reference.md) and [Table guide](table-runtime.md
 `OUTBOUND_HOST/PORT`, `INTERIM_DELIVERY_ENABLED`, `MEETING_DRAFTS_ENABLED`,
 `TABLE_ACCOUNT`, `TABLE_NAME`, `TABLE_MANAGED_IDENTITY_*`, `TABLE_AUDIT_*`
 and `TABLE_MAX_INDEX_BYTES`. All slots share one storage account, table and identity.
+`TABLE_DIRECTORY_TABLE` is additionally required by `serve-registry`: an ASCII
+letter followed by 2–62 ASCII letters/digits, distinct from `TABLE_NAME`
+case-insensitively. The directory uses the same account and identity, but its
+own table, not a third V3 domain. The manifest format is unchanged.
 Do not also set `ORKA_BASE_URL`, `ORKA_GATEWAY_NAMESPACE`, `ORKA_GATEWAY_NAME`,
 `ORKA_BEARER_TOKEN`, `ORKA_OUTBOUND_BEARER_TOKEN`, `ORKA_CA_FILE`,
 `TABLE_INGRESS_STORE_ID` or `TABLE_DELIVERY_STORE_ID`: those come from each target.
@@ -78,6 +82,13 @@ the shared app, tenant, Table V3 storage and audit configuration. Initialization
 does not consume `ORKA_REGISTRY_FILE`; it retains the existing command contracts.
 Never initialize, reset or repair stores through `serve-registry`.
 
+**Before upgrading an existing registry environment**, the operator must create
+an empty, distinct directory table and set `TABLE_DIRECTORY_TABLE`. Serving never
+creates that table. Missing configuration fails before ownership; a missing,
+unreadable or corrupt table prevents every slot from starting, including retained
+relays and callbacks. Directory startup failures use the existing fixed
+`lease-transition-uncertain` diagnostic. Single-target `serve` needs no directory.
+
 Preserve each target's exact app/tenant/Orka/Gateway scope and both stable store
 IDs when reopening retained history. Inbox IDs must be unique among inboxes;
 delivery IDs must be unique among journals. The two domains may use the same
@@ -87,12 +98,19 @@ audited V3 upgrade procedure, not reinitialization.
 Stop and actually drain the previous owner before switching commands or editing
 registration, CA or startup credentials. A lease timeout alone is not proof of
 drain. One replica owns every configured store (2N leases); all must open and audit
-before readiness. Shared token capacity covers all 64 domains at 32 targets;
+before directory recovery and readiness. Directory opening retires inherited
+armed control sends under combined V3 authority before any listener starts, using
+`TABLE_AUDIT_MAX_DURATION_MS` from the start of directory opening. Recovery makes
+bounded durable progress; see [directory recovery](directory.md#control-receipts-and-uncertainty).
+Shared token capacity covers all 64 domains plus four directory callers at 32 targets;
 independent lease revalidation reads run in parallel, retaining the all-target
 failure boundary. Any unsafe or busy store prevents startup. Any lease loss or
 storage poison stops every slot. An unreachable Orka only delays its own relay;
 no work moves between targets. Listener, SDK, token, provider and relay work drains
-before stores close; the shared storage token provider closes last.
+before the directory closes; its actual work drains before any V3 store releases
+ownership. The shared storage token provider closes last. Directory startup and
+drain do not enable new admission, control sends or relay preflight: an empty new
+directory does not change retained-work routing.
 
 The routing digest hashes the versioned app/tenant/target/Orka/Kubernetes/Gateway
 and front-Agent tuple. Changing those fields requires explicit history

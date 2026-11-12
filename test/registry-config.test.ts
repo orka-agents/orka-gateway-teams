@@ -8,6 +8,17 @@ import { ConfigurationError } from '../src/ingress/config.js';
 import { parseRegistryConfig, snapshotRegistry } from '../src/registry/config.js';
 import { registryFixture, registryInput } from './support/registry.js';
 
+test('registry requires a distinct valid directory table before runtime ownership', t => {
+  const f = registryFixture(t);
+  for (const name of [undefined, '', 'ab', '1table', 'bad-name', 'a'.repeat(64), 'JOURNAL']) {
+    assert.throws(() => parseRegistryConfig({ ...f.env, TABLE_DIRECTORY_TABLE: name }), ConfigurationError);
+    if (name !== undefined) assert.throws(() => snapshotRegistry({ ...registryInput(), directoryTable: name }), ConfigurationError);
+  }
+  const input = { ...registryInput(), directoryTable: 'Directory' }; const snapshot = snapshotRegistry(input);
+  input.directoryTable = 'Changed'; assert.equal(snapshot.directoryTable, 'Directory');
+  assert.equal(parseRegistryConfig({ ...f.env, TABLE_DIRECTORY_TABLE: 'Directory' }).directoryTable, 'Directory');
+});
+
 test('registry preserves target scope/store bindings, freezes snapshots and never reads Kubernetes token at startup', t => {
   const f = registryFixture(t); const c = parseRegistryConfig(f.env);
   assert.equal('legacyTargetId' in c, false); assert.equal(c.targets.length, 2);

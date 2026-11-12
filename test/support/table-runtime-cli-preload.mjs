@@ -36,7 +36,8 @@ function mappedHttps(args, fetcher) {
   else if (url.href === keysUrl) kind = fetcher === 'strict' ? 'strictKeys' : 'sdkKeys';
   else return denied();
   stats[kind]++;
-  const target = kind === 'table' ? settings.table : settings.services;
+  const target = kind === 'table' ? (url.pathname.startsWith('/Directory') ? settings.directory : settings.table) : settings.services;
+  if (!target) return denied();
   const destination = new URL(url.pathname + url.search, target.baseUrl);
   // Preserve actual methods, bodies, production headers, cancellation and agents.
   // Only network destination/trust and a JWKS fixture discriminator change.
