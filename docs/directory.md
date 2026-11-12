@@ -2,8 +2,9 @@
 
 The directory is a separate Azure Table storage domain for personal and group
 chat connections and control replies. It is not an inbox, a delivery journal or
-a third V3 kernel domain. Its library does not start a listener, create a Binding,
-admit an Orka Task or send a Teams message.
+a third V3 kernel domain. The storage library does not start a listener, admit an
+Orka Task or send a Teams message. The separate provisioning library below can
+create and check Bindings, but is not wired into serving yet.
 
 ## Identity and permanent choice
 
@@ -88,6 +89,51 @@ the terminal result. It does not follow redirects or remote
 pagination URLs. The runtime must budget these callers alongside all 2N V3
 domains when it lends the existing storage token provider.
 
+## Binding provisioning library
+
+`createBindingProvisioner(target, client)` in `src/directory/provision.ts` consumes
+an already-reserved connection and the registered target's confined Kubernetes
+client. `reconcile(connection, context)` returns current `BindingEvidence`;
+the caller then uses `markProvisioned`. `check(connection, context)` requires a
+provisioned row and never creates anything. Neither method reserves a choice,
+changes a row, starts a Task or sends a notification. Serving does not call either
+method yet; self-service still requires live integration.
+
+New Bindings use the existing deterministic `bindingName` helper, exact tenant
+and conversation, the registered Gateway/front Agent, priority zero, all senders,
+and personal `context-sender` or group `context` Session mode. Ownership markers
+are `gateway.orka.ai/teams-target-digest` (the routing digest) and
+`gateway.orka.ai/teams-gateway-uid` (the registered Gateway UID). No ownerReference,
+patch or delete is used. Imported rows instead pin their saved UID, generation
+and complete spec, preserving sender, Session, priority and retry settings without
+adding ownership markers.
+
+Every operation checks the current Gateway UID and front Agent name/namespace,
+and lists all Bindings for that exact Gateway/account/context, including unready
+or sender/thread-restricted overlaps. A foreign overlap is a conflict regardless
+of priority. An absent reserved Binding permits one deterministic POST; success,
+409 and lost responses all require GET readback and exact spec/ownership checks.
+A missing or changed provisioned Binding is never recreated or adopted.
+
+Gateway and Binding readiness require `status.ready: true` and top-level
+`status.observedGeneration` equal to `metadata.generation`, as defined by Orka's
+Gateway API at `b136a20ed57cf2bfe2ac0a34e5886e14a918beb4`. Reconciliation waits
+for readiness with cancellable reads within the caller's original deadline, at
+most ten seconds. Before returning, it repeats overlap and Gateway checks.
+A later `check` performs fresh checks rather than trusting saved progress.
+
+The caller supplies cancellation, an absolute monotonic deadline and combined
+lease authority, owns client close/drain, and rechecks authority before publishing
+connection readiness or forwarding. A late received create can leave an unused
+deterministic Binding; cancellation cannot undo it. Fixed failures are
+`target-paused`, `binding-conflict` or `credential-expiring`; live HTTP mapping,
+coalesced/rate-limited recovery and operator diagnostics remain caller work.
+
+Checks are not atomic with Orka ingress or other Binding writers. While serving,
+only this provisioner may write the registered Gateway's Bindings; operators must
+stop and drain before routing edits. Synthetic HTTPS tests do not establish real
+RBAC, controller reconciliation, concurrent-writer safety or a Teams walk.
+
 ## Offline legacy import
 
 An import is an operator procedure while serving is **stopped and drained**.
@@ -144,7 +190,7 @@ configuration and referenced ingress/callback files; this is not a workstation
 login flow. No real credentials are needed for the synthetic tests.
 
 The subsequent live integration owns current-policy handler wiring, directory
-startup/drain, deterministic Binding creation/reconciliation, recurring readiness
-and overlap checks, transient HTTP outcome mapping, and actual control sends
+startup/drain, calling the Binding provisioner, recurring relay readiness/overlap
+checks, transient HTTP outcome mapping, and actual control sends
 through the shared confined Teams sender. The directory library alone does not
 make self-service connection available.
