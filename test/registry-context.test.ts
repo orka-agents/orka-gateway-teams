@@ -41,7 +41,7 @@ test('control sends borrow the same confined sender and token source as target c
           type: 'AdaptiveCard', version: '1.4', body: [{ type: 'TextBlock', text: 'control', wrap: true }] } }] });
       assert.equal(result.kind, 'delivered'); return { kind: 'accepted', replyTarget: event.replyTarget! };
     }; }, admit: () => ({ kind: 'full' }) }, { ...auth.dependencies, botToken: async () => 'synthetic-only',
-    providerPost: async () => { sends++; return { status: 201, data: Buffer.from('{"id":"receipt"}') }; } }, { targets: [{ id: 'primary',
+    providerPost: async (_url, _body, config) => { assert.equal(config.token, 'synthetic-only'); sends++; return { status: 201, data: Buffer.from('{"id":"receipt"}') }; } }, { targets: [{ id: 'primary',
       journal: { begin: () => ({ kind: 'inFlight' }), settle: () => 'stale', close: () => {} }, getRoute: () => undefined }] });
   t.after(() => receiver.stop()); assert.equal(bound, true);
   assert.equal((await post(receiver.port, auth.token())).status, 200); assert.equal(sends, 1);

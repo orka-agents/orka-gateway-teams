@@ -154,6 +154,18 @@ test('post-open directory corruption flushes fixed 503 and stops all targets', a
   const response = await post(runtime.port, f.auth.token()); assert.equal(response.status, 503); assert.doesNotMatch(await response.text(), /private-sentinel/); await done;
 });
 
+test('normal shutdown during a handed-off directory mutation remains clean', async t => {
+  const f = await fixture(t); const runtime = await startRegistryRuntime(f.config, f.deps); let entered = false;
+  const gate = deferred(); t.after(async () => { gate.resolve(); await runtime.stop().catch(() => {}); });
+  f.directory.controls.hook = async ({ req, reply }) => {
+    if (req.method === 'POST' || req.method === 'MERGE' || req.method === 'PUT') { entered = true; await gate.promise; }
+    reply();
+  };
+  const response = post(runtime.port, f.auth.token()).catch(() => undefined); await eventually(() => entered);
+  const stopping = runtime.stop(); gate.resolve(); await response; await stopping; await runtime.done;
+  assert.ok(f.domains.every(d => d.service.rows.get('M')!.Owner === ''));
+});
+
 test('Graph transient failure does not poison stores; shutdown drains held native lookup before lease release', async t => {
   const f = await fixture(t); const graph = await policyFixture(t, f); graph.status(503);
   const runtime = await startRegistryRuntime(f.config, graph.deps); const gate = deferred(); t.after(async () => { gate.resolve(); await runtime.stop().catch(() => {}); });

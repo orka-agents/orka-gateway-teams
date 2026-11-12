@@ -180,7 +180,9 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
       assertActive(ctx);
       return await control(candidate(reply, connection?.identityDigest ?? null), eligible, denied, ctx, connection);
     } catch (error) {
-      if (transient(error)) return { kind: error instanceof DirectoryError && error.code === 'conflict' ? 'conflict' : 'full' };
+      if (transient(error) || error instanceof DirectoryError && error.code === 'unready' && !active(ctx)) {
+        return { kind: error instanceof DirectoryError && error.code === 'conflict' ? 'conflict' : 'full' };
+      }
       throw error;
     } finally { consumers--; }
   }
@@ -197,7 +199,10 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
           log('binding-conflict', targetId); return false;
         }
         await check(slot, connection, ctx); assertActive(ctx); return true;
-      } catch (error) { if (transient(error)) return false; throw error; }
+      } catch (error) {
+        if (transient(error) || error instanceof DirectoryError && error.code === 'unready' && !active(ctx)) return false;
+        throw error;
+      }
       finally { consumers--; }
     },
   };

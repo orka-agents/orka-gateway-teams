@@ -54,7 +54,8 @@ otherwise system trust applies. All file references are absolute and canonical.
 Orka URLs must have their canonical trailing slash. Kubernetes URLs are HTTPS
 origins with a trailing slash, without credentials, query, fragment or path prefix.
 The front Agent must be in the Gateway namespace. IDs match
-`[a-z][a-z0-9-]{0,62}`. Labels are display values, not routing keys.
+`[a-z][a-z0-9-]{0,62}`. Labels are display values, not routing keys, and
+must fit 256 UTF-8 bytes for directory control replies.
 
 Ingress and callback files contain only their bearer (an outer newline is allowed),
 not JSON. Each is a regular, single-link private file owned by the runtime user

@@ -31,10 +31,11 @@ function component(value: unknown): string {
 }
 function targetMetadata(input: Record<string, unknown>, config: TableServeConfig): Omit<RegistryTarget, 'config'> {
   const id = text(input.id, 63); if (!/^[a-z][a-z0-9-]*$/u.test(id)) throw new ConfigurationError();
+  const label = text(input.label); if (Buffer.byteLength(label, 'utf8') > 256) throw new ConfigurationError();
   const agent = auditFields(input.frontAgent, ['namespace', 'name']);
   const frontAgent = Object.freeze({ namespace: component(agent.namespace), name: component(agent.name) });
   if (frontAgent.namespace !== config.scope.gatewayNamespace) throw new ConfigurationError();
-  return { id, label: text(input.label), gatewayUid: text(input.gatewayUid), frontAgent,
+  return { id, label, gatewayUid: text(input.gatewayUid), frontAgent,
     kubernetesBaseUrl: canonicalKubernetesUrl(input.kubernetesBaseUrl), kubernetesTokenFile: absoluteFile(input.kubernetesTokenFile),
     ...(input.kubernetesCaFile === undefined ? {} : { kubernetesCaFile: absoluteFile(input.kubernetesCaFile) }) };
 }
