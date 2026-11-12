@@ -36,6 +36,53 @@ test('Table read fallback and conditional write retain their original request ke
   assert.ok(f.requests.at(-1)?.url.pathname.includes(`RowKey='${directoryKey(scope, key).row}'`));
 });
 
+function seedArms(f: Awaited<ReturnType<typeof directoryFixture>>, count: number) {
+  const scope = { appId: binding.appId, tenantId: binding.tenantId };
+  for (let i = 0; i < count; i++) {
+    const value: ControlRecord = { schema: 1, kind: 'control', scope, conversationId: 'chat', chatKind: 'personal', activityId: `activity-${i}`,
+      fingerprint: 'a'.repeat(64), currentTargetDigest: null, desiredTargetDigest: null, state: 'armed', ownerUUID: randomUUID(), attemptUUID: randomUUID(),
+      route: { serviceUrl: 'https://service.example.invalid/', channelId: 'msteams', bot: { id: 'bot', role: 'bot' },
+        conversation: { id: 'chat', tenantId: binding.tenantId, conversationType: 'personal' } }, reply: { kind: 'no-access' } };
+    const row = encodeEntity(scope, { kind: 'control', conversationId: 'chat', activityId: value.activityId }, value);
+    f.rows.set(String(row.RowKey), { ...row, Timestamp: '2026-01-01T00:00:00Z', 'odata.etag': `"${i}"` });
+  }
+}
+
+test('bounded native recovery commits each page before a later failure so another opening progresses', async t => {
+  const f = await directoryFixture(t); seedArms(f, 6);
+  f.controls.hook = ({ url, res, reply }) => {
+    if (url.pathname === '/Directory()' && url.searchParams.has('NextRowKey')) { res.writeHead(503); res.end(); } else reply();
+  };
+  await assert.rejects(openDirectory(createDirectoryTable(binding, f.dependencies), context()), { code: 'unready' });
+  assert.equal([...f.rows.values()].filter(row => row.Armed === false).length, 4);
+  delete f.controls.hook;
+  const directory = await openDirectory(createDirectoryTable(binding, f.dependencies), context());
+  assert.equal([...f.rows.values()].filter(row => row.Armed === false).length, 6); await directory.close();
+});
+
+for (const mode of ['cancel', 'authority'] as const) test(`native streaming recovery stops between pages on ${mode} loss`, async t => {
+  const f = await directoryFixture(t); seedArms(f, 6); const abort = new AbortController(); let allowed = true;
+  f.controls.hook = ({ url, reply }) => {
+    if (url.pathname === '/Directory()' && url.searchParams.has('NextRowKey')) {
+      if (mode === 'cancel') abort.abort(); else allowed = false;
+    }
+    reply();
+  };
+  await assert.rejects(openDirectory(createDirectoryTable(binding, f.dependencies), { ...context(), signal: abort.signal }, { allowed: () => allowed }), { code: 'unready' });
+  assert.equal([...f.rows.values()].filter(row => row.Armed === false).length, 4);
+  assert.equal(f.stats.requestCloses, f.stats.requests); assert.equal(f.stats.socketCloses, f.stats.sockets);
+});
+
+test('stream visitor is drained on close and cannot publish a late completed scan', async t => {
+  const f = await directoryFixture(t); seedArms(f, 1); const gate = deferred(); let entered = false; let closed = false;
+  const table = createDirectoryTable(binding, f.dependencies);
+  const scan = table.list(context(), true, async () => { entered = true; await gate.promise; });
+  const failure = assert.rejects(scan, { code: 'unavailable' });
+  await eventually(() => entered); const stopping = table.close().then(() => { closed = true; });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(closed, false);
+  gate.resolve(); await Promise.all([stopping, failure]);
+});
+
 test('startup recovers multiple pages of large valid discovery receipts without an oversized response', async t => {
   const f = await directoryFixture(t); const scope = { appId: binding.appId, tenantId: binding.tenantId };
   for (let i = 0; i < 60; i++) {

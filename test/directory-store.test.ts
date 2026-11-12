@@ -115,6 +115,46 @@ test('failed recovery and false successful arm ACK grant no send authority', asy
   await directory.close();
 });
 
+test('complete directory operations retain capacity through arm readback without stranding accepted arms', async () => {
+  const f = memoryDirectoryTable(); const directory = await openDirectory(f.table, context());
+  const keys = Array.from({ length: 4 }, (_, i) => ({ kind: 'control' as const, conversationId: 'chat-a', activityId: `activity-${i}` }));
+  for (const key of keys) await directory.reserveControl({ ...control(), activityId: key.activityId }, context());
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  const get = f.table.get; let held = 0;
+  f.table.get = async (...args) => { const row = await get(...args); if (row?.value.kind === 'control' && row.value.state === 'armed') { held++; await gate; } return row; };
+  const attempts = keys.map(key => directory.armControl(key, context()));
+  try {
+    while (held < 4) await new Promise(resolve => setImmediate(resolve));
+    await assert.rejects(directory.getConnection('other-chat', context()), { code: 'busy' });
+  } finally { release(); await Promise.allSettled(attempts); await directory.close(); }
+  assert.ok((await Promise.all(attempts)).every(attempt => attempt.state === 'armed'));
+});
+
+for (const state of ['delivered', 'rejected', 'unknown'] as const) for (const result of ['conflict', 'uncertain'] as const)
+  for (const opening of [true, false]) test(`same-attempt ${state} winner survives ${result} recovery ${opening ? 'during opening' : 'after opening'}`, async () => {
+    const f = memoryDirectoryTable(); const key = { kind: 'control' as const, conversationId: 'chat-a', activityId: 'activity-a' };
+    const directory = opening ? undefined : await openDirectory(f.table, context());
+    const armed = { ...control(), state: 'armed' as const, ownerUUID: randomUUID(), attemptUUID: randomUUID() };
+    f.save(key, armed);
+    const winner: ControlRecord = state === 'delivered' ? { ...armed, state, providerMessageId: 'late-receipt' } : { ...armed, state };
+    f.table.replace = async () => { f.save(key, winner); return { kind: result }; };
+    const current = directory ?? await openDirectory(f.table, context());
+    assert.deepEqual(await current.getControl(key, context()), winner); await current.close();
+  });
+
+for (const change of ['attempt', 'identity', 'route', 'ready'] as const) test(`recovery refuses a terminal winner with changed ${change}`, async () => {
+  const f = memoryDirectoryTable(); const key = { kind: 'control' as const, conversationId: 'chat-a', activityId: 'activity-a' };
+  const armed = { ...control(), state: 'armed' as const, ownerUUID: randomUUID(), attemptUUID: randomUUID() };
+  f.save(key, armed);
+  f.table.replace = async () => {
+    const winner: ControlRecord = change === 'ready' ? control() : { ...armed, state: 'unknown',
+      ...(change === 'attempt' ? { attemptUUID: randomUUID() } : {}), ...(change === 'identity' ? { fingerprint: 'c'.repeat(64) } : {}),
+      ...(change === 'route' ? { route: { ...armed.route, serviceUrl: 'https://changed.example.invalid/' } } : {}) };
+    f.save(key, winner); return { kind: 'conflict' };
+  };
+  await assert.rejects(openDirectory(f.table, context()), { code: 'unready' });
+});
+
 test('lost authority after a write cannot publish an arm; subsequent startup recovers unknown', async () => {
   const f = memoryDirectoryTable(); let allowed = true;
   const directory = await openDirectory(f.table, context(), { allowed: () => allowed }); await directory.reserveControl(control(), context());

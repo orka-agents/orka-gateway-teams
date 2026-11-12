@@ -33,7 +33,8 @@ export interface DirectoryTable {
   get(key: DirectoryKey, context: DirectoryContext): Promise<DirectoryRow | undefined>;
   insert(key: DirectoryKey, value: DirectoryRecord, context: DirectoryContext): Promise<DirectoryWriteResult>;
   replace(key: DirectoryKey, etag: string, value: DirectoryRecord, context: DirectoryContext): Promise<DirectoryWriteResult>;
-  list(context: DirectoryContext, armedOnly?: boolean): Promise<DirectoryRow[]>;
+  /** Visitor mode drains each row before the next page and returns no retained rows. */
+  list(context: DirectoryContext, armedOnly?: boolean, visit?: (row: DirectoryRow) => Promise<void>): Promise<DirectoryRow[]>;
   close(): Promise<void>;
 }
 export type DirectoryDependencies = Pick<TableDependencies, 'token' | 'request'>;

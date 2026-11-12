@@ -15,8 +15,9 @@ export function memoryDirectoryTable() {
       if (writeMode !== 'lie') save(key, value); return { kind: writeMode === 'lost' ? 'uncertain' : 'ack' }; },
     async replace(key, etag, value) { writes++; if (rows.get(keyOf(key))?.etag !== etag) return { kind: 'conflict' };
       if (writeMode !== 'lie') save(key, value); return { kind: writeMode === 'lost' ? 'uncertain' : 'ack' }; },
-    async list(_ctx, armedOnly) { if (listFailure) throw new Error('incomplete page');
-      return clone([...rows.values()].filter(r => !armedOnly || (r.value.kind === 'control' && r.value.state === 'armed'))); },
+    async list(_ctx, armedOnly, visit) { if (listFailure) throw new Error('incomplete page');
+      const found = clone([...rows.values()].filter(r => !armedOnly || (r.value.kind === 'control' && r.value.state === 'armed')));
+      if (visit) { for (const row of found) await visit(row); return []; } return found; },
     async close() {},
   };
   return { table, rows, save, mode(value: typeof writeMode) { writeMode = value; }, failList() { listFailure = true; }, writes: () => writes };
