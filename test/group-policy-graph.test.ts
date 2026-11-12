@@ -71,17 +71,17 @@ test('native ACA to Graph to authorizer caches complete admission and refreshes 
       expires_on: Math.floor(Date.now() / 1000) + 3600, client_id: objectId }));
   });
   const registry = registryInput(); const policy = snapshotGroupPolicy({ schemaVersion: 1, graphIdentityClientId: objectId, policies: [
-    { schemaVersion: 1, targetId: 'legacy', frontAgent: 'front', rules: [{ groupId: groups[0], chatKinds: ['personal'] }] },
+    { schemaVersion: 1, targetId: 'primary', frontAgent: 'front', rules: [{ groupId: groups[0], chatKinds: ['personal'] }] },
   ] }, registry);
   const authorizer = createGroupAuthorizer(policy, createGraphMembershipClient(createGraphIdentity(policy.graphIdentityClientId, { request: local.request }), { request: f.request }));
   t.after(() => authorizer.close());
   const subject = { tenantId: policy.tenantId, objectId, chatKind: 'personal' as const };
-  assert.equal((await authorizer.authorize(subject, context(), 'legacy')).kind, 'eligible');
+  assert.equal((await authorizer.authorize(subject, context(), 'primary')).kind, 'eligible');
   f.response({ status: 503, body: '{}' });
-  assert.equal((await authorizer.authorize(subject, context(), 'legacy')).kind, 'eligible'); assert.equal(f.bodies.length, 1);
-  t.mock.timers.setTime(start + 60000); assert.equal((await authorizer.authorize(subject, context(), 'legacy')).kind, 'unavailable');
+  assert.equal((await authorizer.authorize(subject, context(), 'primary')).kind, 'eligible'); assert.equal(f.bodies.length, 1);
+  t.mock.timers.setTime(start + 60000); assert.equal((await authorizer.authorize(subject, context(), 'primary')).kind, 'unavailable');
   f.response({ status: 200, body: '{"value":[]}' });
-  assert.equal((await authorizer.authorize(subject, context(), 'legacy')).kind, 'no-access');
+  assert.equal((await authorizer.authorize(subject, context(), 'primary')).kind, 'no-access');
   assert.equal(f.paths(), true); await authorizer.close(); local.drained(); assert.equal(f.closes(), 3); assert.equal(f.sockets(), 3);
 });
 test('later batch failure never returns first batch membership', async t => {

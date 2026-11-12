@@ -14,16 +14,16 @@ async function fixture(t: test.TestContext, holdToken = false) {
   const directory = mkdtempSync(join(tmpdir(), 'registry-callback-')); const auth = await authFixture(t);
   const gate = deferred<void>(); let tokens = 0; let posts = 0; const routes = [0, 0]; let ready = true;
   const journalScope = { appId: scope.appId, tenantId: scope.tenantId };
-  const journals = ['legacy', 'tools'].map(id => { const path = join(directory, id); initializeDeliveryJournal(path, journalScope); return openDeliveryJournal(path, journalScope); });
+  const journals = ['primary', 'tools'].map(id => { const path = join(directory, id); initializeDeliveryJournal(path, journalScope); return openDeliveryJournal(path, journalScope); });
   const receiver = await startReceiver(receiverConfig, { scope, admit() { return { kind: 'full' }; } }, {
     ...auth.dependencies, botToken: async () => { tokens++; if (holdToken) await gate.promise; return 'synthetic-only'; },
     providerPost: async () => ({ status: 201, data: Buffer.from(JSON.stringify({ id: `receipt-${++posts}` })) }),
-  }, { targets: journals.map((journal, i) => ({ id: i ? 'tools' : 'legacy', journal, getRoute() {
+  }, { targets: journals.map((journal, i) => ({ id: i ? 'tools' : 'primary', journal, getRoute() {
     routes[i]!++; return { serviceUrl, channelId: 'msteams', bot: { id: receiverConfig.recipientIds[0]!, role: 'bot' },
       conversation: { id: finalDelivery.contextId, conversationType: 'personal', tenantId: scope.tenantId } };
   } })) });
-  const api = await startTargetOutboundServer({ host: '127.0.0.1', port: 0 }, ['legacy', 'tools'].map((id, i) => ({
-    prefix: i ? '/targets/tools' : '', bearerToken: `callback-${id}`, dispatcher: receiver.outbounds!.get(id)!, scope: journalScope,
+  const api = await startTargetOutboundServer({ host: '127.0.0.1', port: 0 }, ['primary', 'tools'].map((id, i) => ({
+    prefix: `/targets/${id}`, bearerToken: `callback-${id}`, dispatcher: receiver.outbounds!.get(id)!, scope: journalScope,
   })), () => ready);
   t.after(async () => { gate.resolve(); await api.stop(); await receiver.stop(); journals.forEach(j => j.close()); rmSync(directory, { recursive: true, force: true }); });
   const call = (path: string, token: string, body?: unknown) => fetch(`http://127.0.0.1:${api.port}${path}`, {
@@ -34,7 +34,7 @@ async function fixture(t: test.TestContext, holdToken = false) {
 
 test('colliding delivery/session/reply IDs use distinct journals and receipts through one SDK sender', async t => {
   const f = await fixture(t);
-  for (const [prefix, id, receipt] of [['', 'legacy', 'receipt-1'], ['/targets/tools', 'tools', 'receipt-2']]) {
+  for (const [prefix, id, receipt] of [['/targets/primary', 'primary', 'receipt-1'], ['/targets/tools', 'tools', 'receipt-2']]) {
     const response = await f.call(`${prefix}/v1/deliveries`, `callback-${id}`, finalDelivery);
     assert.equal(response.status, 200); assert.deepEqual(await response.json(), { status: 'delivered', providerMessageId: receipt });
     const replay = await f.call(`${prefix}/v1/deliveries`, `callback-${id}`, { ...finalDelivery, deliveryId: 'alias' });
@@ -44,27 +44,27 @@ test('colliding delivery/session/reply IDs use distinct journals and receipts th
 });
 test('callback path bearer is checked before routes, body, readiness and any other slot', async t => {
   const f = await fixture(t); f.unready();
-  for (const [prefix, wrong] of [['', 'callback-tools'], ['/targets/tools', 'callback-legacy']] as const) {
+  for (const [prefix, wrong] of [['/targets/primary', 'callback-tools'], ['/targets/tools', 'callback-primary']] as const) {
     assert.equal((await f.call(`${prefix}/v1/deliveries`, wrong, { targetId: 'tools' })).status, 401);
     assert.equal((await f.call(`${prefix}/v1/health`, wrong)).status, 401);
   }
   assert.deepEqual(f.routes, [0, 0]); assert.equal(f.tokens(), 0);
 });
-test('legacy and prefixed health/capabilities are exact; unknown paths authenticate and never touch storage', async t => {
+test('prefixed health/capabilities are exact; unknown paths authenticate and never touch storage', async t => {
   const f = await fixture(t);
-  for (const [prefix, id] of [['', 'legacy'], ['/targets/tools', 'tools']]) {
+  for (const [prefix, id] of [['/targets/primary', 'primary'], ['/targets/tools', 'tools']]) {
     assert.equal((await f.call(`${prefix}/v1/health`, `callback-${id}`)).status, 200);
     const c = await (await f.call(`${prefix}/v1/capabilities`, `callback-${id}`)).json() as any;
     assert.equal(c.capabilities.idempotentDelivery, true);
   }
-  for (const path of ['/unknown', '/targets/missing/v1/deliveries', '/targets/tools/v1/health?x=1']) {
-    assert.equal((await f.call(path, 'bad')).status, 401); assert.equal((await f.call(path, 'callback-legacy')).status, 404);
+  for (const path of ['/v1/health', '/v1/capabilities', '/v1/deliveries', '/unknown', '/targets/missing/v1/deliveries', '/targets/tools/v1/health?x=1']) {
+    assert.equal((await f.call(path, 'bad')).status, 401); assert.equal((await f.call(path, 'callback-primary')).status, 404);
   }
   assert.deepEqual(f.routes, [0, 0]); assert.equal(f.posts(), 0);
 });
 test('body cannot select a different callback journal', async t => {
   const f = await fixture(t);
-  assert.equal((await f.call('/v1/deliveries', 'callback-legacy', { ...finalDelivery, targetId: 'tools' })).status, 400);
+  assert.equal((await f.call('/targets/primary/v1/deliveries', 'callback-primary', { ...finalDelivery, targetId: 'tools' })).status, 400);
   assert.deepEqual(f.routes, [0, 0]); assert.equal(f.posts(), 0);
 });
 test('single-target outbound.stop still drains the real sender after caller cancellation', async t => {
@@ -83,7 +83,7 @@ test('single-target outbound.stop still drains the real sender after caller canc
 });
 
 test('stopping one borrowed dispatcher does not stop the shared sender; receiver stop drains held actual token work', async t => {
-  const f = await fixture(t, true); await f.receiver.outbounds!.get('legacy')!.stop();
+  const f = await fixture(t, true); await f.receiver.outbounds!.get('primary')!.stop();
   const response = f.call('/targets/tools/v1/deliveries', 'callback-tools', finalDelivery).then(r => r.arrayBuffer(), () => undefined);
   await eventually(() => f.tokens() === 1); let stopped = false;
   const stopping = f.receiver.stop().then(() => { stopped = true; });

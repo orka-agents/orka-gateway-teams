@@ -8,7 +8,7 @@ import { registryFixture, registryInput } from './support/registry.js';
 
 const group = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 function input() { return { schemaVersion: 1, graphIdentityClientId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', policies: [
-  { schemaVersion: 1, targetId: 'legacy', frontAgent: 'front', rules: [{ groupId: group, chatKinds: ['personal', 'groupChat'] }] },
+  { schemaVersion: 1, targetId: 'primary', frontAgent: 'front', rules: [{ groupId: group, chatKinds: ['personal', 'groupChat'] }] },
 ] }; }
 test('closed policy freezes additive rules and canonical UUIDs without changing registry identity', () => {
   const registry = registryInput(); const before = snapshotRegistry(registry).targets[0]!.identityDigest;

@@ -10,7 +10,6 @@ export interface BindingEvidence {
 interface RecordBase { schema: 1; scope: DirectoryScope; conversationId: string; chatKind: 'personal' | 'groupChat' }
 export type ConnectionRecord = RecordBase & {
   kind: 'conn'; targetId: string; identityDigest: string; bindingName: string;
-  lineage: { kind: 'provisioner' } | { kind: 'imported'; importId: string };
 } & ({ state: 'reserved'; binding?: never } | { state: 'provisioned'; binding: BindingEvidence });
 export interface ControlRoute {
   serviceUrl: string; channelId: 'msteams'; bot: { id: string; role: 'bot' };

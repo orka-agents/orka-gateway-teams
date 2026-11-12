@@ -9,7 +9,7 @@ import { memoryDirectoryTable } from './support/directory-memory.js';
 const scope = { appId: 'app-a', tenantId: 'tenant-a' };
 const context = (): DirectoryContext => ({ signal: new AbortController().signal, deadline: performance.now() + 10000 });
 const connection = (targetId = 'tools'): ConnectionRecord => ({ schema: 1, kind: 'conn', scope, conversationId: 'chat-a', chatKind: 'personal',
-  targetId, identityDigest: 'a'.repeat(64), bindingName: bindingName(scope, 'chat-a', 'a'.repeat(64)), lineage: { kind: 'provisioner' }, state: 'reserved' });
+  targetId, identityDigest: 'a'.repeat(64), bindingName: bindingName(scope, 'chat-a', 'a'.repeat(64)), state: 'reserved' });
 const control = (): ControlRecord => ({ schema: 1, kind: 'control', scope, conversationId: 'chat-a', chatKind: 'personal', activityId: 'activity-a',
   fingerprint: 'b'.repeat(64), currentTargetDigest: null, desiredTargetDigest: null,
   route: { serviceUrl: 'https://service.example.invalid/', channelId: 'msteams', bot: { id: 'bot-a', role: 'bot' },

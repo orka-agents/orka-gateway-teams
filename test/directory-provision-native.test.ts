@@ -20,7 +20,7 @@ for (const mode of ['ack', 'lost', 'conflict', 'lie', 'foreign', 'revoked'] as c
   const target = snapshotRegistry({ ...registryInput(), targets: registryInput().targets.map(value => ({ ...value, kubernetesTokenFile: tokenFile })) }).targets[0]!;
   const scope = { appId: target.config.scope.appId, tenantId: target.config.scope.tenantId };
   const connection: ConnectionRecord = { schema: 1, kind: 'conn', scope, conversationId: '19:native', chatKind: 'groupChat', targetId: target.id,
-    identityDigest: target.identityDigest!, bindingName: bindingName(scope, '19:native', target.identityDigest!), state: 'reserved', lineage: { kind: 'provisioner' } };
+    identityDigest: target.identityDigest!, bindingName: bindingName(scope, '19:native', target.identityDigest!), state: 'reserved' };
   const expectedSpec = { gatewayRef: { name: 'teams' }, agentRef: { name: 'front' }, match: { accountId: scope.tenantId, contextId: '19:native' },
     priority: 0, senderPolicy: { mode: 'all' }, session: { mode: 'context' } };
   const root = '/apis/gateway.orka.ai/v1alpha1/namespaces/default';

@@ -19,8 +19,8 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   const config = snapshotRegistry(input); const deps = { ...dependencies };
   if (!tlsVerificationEnabled() || deps.openIngressStore !== undefined || deps.openDeliveryJournal !== undefined) throw new ConfigurationError();
   if (signal?.aborted) throw new Error('Registry startup cancelled');
-  const legacy = config.targets.find(t => t.id === config.legacyTargetId)!;
-  const prepared = prepareReceiver(legacy.config.receiver, deps);
+  const shared = config.targets[0]!;
+  const prepared = prepareReceiver(shared.config.receiver, deps);
   const abort = new AbortController(); const loss = new AbortController(); const authorities: LeaseAuthority[] = [];
   const subscriptions: (() => void)[] = []; const handles: { open(): Promise<unknown>; close(): Promise<unknown> }[] = [];
   let ready = false; let fatal = false; let opening = true; let receiver: Receiver | undefined; let api: OutboundServer | undefined;
@@ -32,7 +32,7 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   const clients = config.targets.map(t => createOrkaClient(t.config.scope, { bearerToken: t.config.bearerToken, authority,
     ...(t.config.caFile === undefined ? {} : { ca: readCaBundle(t.config.caFile) }) }));
   // Each serialized domain can hold one token caller; 32 targets own 64 domains.
-  const provider = prepareStorageIdentity(legacy.config.storage.identity).createProvider(deps.storageIdentity, Math.max(32, config.targets.length * 2));
+  const provider = prepareStorageIdentity(shared.config.storage.identity).createProvider(deps.storageIdentity, Math.max(32, config.targets.length * 2));
   const unsubscribe = () => { for (const remove of subscriptions.splice(0)) remove(); };
   const closeStores = async () => {
     unsubscribe(); const results = await Promise.allSettled(handles.map(h => Promise.resolve().then(() => h.close())));
@@ -55,7 +55,7 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   const assertStarting = () => { if (abort.signal.aborted || signal?.aborted) throw new Error('Registry startup cancelled'); };
   const active = () => ready && authority.allowed();
   signal?.addEventListener('abort', cancel, { once: true });
-  const slots: { target: typeof legacy; inbox: ReturnType<typeof createTableIngressStoreV3>; journal: ReturnType<typeof createTableDeliveryJournalV3> }[] = [];
+  const slots: { target: typeof shared; inbox: ReturnType<typeof createTableIngressStoreV3>; journal: ReturnType<typeof createTableDeliveryJournalV3> }[] = [];
   try {
     for (const target of config.targets) {
       const c = target.config; const s = c.storage;
@@ -71,15 +71,15 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
     // Every handle is retained and subscribed before the first ownership await.
     for (const h of handles) { assertStarting(); await h.open(); assertStarting(); }
     opening = false;
-    const admission = slots.find(s => s.target.id === config.legacyTargetId)!.inbox;
-    receiver = await prepared.start({ scope: admission.scope, admit: (event, route) => active() ? admission.admit(event, route) : { kind: 'full' } },
+    // No implicit target: self-service admission is wired separately.
+    receiver = await prepared.start({ scope: shared.config.scope, admit: () => ({ kind: active() ? 'conflict' : 'full' }) },
       { targets: slots.map(s => ({ id: s.target.id, journal: s.journal, correlation: s.journal, authority,
         getRoute: key => s.inbox.getRoute(key),
         ...(s.target.config.outbound!.interimDelivery === undefined ? {} : { interimDelivery: s.target.config.outbound!.interimDelivery }),
         ...(s.target.config.outbound!.meetingDrafts === undefined ? {} : { meetingDrafts: s.target.config.outbound!.meetingDrafts }) })) }, abort.signal);
     assertStarting();
-    api = await startTargetOutboundServer(legacy.config.outbound!, slots.map(s => ({
-      ...s.target.config.outbound!, prefix: s.target.id === config.legacyTargetId ? '' : `/targets/${s.target.id}`,
+    api = await startTargetOutboundServer(shared.config.outbound!, slots.map(s => ({
+      ...s.target.config.outbound!, prefix: `/targets/${s.target.id}`,
       dispatcher: receiver!.outbounds!.get(s.target.id)!, scope: { appId: s.target.config.scope.appId, tenantId: s.target.config.scope.tenantId },
     })), active);
     assertStarting(); if (!authority.allowed()) throw new Error('Registry authority lost'); ready = true;
