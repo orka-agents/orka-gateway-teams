@@ -2,7 +2,8 @@
 
 `node dist/ingress/main.js serve-registry` runs one Teams bot with separate
 Table V3 inboxes, delivery journals, callback bearers and relay loops for registered
-Orkas. Existing `serve` modes (SQLite, Table V2 and Table V3) are unchanged.
+Orkas. Multi-target mode means `serve-registry`, even with only one registered
+Orka. Existing `serve` modes (SQLite, Table V2 and Table V3) are unchanged.
 
 There is no default or legacy target. Until self-service admission is wired,
 new converted Teams messages (personal, group chat and channel) receive the

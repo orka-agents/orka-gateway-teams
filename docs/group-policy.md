@@ -1,8 +1,8 @@
 # Group access policy library
 
 The group-policy library evaluates access to registered Orkas by Entra group and
-chat kind. It is not yet wired into `serve-registry`: existing Teams intake still
-is refused without choosing a target. This library alone
+chat kind. It is not yet wired into `serve-registry`, which refuses new intake
+without choosing a target. This library alone
 does not enable self-service, enforce policy on live traffic, create Bindings or
 send no-access replies.
 
@@ -87,8 +87,8 @@ Call `readPolicySubject(activity, tenantId)` only after the existing transport,
 recipient, service, tenant and converter checks. It extracts the UUID AAD object
 ID separately from persisted event data: personal `sender.id` remains Teams
 `from.id`, shared protocol sender IDs remain unchanged. Missing/invalid AAD has no
-fallback to a Teams ID. Unsupported/channel subjects grant nothing. Channels are unsupported in
-multi-target mode.
+fallback to a Teams ID. Unsupported/channel subjects grant nothing. Channels are
+unsupported in `serve-registry`.
 
 Compose `createGroupAuthorizer(policy, membership)` with the snapshot and
 `createGraphMembershipClient(identity)`. Call `authorize(subject, context,

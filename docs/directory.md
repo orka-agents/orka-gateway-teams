@@ -9,8 +9,8 @@ create and check Bindings, but is not wired into serving yet.
 ## Identity and permanent choice
 
 Connections are keyed by authenticated app, tenant and **exact** conversation ID.
-Do not trim, case-fold or strip a context suffix. Channels are unsupported in multi-target mode and do not enter this
-directory's command parser.
+Do not trim, case-fold or strip a context suffix. Channels are unsupported in
+`serve-registry` and do not enter this directory's command parser.
 
 After mention removal, `parseUseCommand` trims outer whitespace and recognizes
 only a whole message of the form `use <targetId>`, with one ASCII space and a

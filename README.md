@@ -66,7 +66,7 @@ make startup succeed, or replace an active storage owner.
 For operator-managed Table V3 targets behind one bot, see the
 [Orka registry](docs/registry.md). There is no legacy target. Multi-target mode
 refuses new intake, including channels, until self-service routing is wired;
-single-target modes are unchanged. The [group-policy library](docs/group-policy.md)
+the existing SQLite, Table V2 and Table V3 `serve` modes are unchanged. The [group-policy library](docs/group-policy.md)
 supplies membership and admission decisions. The separate
 [connection directory](docs/directory.md) supplies permanent target reservations
 and control-send state; live handler and provisioning integration are still required.
