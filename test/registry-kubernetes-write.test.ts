@@ -49,6 +49,17 @@ test('authority, credential expiry and expired context prevent Binding native ha
   writeFileSync(f.tokenFile, JSON.stringify({ token: 'synthetic-only', expiresAt: new Date(Date.now() + 299000).toISOString() }));
   await assert.rejects(f.reader.createBinding({}, context()), { message: 'credential-expiring' }); assert.equal(f.seen.length, 0);
 });
+test('late authority loss never reports POST success or GET absence to a direct client caller', async t => {
+  const f = await fixture(t); let allowed = true;
+  const ctx = { ...context(), allowed: () => allowed };
+  const postGate = deferred(); t.after(() => postGate.resolve()); f.hold(postGate.promise);
+  const posted = f.reader.createBinding({}, ctx); await eventually(() => f.seen.length === 1);
+  allowed = false; postGate.resolve(); assert.deepEqual(await posted, { kind: 'uncertain' });
+  allowed = true; const getGate = deferred(); t.after(() => getGate.resolve()); f.hold(getGate.promise); f.response(404);
+  const read = assert.rejects(f.reader.getBinding('teams-test', ctx), { message: 'Kubernetes read failed' });
+  await eventually(() => f.seen.length === 2); allowed = false; getGate.resolve(); await read;
+  assert.equal(f.closes(), 2);
+});
 test('captured deadline and cancellation drain held requests; four actual calls bound native work', async t => {
   const f = await fixture(t); const gate = deferred(); t.after(() => gate.resolve()); f.hold(gate.promise);
   const ctx = context(150); const pending = assert.rejects(f.reader.getBinding('teams-test', ctx));

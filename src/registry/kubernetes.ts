@@ -43,7 +43,10 @@ export function createKubernetesReader(input: RegistryTarget, dependencies: { re
       let req: ClientRequest | undefined; let settled = false; let removeAbort: (() => void) | undefined;
       const finish = (result?: { status: number; value?: Record<string, unknown> }) => {
         if (settled) return; settled = true; clearTimeout(timer); removeAbort?.(); cancellations.delete(abort);
-        const complete = () => result === undefined ? (body ? resolve({ status: 0 }) : reject(failed())) : resolve(result);
+        const complete = () => {
+          if (result === undefined || !active()) { if (body) resolve({ status: 0 }); else reject(failed()); }
+          else resolve(result);
+        };
         // Logical completion is not actual native close; close() drains this promise.
         if (req && !req.closed) { req.once('close', complete); req.destroy(); } else complete();
       };
