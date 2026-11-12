@@ -109,17 +109,26 @@ path. Authentication precedes body parsing, readiness and storage; unknown paths
 return authenticated 404 without storage access. Delivery bodies cannot select a
 slot. The existing 32-active-delivery budget is listener-wide, not per target.
 
-## Standalone Kubernetes reads
+## Standalone Kubernetes transport
 
-`createKubernetesReader` in `src/registry/kubernetes.ts` is a library, not a
-provisioner or a background loop. It exposes GET-only reads for the named Gateway,
-front Agent and namespaced GatewayBindings. Callers must still validate CRD
-semantics, identity, readiness and overlap. HTTPS is verified, redirects are
-refused, each request is bounded to ten seconds/1 MiB, and lists to 100 pages and
-10,000 Bindings. Continuation values are encoded into the fixed resource path;
-response URLs never receive a token. `close()` aborts and drains actual requests.
+`createKubernetesReader` in `src/registry/kubernetes.ts` remains a standalone
+library, not a background loop or a startup/relay dependency. Existing
+`getGateway(signal?)`, `getAgent(signal?)` and `listBindings(signal?)` callers
+remain supported. Methods also accept `{signal, deadline, allowed}` to borrow a
+caller's absolute monotonic deadline and combined authority. At most four native
+calls run concurrently; excess calls fail without queuing.
 
-Before every GET (including each list page), it rereads a protected regular JSON
+`getBinding(name, context)` reads a fixed namespaced resource (404 means absent).
+`createBinding(object, context)` makes one POST of at most 64 KiB to the fixed
+Binding collection. Its ACK/conflict/uncertain result is not commit proof; the
+[provisioning library](directory.md#binding-provisioning-library) always GETs and
+checks the object afterward. It never follows redirects or retries writes.
+HTTPS is verified; GET responses are bounded to 1 MiB and requests to ten seconds
+or the supplied earlier deadline. Lists stop at 100 pages and 10,000 Bindings.
+Continuation values are encoded into the fixed resource path; response URLs
+never receive a token. `close()` aborts and drains actual requests.
+
+Before every request (including each list page), it rereads a protected regular JSON
 file of at most 16 KiB containing exactly `{ "token": "...", "expiresAt": "..." }`.
 Expiry is the issued UTC timestamp, not the requested token lifetime. Operations
 stop five minutes before expiry with `credential-expiring`. An unreadable,
