@@ -67,7 +67,9 @@ For operator-managed Table V3 targets behind one bot, see the
 [Orka registry](docs/registry.md). New Teams intake remains pinned to one legacy
 target; self-service connections and live group-policy enforcement are not
 implemented. The [group-policy library](docs/group-policy.md) supplies membership
-and admission decisions for later directory integration.
+and admission decisions. The separate [connection directory](docs/directory.md)
+supplies permanent target reservations, control-send state and offline legacy
+Binding import; live handler and provisioning integration are still required.
 
 ## Install from a release
 
