@@ -17,7 +17,7 @@ const groupB = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 const context = () => ({ signal: new AbortController().signal, deadline: performance.now() + 10000 });
 const subject = () => ({ tenantId, objectId, chatKind: 'personal' as const });
 function policy() { return snapshotGroupPolicy({ schemaVersion: 1, graphIdentityClientId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', policies: [
-  { schemaVersion: 1, targetId: 'legacy', frontAgent: 'front', rules: [{ groupId: groupA, chatKinds: ['personal', 'groupChat'] }] },
+  { schemaVersion: 1, targetId: 'primary', frontAgent: 'front', rules: [{ groupId: groupA, chatKinds: ['personal', 'groupChat'] }] },
   { schemaVersion: 1, targetId: 'tools', frontAgent: 'front', rules: [{ groupId: groupB, chatKinds: ['groupChat'] }] },
 ] }, registryInput()); }
 function fixture(t: test.TestContext) {
@@ -57,9 +57,9 @@ test('additive grants apply only to current chat kind, independently for later s
   assert.equal((await f.authorizer.authorize(subject(), context(), 'tools')).kind, 'no-access');
   const current = { ...subject(), chatKind: 'groupChat' as const };
   const allowed = await f.authorizer.authorize(current, context()); assert.equal(allowed.kind, 'eligible');
-  if (allowed.kind === 'eligible') assert.deepEqual(allowed.targets.map(t => t.id), ['legacy', 'tools']);
+  if (allowed.kind === 'eligible') assert.deepEqual(allowed.targets.map(t => t.id), ['primary', 'tools']);
   f.groups([]); const other = { ...current, objectId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee' };
-  assert.equal((await f.authorizer.authorize(other, context(), 'legacy')).kind, 'no-access'); assert.equal(f.calls(), 2);
+  assert.equal((await f.authorizer.authorize(other, context(), 'primary')).kind, 'no-access'); assert.equal(f.calls(), 2);
 });
 for (const denial of [false, true]) test(`complete ${denial ? 'denial' : 'positive'} cache lasts strictly less than 60 seconds`, async t => {
   const realMono = performance.now.bind(performance); let offset = 0; t.mock.method(performance, 'now', () => realMono() + offset);

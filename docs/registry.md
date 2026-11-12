@@ -2,14 +2,17 @@
 
 `node dist/ingress/main.js serve-registry` runs one Teams bot with separate
 Table V3 inboxes, delivery journals, callback bearers and relay loops for registered
-Orkas. Existing `serve` modes (SQLite, Table V2 and Table V3) are unchanged.
+Orkas. Multi-target mode means `serve-registry`, even with only one registered
+Orka. Existing `serve` modes (SQLite, Table V2 and Table V3) are unchanged.
 
-New Teams messages still go **only to `legacyTargetId`**. Other slots can drain
-previously accepted work and serve their own callbacks; registering one does not
-authorize new Teams requests to it. Group policy, discovery, chat connections,
-Binding provisioning and the generic no-access reply are separate features, not
-implemented by this command. No Kubernetes request or token-file read happens
-on registry startup or relay.
+There is no default or legacy target. Until self-service admission is wired,
+new converted Teams messages (personal, group chat and channel) receive the
+existing generic HTTP 409 refusal, without creating an Orka Task or sending a
+Teams reply. Targets can drain previously accepted work and serve their own
+callbacks; registration alone never authorizes new requests. Group policy,
+discovery, chat connections, provisioning and generic no-access control sends
+still require live integration. Channels are unsupported in multi-target mode.
+No Kubernetes request or token-file read happens on registry startup or relay.
 
 ## Manifest and environment
 
@@ -22,7 +25,6 @@ version 1, at most 32 targets and at most 256 KiB. For example:
 ```json
 {
   "schemaVersion": 1,
-  "legacyTargetId": "platform",
   "targets": [{
     "id": "platform",
     "label": "Platform",
@@ -76,11 +78,11 @@ the shared app, tenant, Table V3 storage and audit configuration. Initialization
 does not consume `ORKA_REGISTRY_FILE`; it retains the existing command contracts.
 Never initialize, reset or repair stores through `serve-registry`.
 
-Preserve the legacy target's exact app/tenant/Orka/Gateway scope and both stable
-store IDs, so it opens the same history. Inbox IDs must be unique among inboxes;
-delivery IDs must be unique among journals. The two domains may retain the same
-legacy ID because their partition kinds differ. Existing V2 data requires the
-separate audited V3 upgrade procedure, not reinitialization.
+Preserve each target's exact app/tenant/Orka/Gateway scope and both stable store
+IDs when reopening retained history. Inbox IDs must be unique among inboxes;
+delivery IDs must be unique among journals. The two domains may use the same
+ID because their partition kinds differ. Existing V2 data requires the separate
+audited V3 upgrade procedure, not reinitialization.
 
 Stop and actually drain the previous owner before switching commands or editing
 registration, CA or startup credentials. A lease timeout alone is not proof of
@@ -100,9 +102,10 @@ the read library; registration does not verify a live Gateway UID or Agent.
 
 ## Callback paths
 
-The legacy slot keeps `/v1/deliveries`, `/v1/health`, `/v1/capabilities` and its
-existing callback bearer. Other slots use `/targets/<id>/v1/deliveries`,
-`/targets/<id>/v1/health`, `/targets/<id>/v1/capabilities`. Configure each Orka's
+Every target uses `/targets/<id>/v1/deliveries`,
+`/targets/<id>/v1/health` and `/targets/<id>/v1/capabilities`, authenticated
+with that target's distinct callback bearer. Unprefixed routes are not registered
+in multi-target mode. Configure each Orka's
 callback base accordingly. These are on the shared outbound listener, not the
 SDK's `/api/messages` listener. A slot's bearer cannot authorize another slot's
 path. Authentication precedes body parsing, readiness and storage; unknown paths

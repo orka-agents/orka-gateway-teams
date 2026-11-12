@@ -8,16 +8,16 @@ import { ConfigurationError } from '../src/ingress/config.js';
 import { parseRegistryConfig, snapshotRegistry } from '../src/registry/config.js';
 import { registryFixture, registryInput } from './support/registry.js';
 
-test('registry preserves legacy scope/store bindings, freezes snapshots and never reads Kubernetes token at startup', t => {
+test('registry preserves target scope/store bindings, freezes snapshots and never reads Kubernetes token at startup', t => {
   const f = registryFixture(t); const c = parseRegistryConfig(f.env);
-  assert.equal(c.legacyTargetId, 'legacy'); assert.equal(c.targets.length, 2);
+  assert.equal('legacyTargetId' in c, false); assert.equal(c.targets.length, 2);
   assert.equal(c.targets[0]!.config.scope.orkaBaseUrl, 'https://orka.example.invalid/');
-  assert.equal(c.targets[0]!.config.storage.ingressStoreId, 'legacy-inbox');
-  assert.equal(c.targets[0]!.config.storage.deliveryStoreId, 'legacy-delivery');
+  assert.equal(c.targets[0]!.config.storage.ingressStoreId, 'primary-inbox');
+  assert.equal(c.targets[0]!.config.storage.deliveryStoreId, 'primary-delivery');
   assert.equal(Object.isFrozen(c.targets[0]!.config.storage), true);
   assert.equal(Object.isFrozen(c.targets), true);
   const expected = createHash('sha256').update(JSON.stringify(['teams-target-v1',
-    '22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111', 'legacy',
+    '22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111', 'primary',
     'https://orka.example.invalid/', 'https://kubernetes.example.invalid/', 'default', 'teams', 'gateway-uid', 'default', 'front'])).digest('hex');
   assert.equal(c.targets[0]!.identityDigest, expected);
 });
@@ -26,10 +26,10 @@ for (const [name, change] of Object.entries({
   'unknown root key': (m: any) => { m.policy = {}; },
   'unsupported agents policy': (m: any) => { m.targets[0].agents = ['front']; },
   'unknown target field': (m: any) => { m.targets[0].secret = 'not-allowed'; },
-  'duplicate id': (m: any) => { m.targets[1].id = 'legacy'; },
+  'duplicate id': (m: any) => { m.targets[1].id = 'primary'; },
   'duplicate inbox id': (m: any) => { m.targets[1].ingressStoreId = m.targets[0].ingressStoreId; },
   'duplicate delivery id': (m: any) => { m.targets[1].deliveryStoreId = m.targets[0].deliveryStoreId; },
-  'missing legacy': (m: any) => { m.legacyTargetId = 'absent'; },
+  'removed legacy target field': (m: any) => { m.legacyTargetId = 'primary'; },
   'noncanonical Orka URL': (m: any) => { m.targets[0].orkaBaseUrl = 'https://orka.example.invalid'; },
   'insecure Kubernetes URL': (m: any) => { m.targets[0].kubernetesBaseUrl = 'http://kubernetes.example.invalid/'; },
   'cross namespace front': (m: any) => { m.targets[0].frontAgent.namespace = 'other'; },
@@ -59,7 +59,7 @@ for (const kind of ['manifest', 'parent'] as const) test(`registry refuses untru
 });
 
 test('registry rejects credential reuse across slots and directions without printing it', t => {
-  const f = registryFixture(t); writeFileSync(f.manifest.targets[1]!.callbackTokenFile, 'ingress-legacy', { mode: 0o600 });
+  const f = registryFixture(t); writeFileSync(f.manifest.targets[1]!.callbackTokenFile, 'ingress-primary', { mode: 0o600 });
   assert.throws(() => parseRegistryConfig(f.env), ConfigurationError);
 });
 test('digest excludes mutable labels/files/credentials but includes each routing field', () => {
@@ -74,7 +74,7 @@ test('digest excludes mutable labels/files/credentials but includes each routing
     (v: any) => { v.config.scope.orkaBaseUrl = 'https://other.invalid/'; },
     (v: any) => { v.config.scope.gatewayName = 'other'; },
     (v: any) => { v.config.scope.gatewayNamespace = 'other'; v.frontAgent.namespace = 'other'; },
-  ]) { const input = structuredClone(original); change(input.targets[0]); input.legacyTargetId = input.targets[0]!.id;
+  ]) { const input = structuredClone(original); change(input.targets[0]);
     assert.notEqual(snapshotRegistry(input).targets[0]!.identityDigest, digest); }
 });
 test('library snapshot rejects mismatched shared bot, listener, policy and storage identities', () => {

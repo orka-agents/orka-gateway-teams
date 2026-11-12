@@ -33,7 +33,7 @@ function ready(value: Record<string, unknown>, current: number): boolean {
 /** No ownership, background queue or Teams effect: the caller reserves first and owns drain/markProvisioned.
  * Every check is fresh; never use this result as a cached authorization for a later event. */
 export function createBindingProvisioner(input: RegistryTarget, client: KubernetesClient) {
-  const target = snapshotRegistry({ schemaVersion: 1, legacyTargetId: input.id, targets: [input] }).targets[0]!;
+  const target = snapshotRegistry({ schemaVersion: 1, targets: [input] }).targets[0]!;
   const scope = target.config.scope; const namespace = scope.gatewayNamespace;
   function capture(context: KubernetesContext): KubernetesContext {
     const signal = context.signal; const deadline = Math.min(context.deadline, performance.now() + 10000); const allowed = context.allowed.bind(context);
@@ -93,10 +93,8 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
     const expected = value.state === 'provisioned' ? value.binding.spec : desired(value).spec;
     if (canonicalJSON(spec) !== canonicalJSON(expected)) conflict();
     if (value.state === 'provisioned' && (uid !== value.binding.uid || current !== value.binding.generation)) conflict();
-    if (value.lineage.kind === 'provisioner') {
-      const annotations = object(meta.annotations);
-      if (annotations[digestMarker] !== target.identityDigest || annotations[gatewayMarker] !== target.gatewayUid) conflict();
-    }
+    const annotations = object(meta.annotations);
+    if (annotations[digestMarker] !== target.identityDigest || annotations[gatewayMarker] !== target.gatewayUid) conflict();
     return { namespace, name: value.bindingName, uid, generation: current, spec: structuredClone(spec) as { [key: string]: CanonicalValue } };
   }
   async function run(input: ConnectionRecord, supplied: KubernetesContext, checkOnly: boolean): Promise<BindingEvidence> {
@@ -108,7 +106,7 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
       await overlap(value, context); active(context);
       let binding = await client.getBinding(value.bindingName, context); active(context);
       if (!binding) {
-        if (checkOnly || value.state === 'provisioned' || value.lineage.kind !== 'provisioner') conflict();
+        if (checkOnly || value.state === 'provisioned') conflict();
         active(context);
         try { await client.createBinding(desired(value), context); }
         catch (error) {

@@ -44,7 +44,7 @@ export async function openDirectory(table: DirectoryTable, startup: DirectoryCon
     return persist(row, { ...row.value, state: 'unknown' }, context);
   };
   const connectionIdentity = (value: ConnectionRecord) => canonicalJSON([value.scope, value.conversationId, value.chatKind,
-    value.targetId, value.identityDigest, value.bindingName, value.lineage]);
+    value.targetId, value.identityDigest, value.bindingName]);
   const controlIdentity = (value: ControlRecord) => canonicalJSON([value.scope, value.conversationId, value.chatKind,
     value.activityId, value.fingerprint, value.desiredTargetDigest]);
   const controlRow = async (key: ControlKey, ctx: DirectoryContext) => {

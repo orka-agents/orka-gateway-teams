@@ -10,7 +10,7 @@ export interface RegistryTarget {
   kubernetesBaseUrl: string; kubernetesTokenFile: string; kubernetesCaFile?: string;
   config: TableServeConfig; readonly identityDigest?: string;
 }
-export interface RegistryConfig { schemaVersion: 1; legacyTargetId: string; targets: readonly RegistryTarget[] }
+export interface RegistryConfig { schemaVersion: 1; targets: readonly RegistryTarget[] }
 const perTarget = ['ORKA_BASE_URL', 'ORKA_GATEWAY_NAMESPACE', 'ORKA_GATEWAY_NAME', 'ORKA_BEARER_TOKEN', 'ORKA_OUTBOUND_BEARER_TOKEN', 'ORKA_CA_FILE', 'TABLE_INGRESS_STORE_ID', 'TABLE_DELIVERY_STORE_ID'];
 const metadataKeys = ['id', 'label', 'gatewayUid', 'frontAgent', 'kubernetesBaseUrl', 'kubernetesTokenFile', 'kubernetesCaFile'];
 
@@ -41,7 +41,7 @@ function targetMetadata(input: Record<string, unknown>, config: TableServeConfig
 /** Public library boundary: callers cannot combine different shared identities or listeners. */
 export function snapshotRegistry(input: RegistryConfig): RegistryConfig {
   try {
-    const root = auditFields(input, ['schemaVersion', 'legacyTargetId', 'targets']);
+    const root = auditFields(input, ['schemaVersion', 'targets']);
     if (root.schemaVersion !== 1 || !Array.isArray(root.targets) || !root.targets.length || root.targets.length > 32) throw new ConfigurationError();
     const ids = new Set<string>(); const inboxes = new Set<string>(); const deliveries = new Set<string>(); const tokens = new Set<string>();
     let shared: string | undefined;
@@ -62,15 +62,14 @@ export function snapshotRegistry(input: RegistryConfig): RegistryConfig {
         metadata.frontAgent.namespace, metadata.frontAgent.name])).digest('hex');
       return Object.freeze({ ...metadata, config, identityDigest });
     });
-    if (typeof root.legacyTargetId !== 'string' || !ids.has(root.legacyTargetId)) throw new ConfigurationError();
-    return Object.freeze({ schemaVersion: 1, legacyTargetId: root.legacyTargetId, targets: Object.freeze(targets) });
+    return Object.freeze({ schemaVersion: 1, targets: Object.freeze(targets) });
   } catch { throw new ConfigurationError(); }
 }
 export function parseRegistryConfig(env: NodeJS.ProcessEnv): RegistryConfig {
   try {
     const captured = { ...env };
     if (captured.GATEWAY_STORAGE_BACKEND !== 'table-v3' || captured.OUTBOUND_ENABLED !== 'true' || perTarget.some(k => captured[k] !== undefined)) throw new ConfigurationError();
-    const root = auditFields(JSON.parse(readRegistryFile(absoluteFile(captured.ORKA_REGISTRY_FILE), 256 * 1024, false)), ['schemaVersion', 'legacyTargetId', 'targets']);
+    const root = auditFields(JSON.parse(readRegistryFile(absoluteFile(captured.ORKA_REGISTRY_FILE), 256 * 1024, false)), ['schemaVersion', 'targets']);
     if (!Array.isArray(root.targets) || !root.targets.length || root.targets.length > 32) throw new ConfigurationError();
     const targets = root.targets.map(item => {
       const raw = auditFields(item, [...metadataKeys, 'orkaBaseUrl', 'gatewayNamespace', 'gatewayName', 'ingressStoreId', 'deliveryStoreId', 'ingressTokenFile', 'callbackTokenFile', 'orkaCaFile']);
@@ -82,6 +81,6 @@ export function parseRegistryConfig(env: NodeJS.ProcessEnv): RegistryConfig {
       if (!('storage' in parsed) || parsed.scope.orkaBaseUrl !== raw.orkaBaseUrl) throw new ConfigurationError();
       return { ...targetMetadata(raw, parsed), config: parsed };
     });
-    return snapshotRegistry({ schemaVersion: root.schemaVersion as 1, legacyTargetId: root.legacyTargetId as string, targets });
+    return snapshotRegistry({ schemaVersion: root.schemaVersion as 1, targets });
   } catch { throw new ConfigurationError(); }
 }

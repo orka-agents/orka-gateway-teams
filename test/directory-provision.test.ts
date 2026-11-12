@@ -9,7 +9,7 @@ import { registryInput } from './support/registry.js';
 function fixture(chatKind: 'personal' | 'groupChat' = 'personal') {
   const target = snapshotRegistry(registryInput()).targets[0]!; const scope = target.config.scope;
   const connection: ConnectionRecord = { schema: 1, kind: 'conn', scope: { appId: scope.appId, tenantId: scope.tenantId }, conversationId: '19:exact', chatKind,
-    targetId: target.id, identityDigest: target.identityDigest!, bindingName: bindingName({ appId: scope.appId, tenantId: scope.tenantId }, '19:exact', target.identityDigest!), lineage: { kind: 'provisioner' }, state: 'reserved' };
+    targetId: target.id, identityDigest: target.identityDigest!, bindingName: bindingName({ appId: scope.appId, tenantId: scope.tenantId }, '19:exact', target.identityDigest!), state: 'reserved' };
   const spec = { gatewayRef: { name: 'teams' }, agentRef: { name: 'front' }, match: { accountId: scope.tenantId, contextId: '19:exact' },
     priority: 0, senderPolicy: { mode: 'all' }, session: { mode: chatKind === 'personal' ? 'context-sender' : 'context' } };
   const gateway: any = { apiVersion: 'gateway.orka.ai/v1alpha1', kind: 'Gateway', metadata: { namespace: 'default', name: 'teams', uid: 'gateway-uid', generation: 1 }, status: { ready: true, observedGeneration: 1 } };
@@ -73,14 +73,6 @@ test('foreign overlap refuses first create; overlap introduced during create ref
 test('authority loss after create leaves only remote progress and cannot publish evidence', async () => {
   const f = fixture(); f.afterCreate(() => f.revoke());
   await assert.rejects(f.provisioner.reconcile(f.connection, f.context()), { category: 'target-paused' }); assert.equal(f.creates(), 1);
-});
-test('imported nondefault spec is compared intact and never fabricated as owned or recreated', async () => {
-  const f = fixture(); const spec = { ...f.spec, priority: -30, senderPolicy: { mode: 'allowlist', allowedSenderIds: ['29:original'] }, taskDefaults: { retryPolicy: { backoffMultiplier: 1.5 } } };
-  const evidence = { namespace: 'default', name: f.connection.bindingName, uid: 'imported-uid', generation: 7, spec };
-  const imported: ConnectionRecord = { ...f.connection, lineage: { kind: 'imported', importId: 'reviewed-import' }, state: 'provisioned', binding: evidence };
-  f.setBinding({ apiVersion: 'gateway.orka.ai/v1alpha1', kind: 'GatewayBinding', metadata: { namespace: 'default', name: f.connection.bindingName, uid: 'imported-uid', generation: 7 }, spec, status: { ready: true, observedGeneration: 7 } });
-  assert.deepEqual(await f.provisioner.check(imported, f.context()), evidence); assert.equal(f.creates(), 0);
-  f.setBinding(undefined); await assert.rejects(f.provisioner.reconcile(imported, f.context()), { category: 'binding-conflict' }); assert.equal(f.creates(), 0);
 });
 test('cross-target, cancelled, expired and unprovisioned check cannot start Kubernetes work', async () => {
   const f = fixture();

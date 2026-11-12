@@ -9,7 +9,7 @@ import { createTableIngressStoreV3 } from '../src/ingress/table-store.js';
 import { startRegistryRuntime } from '../src/registry/runtime.js';
 import { expectedEvent } from './fixtures/incoming.js';
 import { finalDelivery } from './fixtures/outgoing.js';
-import { authFixture, post, receiverConfig, serviceUrl } from './support/ingress-auth.js';
+import { activity, authFixture, post, receiverConfig, serviceUrl } from './support/ingress-auth.js';
 import { httpsFixture } from './support/ingress-https.js';
 import { registryInput } from './support/registry.js';
 import { runtimeIdentity } from './support/table-runtime.js';
@@ -82,7 +82,7 @@ test('callback all-target revalidation overlaps independent domains instead of s
   assert.equal(concurrent, 4, 'one held remote lease read must not defer reads of the other independent domains');
 });
 
-test('all four V3 audits precede listeners; only legacy admits new Teams tasks; no Kubernetes startup request', async t => {
+test('all four V3 audits precede listeners; registry refuses new intake without a fallback target', async t => {
   const f = await fixture(t); let listens = 0;
   const listen = NativeAdapter.prototype.listen;
   t.mock.method(NativeAdapter.prototype, 'listen', function(this: NativeAdapter, ...args: Parameters<typeof listen>) {
@@ -94,12 +94,23 @@ test('all four V3 audits precede listeners; only legacy admits new Teams tasks; 
     return native(url, options, callback);
   }); syncBuiltinESMExports(); t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   const runtime = await startRegistryRuntime(f.config, f.deps); t.after(() => runtime.stop());
-  assert.equal(listens, 1); assert.equal((await post(runtime.port, f.auth.token())).status, 200);
-  const tools = f.domains.find(d => d.target === 'tools' && d.kind === 'ingress')!;
-  assert.equal([...tools.service.rows.values()].some(row => row.T === 'event'), false);
+  assert.equal(listens, 1);
+  for (const kind of ['personal', 'groupChat', 'channel']) {
+    const input = activity(); input.conversation.conversationType = kind;
+    if (kind !== 'personal') {
+      input.conversation.isGroup = true; input.from.aadObjectId = 'aad-requester';
+      input.text = '<at>Orka</at> help';
+      input.entities = [{ type: 'mention', text: '<at>Orka</at>', mentioned: { id: input.recipient.id } }];
+    }
+    assert.equal((await post(runtime.port, f.auth.token(), input)).status, 409);
+  }
+  assert.equal(f.domains.some(d => [...d.service.rows.values()].some(row => row.T === 'event')), false);
   assert.equal(kubernetes, 0);
-  for (const [prefix, id] of [['', 'legacy'], ['/targets/tools', 'tools']]) assert.equal((await fetch(`http://127.0.0.1:${runtime.outboundPort}${prefix}/v1/health`, {
+  for (const id of ['primary', 'tools']) assert.equal((await fetch(`http://127.0.0.1:${runtime.outboundPort}/targets/${id}/v1/health`, {
     headers: { authorization: `Bearer callback-${id}` } })).status, 200);
+  for (const path of ['/v1/health', '/v1/capabilities', '/v1/deliveries']) {
+    assert.equal((await fetch(`http://127.0.0.1:${runtime.outboundPort}${path}`, { headers: { authorization: 'Bearer callback-primary' } })).status, 404);
+  }
   await runtime.stop(); await runtime.done; assert.ok(f.domains.every(d => d.service.rows.get('M')?.Owner === ''));
 });
 for (const index of [0, 1, 2, 3]) test(`authority loss in domain ${index} stops all slots`, async t => {
@@ -180,10 +191,10 @@ async function seed(f: Awaited<ReturnType<typeof fixture>>) {
   } } finally { await provider.close(); }
 }
 
-test('retained second-slot work relays independently during legacy outage; colliding V3 callbacks retain separate receipts', async t => {
+test('retained second-slot work relays independently during primary outage; colliding V3 callbacks retain separate receipts', async t => {
   const f = await fixture(t); await seed(f); const received: string[] = []; let posts = 0;
   const upstream = await httpsFixture(t, (req, res) => {
-    const tools = req.headers.authorization === 'Bearer ingress-tools'; received.push(tools ? 'tools' : 'legacy');
+    const tools = req.headers.authorization === 'Bearer ingress-tools'; received.push(tools ? 'tools' : 'primary');
     if (!tools) { res.writeHead(503, { 'retry-after': '60' }); res.end(); return; }
     res.writeHead(202); res.end(JSON.stringify({ status: 'accepted', eventId: expectedEvent.externalEventId, state: 'Queued' }));
   });
@@ -193,8 +204,8 @@ test('retained second-slot work relays independently during legacy outage; colli
   syncBuiltinESMExports(); t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   const runtime = await startRegistryRuntime(f.config, { ...f.deps, botToken: async () => 'synthetic-only',
     providerPost: async () => ({ status: 201, data: Buffer.from(JSON.stringify({ id: `receipt-${++posts}` })) }) });
-  t.after(() => runtime.stop().catch(() => {})); await eventually(() => received.includes('tools') && received.includes('legacy'));
-  for (const [prefix, id, receipt] of [['', 'legacy', 'receipt-1'], ['/targets/tools', 'tools', 'receipt-2']]) {
+  t.after(() => runtime.stop().catch(() => {})); await eventually(() => received.includes('tools') && received.includes('primary'));
+  for (const [prefix, id, receipt] of [['/targets/primary', 'primary', 'receipt-1'], ['/targets/tools', 'tools', 'receipt-2']]) {
     const call = () => fetch(`http://127.0.0.1:${runtime.outboundPort}${prefix}/v1/deliveries`, { method: 'POST', headers: {
       authorization: `Bearer callback-${id}`, 'content-type': 'application/json' }, body: JSON.stringify(finalDelivery) });
     assert.deepEqual(await (await call()).json(), { status: 'delivered', providerMessageId: receipt });

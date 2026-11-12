@@ -92,11 +92,9 @@ function validate(input: unknown): DirectoryRecord {
   if (v.schema !== 1 || !['personal', 'groupChat'].includes(v.chatKind as string)) bad();
   const common = ['schema', 'kind', 'scope', 'conversationId', 'chatKind', 'state'];
   if (v.kind === 'conn') {
-    object(v, [...common, 'targetId', 'identityDigest', 'bindingName', 'lineage', ...(v.state === 'provisioned' ? ['binding'] : [])]);
+    object(v, [...common, 'targetId', 'identityDigest', 'bindingName', ...(v.state === 'provisioned' ? ['binding'] : [])]);
     target(v.targetId); hex(v.identityDigest); const name = text(v.bindingName, 253);
-    const lineage = object(v.lineage, ['kind', ...(object(v.lineage).kind === 'imported' ? ['importId'] : [])]);
-    if (lineage.kind === 'imported') { text(lineage.importId); if (v.state !== 'provisioned') bad(); }
-    else if (lineage.kind !== 'provisioner' || name !== bindingName(s, conversationId, v.identityDigest as string)) bad();
+    if (name !== bindingName(s, conversationId, v.identityDigest as string)) bad();
     if (v.state === 'provisioned') {
       const b = object(v.binding, ['namespace', 'name', 'uid', 'generation', 'spec']); text(b.namespace, 253); text(b.uid); integer(b.generation, 1, Number.MAX_SAFE_INTEGER);
       if (text(b.name, 253) !== name) bad(); object(b.spec); canonicalJSON(b.spec);

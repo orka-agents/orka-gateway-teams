@@ -1,14 +1,11 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
-import { bindingName, directoryKey, encodeEntity, parseCanonicalJSON } from '../src/directory/codec.js';
-import { validateDirectoryImport } from '../src/directory/import.js';
+import { bindingName, directoryKey, encodeEntity } from '../src/directory/codec.js';
 import { openDirectory } from '../src/directory/store.js';
 import { createDirectoryTable } from '../src/directory/table.js';
 import type { ControlRecord } from '../src/directory/types.js';
-import { snapshotRegistry } from '../src/registry/config.js';
 import { binding, context, deferred, directoryFixture, eventually, key, sample } from './support/directory-table.js';
-import { registryInput } from './support/registry.js';
 
 test('native timeout retains the original deadline when caller context is reused', async t => {
   const f = await directoryFixture(t); f.controls.hook = () => {};
@@ -54,17 +51,4 @@ test('startup recovers multiple pages of large valid discovery receipts without 
   assert.equal(f.rows.size, 60);
   for (const row of f.rows.values()) assert.equal(JSON.parse(Buffer.from(String(row.Payload), 'base64').toString()).state, 'unknown');
   assert.ok(f.requests.filter(r => r.url.pathname === '/Directory()').length > 1); await directory.close();
-});
-
-test('whole-export parser accepts valid sender arrays within the file size without weakening record parsing', () => {
-  const registry = snapshotRegistry(registryInput()); const target = registry.targets[0]!;
-  const connections = Array.from({ length: 180 }, (_, i) => ({ appId: target.config.scope.appId, tenantId: target.config.scope.tenantId,
-    conversationId: `chat-${i}`, chatKind: 'personal', targetId: target.id, identityDigest: target.identityDigest, importId: 'export',
-    binding: { namespace: target.config.scope.gatewayNamespace, name: `binding-${i}`, uid: `uid-${i}`, generation: 1,
-      spec: { gatewayRef: { name: target.config.scope.gatewayName }, agentRef: { name: target.frontAgent.name },
-        match: { accountId: target.config.scope.tenantId, contextId: `chat-${i}` },
-        senderPolicy: { mode: 'allowlist', allowedSenderIds: Array.from({ length: 100 }, (_, n) => String(n)) } } } }));
-  const bytes = Buffer.from(JSON.stringify({ schemaVersion: 1, connections })); assert.ok(bytes.length < 256 * 1024);
-  assert.throws(() => parseCanonicalJSON(bytes), { code: 'corrupt' });
-  assert.equal(validateDirectoryImport(parseCanonicalJSON(bytes, 131072), registry).length, 180);
 });

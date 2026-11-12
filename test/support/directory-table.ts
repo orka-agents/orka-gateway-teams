@@ -11,7 +11,7 @@ export const key = { kind: 'conn' as const, conversationId: 'chat' };
 export function sample(): ConnectionRecord {
   const name = createHash('sha256').update(JSON.stringify(['teams-binding-v1', 'app', 'tenant', 'chat', 'a'.repeat(64)])).digest('hex').slice(0, 56);
   return { schema: 1, kind: 'conn', scope: { appId: 'app', tenantId: 'tenant' }, conversationId: 'chat', chatKind: 'personal',
-    targetId: 'tools', identityDigest: 'a'.repeat(64), bindingName: 'teams-'+name, lineage: { kind: 'provisioner' }, state: 'reserved' };
+    targetId: 'tools', identityDigest: 'a'.repeat(64), bindingName: 'teams-'+name, state: 'reserved' };
 }
 export function context(ms = 30000) { return { signal: new AbortController().signal, deadline: performance.now() + ms }; }
 export function deferred<T = void>() { let resolve!: (value: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { resolve, promise }; }

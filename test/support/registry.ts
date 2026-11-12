@@ -6,8 +6,8 @@ import type { FixtureHooks } from './ingress-https.js';
 import { storageClientId, tableRuntimeConfig } from './table-runtime.js';
 
 export function registryInput(count = 2) {
-  return { schemaVersion: 1 as const, legacyTargetId: 'legacy', targets: Array.from({ length: count }, (_, i) => i === 0 ? 'legacy' : i === 1 ? 'tools' : `target-${i}`).map(id => {
-    const config = tableRuntimeConfig({ ...scope, ...(id === 'legacy' ? {} : { orkaBaseUrl: 'https://tools.example.invalid/' }) });
+  return { schemaVersion: 1 as const, targets: Array.from({ length: count }, (_, i) => i === 0 ? 'primary' : i === 1 ? 'tools' : `target-${i}`).map(id => {
+    const config = tableRuntimeConfig({ ...scope, ...(id === 'primary' ? {} : { orkaBaseUrl: 'https://tools.example.invalid/' }) });
     config.receiver = { ...receiverConfig }; config.storage.backend = 'table-v3';
     config.storage.ingressStoreId = `${id}-inbox`; config.storage.deliveryStoreId = `${id}-delivery`;
     config.bearerToken = `ingress-${id}`; config.outbound!.bearerToken = `callback-${id}`;
@@ -18,7 +18,7 @@ export function registryInput(count = 2) {
 export function registryFixture(t: FixtureHooks) {
   const directory = mkdtempSync(join(tmpdir(), 'registry-')); t.after(() => rmSync(directory, { recursive: true, force: true }));
   const input = registryInput();
-  const manifest = { schemaVersion: 1, legacyTargetId: 'legacy', targets: input.targets.map(target => {
+  const manifest = { schemaVersion: 1, targets: input.targets.map(target => {
     const ingressTokenFile = join(directory, `${target.id}-ingress`); const callbackTokenFile = join(directory, `${target.id}-callback`);
     writeFileSync(ingressTokenFile, target.config.bearerToken, { mode: 0o600 });
     writeFileSync(callbackTokenFile, target.config.outbound!.bearerToken, { mode: 0o600 });

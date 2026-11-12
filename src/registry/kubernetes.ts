@@ -12,7 +12,7 @@ type RequestContext = AbortSignal | KubernetesContext;
 export type BindingCreateResult = { kind: 'ack' | 'conflict' | 'uncertain' };
 
 export function createKubernetesReader(input: RegistryTarget, dependencies: { request?: typeof https.request; now?: () => number } = {}) {
-  const target = snapshotRegistry({ schemaVersion: 1, legacyTargetId: input.id, targets: [input] }).targets[0]!;
+  const target = snapshotRegistry({ schemaVersion: 1, targets: [input] }).targets[0]!;
   if (!tlsVerificationEnabled()) throw new ConfigurationError();
   const request = dependencies.request ?? https.request; const now = dependencies.now ?? Date.now;
   const ca = target.kubernetesCaFile === undefined ? undefined : readCaBundle(target.kubernetesCaFile);
