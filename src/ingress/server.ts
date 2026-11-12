@@ -14,7 +14,9 @@ import { createDeliveryDispatcher } from '../outbound/dispatcher.js';
 import { createProviderSender } from '../outbound/sender.js';
 import type { ProviderGet, ProviderPost } from '../outbound/sender.js';
 import type { DeliveryDispatcher, ProviderSender } from '../outbound/types.js';
-import { convertActivity } from '../teams/convert.js';
+import { readPolicySubject } from '../policy/admission.js';
+import type { PolicySubject } from '../policy/admission.js';
+import { convertActivity, stripBotMentions } from '../teams/convert.js';
 import { createStrictAuth } from './auth.js';
 import { NativeAdapter } from './http-adapter.js';
 import { safeSdkLogger } from './logger.js';
@@ -25,8 +27,11 @@ import type { EventEnvelope } from '../protocol/types.js';
 
 export interface ReceiverDependencies { sdkCloud?: CloudEnvironment; fetchKeys?: (url: string, options: RequestInit) => Promise<Response>;
   botToken?: Token; providerPost?: ProviderPost; providerGet?: ProviderGet; certificateNetwork?: INetworkModule; managedIdentity?: ManagedIdentityDependencies }
+export interface AdmissionContext { readonly signal: AbortSignal; readonly deadline: number; readonly subject: PolicySubject;
+  readonly activityId: string; readonly commandText?: string }
 export interface AdmissionSink { readonly scope: IngressStore['scope'];
-  admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>): AdmissionResult | Promise<AdmissionResult> }
+  bindControlSender?(sender: Pick<ProviderSender, 'send'>): void;
+  admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>, context?: AdmissionContext): AdmissionResult | Promise<AdmissionResult> }
 export interface ReceiverOutbound { authority?: import('../storage/table/types.js').LeaseAuthority; interimDelivery?: boolean; meetingDrafts?: boolean; journal: DeliveryJournalPort; correlation?: SessionCorrelationPort; getRoute: (key: string) => ReplyRoute | undefined | Promise<ReplyRoute | undefined> }
 export type ReceiverOutbounds = ReceiverOutbound | { targets: readonly (ReceiverOutbound & { id: string })[] };
 export interface Receiver { port: number; stop(): Promise<void>; failed: Promise<never>; outbound?: DeliveryDispatcher; outbounds?: ReadonlyMap<string, DeliveryDispatcher> }
@@ -109,7 +114,13 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
       const route: ReplyRoute = kind === 'personal' ? { ...base, conversation: { id, conversationType: 'personal', tenantId } } :
         kind === 'groupChat' ? { ...base, conversation: { id, conversationType: 'groupChat', tenantId }, requester: { ...converted.event.sender } } :
           { ...base, conversation: { id, conversationType: 'channel', tenantId }, requester: { ...converted.event.sender }, threadId: converted.event.threadId! };
-      const result = await sink.admit(converted.event, route);
+      // Personal events retain their historical text; mentions affect command recognition only.
+      const normalized = kind === 'personal' ? stripBotMentions(converted.event.text, input.entities, input.recipient.id) : converted.event.text;
+      const commandText = typeof normalized === 'string' ? normalized :
+        kind === 'personal' && normalized.kind === 'ignored' ? converted.event.text : undefined;
+      const result = await sink.admit(converted.event, route, Object.freeze({ ...adapter.requestContext,
+        subject: readPolicySubject(input, tenantId), activityId: input.id as string,
+        ...(commandText === undefined ? {} : { commandText }) }));
       if (result.kind === 'full') return { status: 503 };
       if (result.kind === 'conflict') return { status: 409 };
       return { status: 200, body: { status: result.kind } };
@@ -153,6 +164,7 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
           scope: { appId: config.appId, tenantId: config.tenantId }, serviceUrls: config.serviceUrls, recipientIds: config.recipientIds, sender: 'targets' in outbound ? borrowed : shared }));
       }
       if (!('targets' in outbound)) dispatcher = dispatchers.get('');
+      sink.bindControlSender?.(Object.freeze({ send: shared.send }));
     }
     await app.initialize();
     credential?.assertUsable();

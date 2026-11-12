@@ -5,14 +5,20 @@ Table V3 inboxes, delivery journals, callback bearers and relay loops for regist
 Orkas. Multi-target mode means `serve-registry`, even with only one registered
 Orka. Existing `serve` modes (SQLite, Table V2 and Table V3) are unchanged.
 
-There is no default or legacy target. Until self-service admission is wired,
-new converted Teams messages (personal, group chat and channel) receive the
-existing generic HTTP 409 refusal, without creating an Orka Task or sending a
-Teams reply. Targets can drain previously accepted work and serve their own
-callbacks; registration alone never authorizes new requests. Group policy,
-discovery, chat connections, provisioning and generic no-access control sends
-still require live integration. Channels are unsupported in multi-target mode.
-No Kubernetes request or token-file read happens on registry startup or relay.
+There is no default or legacy target. Personal/group senders first see eligible
+Orkas and choose with `use <targetId>`. Even one eligible Orka requires a choice.
+The first eligible member's group-chat choice is permanent and shared; each later
+sender still needs access. Discovery and commands create no Task. After connection,
+send the request again. Unknown/ineligible choices and denied senders receive only
+`You don't have access to an Orka for this chat.` through a durable control send.
+Channels receive generic HTTP 409 without a Task or Teams reply.
+
+Every admitted request and every queued event's relay gets fresh Gateway, Agent,
+Binding identity/readiness and overlap checks. No membership lookup is repeated
+for already accepted events. A reserved connection needs a fresh same-target
+`use` command to resume provisioning; ordinary input returns HTTP 503. Switching
+is unsupported. No Kubernetes operation happens at startup unless queued work
+triggers relay after readiness.
 
 ## Manifest and environment
 
@@ -66,7 +72,9 @@ and `TABLE_MAX_INDEX_BYTES`. All slots share one storage account, table and iden
 `TABLE_DIRECTORY_TABLE` is additionally required by `serve-registry`: an ASCII
 letter followed by 2–62 ASCII letters/digits, distinct from `TABLE_NAME`
 case-insensitively. The directory uses the same account and identity, but its
-own table, not a third V3 domain. The manifest format is unchanged.
+own table, not a third V3 domain. Also set `ORKA_GROUP_POLICY_FILE` to an absolute
+path to the startup-only [group-policy JSON](group-policy.md). Invalid/missing
+policy fails before store ownership. The manifest format is unchanged.
 Do not also set `ORKA_BASE_URL`, `ORKA_GATEWAY_NAMESPACE`, `ORKA_GATEWAY_NAME`,
 `ORKA_BEARER_TOKEN`, `ORKA_OUTBOUND_BEARER_TOKEN`, `ORKA_CA_FILE`,
 `TABLE_INGRESS_STORE_ID` or `TABLE_DELIVERY_STORE_ID`: those come from each target.
@@ -109,14 +117,32 @@ storage poison stops every slot. An unreachable Orka only delays its own relay;
 no work moves between targets. Listener, SDK, token, provider and relay work drains
 before the directory closes; its actual work drains before any V3 store releases
 ownership. The shared storage token provider closes last. Directory startup and
-drain do not enable new admission, control sends or relay preflight: an empty new
-directory does not change retained-work routing.
+drain cover live admission, control sends and relay preflight. Preflight requires
+an exact provisioned directory row and target digest. Work without that evidence
+uses no-effect retry/backoff and eventually the existing replay expiry; there is
+no import, automatic adoption or bypass. Such work never moves to another target.
 
 The routing digest hashes the versioned app/tenant/target/Orka/Kubernetes/Gateway
 and front-Agent tuple. Changing those fields requires explicit history
 reconciliation, not reassignment. Labels and credential/CA paths or values do not
-change it. Kubernetes configuration is structural metadata until a caller uses
-the read library; registration does not verify a live Gateway UID or Agent.
+change it. Registration does not verify a live Gateway UID or Agent at startup; admission
+and per-event relay checks do so before use.
+
+Four complete admission/preflight operations share directory capacity without a
+queue, retaining their places through control settlement. Excess admission returns
+HTTP 503; excess preflight uses no-effect retry/backoff. Relay preflight has a
+two-second deadline because its owned grant temporarily holds that inbox's FIFO.
+A failed preflight retires the grant before retry settlement, never an Orka handoff.
+Other targets keep independent loops. Target checks coalesce on paused recovery
+and start at most once per second after a target-paused or credential-expiring
+failure. Joiners retain their own cancellation/deadline and check their exact
+connections after successful shared recovery. A failed shared recovery gives
+joiners a transient refusal/backoff too. Binding conflicts do not set a target
+pause; these checks remain bounded by caller/native limits and relay backoff,
+including Gateway/Agent mismatches reported under that category. A disconnected
+caller does not set a target pause. Fresh successful target checks clear the pause. Fixed categories are
+`target-paused`, `graph-unavailable`, `credential-expiring` and `binding-conflict`,
+coalesced by configured target rather than logging requests or private identities.
 
 ## Callback paths
 
@@ -133,7 +159,8 @@ slot. The existing 32-active-delivery budget is listener-wide, not per target.
 ## Standalone Kubernetes transport
 
 `createKubernetesReader` in `src/registry/kubernetes.ts` remains a standalone
-library, not a background loop or a startup/relay dependency. Existing
+library, also used by live admission and per-event relay preflight. It has no
+background token-renewal loop. Existing
 `getGateway(signal?)`, `getAgent(signal?)` and `listBindings(signal?)` callers
 remain supported. Methods also accept `{signal, deadline, allowed}` to borrow a
 caller's absolute monotonic deadline and combined authority. At most four native

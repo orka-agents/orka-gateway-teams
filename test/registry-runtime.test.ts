@@ -1,4 +1,10 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { identityFixture } from './support/aca-identity.js';
+import type { RegistryRuntimeDependencies } from '../src/registry/runtime.js';
+import { decodeEntity, bindingName } from '../src/directory/codec.js';
 import https from 'node:https';
 import { syncBuiltinESMExports } from 'node:module';
 import test from 'node:test';
@@ -6,6 +12,7 @@ import { prepareStorageIdentity } from '../src/auth/storage-identity.js';
 import { NativeAdapter } from '../src/ingress/http-adapter.js';
 import { initializeTableStore } from '../src/ingress/main.js';
 import { createTableIngressStoreV3 } from '../src/ingress/table-store.js';
+import { snapshotRegistry } from '../src/registry/config.js';
 import { startRegistryRuntime } from '../src/registry/runtime.js';
 import { expectedEvent } from './fixtures/incoming.js';
 import { finalDelivery } from './fixtures/outgoing.js';
@@ -19,9 +26,13 @@ import { encodeEntity } from '../src/directory/codec.js';
 import { randomUUID } from 'node:crypto';
 import type { ControlRecord } from '../src/directory/types.js';
 import { TestClock } from './support/table-v3.js';
+import { payload } from './support/table-ingress-store.js';
 
 async function fixture(t: test.TestContext, initialize = true, count = 2, expirySeconds = 3600) {
-  const config = registryInput(count); const identity = await runtimeIdentity(t, expirySeconds);
+  const config = { ...registryInput(count), groupPolicyFile: '' }; const identity = await runtimeIdentity(t, expirySeconds);
+  const files = mkdtempSync(join(tmpdir(), 'registry-live-')); t.after(() => rmSync(files, { recursive: true, force: true }));
+  config.groupPolicyFile = join(files, 'policy.json');
+  writeFileSync(config.groupPolicyFile, JSON.stringify({ schemaVersion: 1, graphIdentityClientId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', policies: [] }));
   const domains: { target: string; kind: 'ingress' | 'delivery'; storeId: string; service: Awaited<ReturnType<typeof tableService>> }[] = [];
   for (const target of config.targets) for (const kind of ['ingress', 'delivery'] as const) {
     const storeId = kind === 'ingress' ? target.config.storage.ingressStoreId : target.config.storage.deliveryStoreId!;
@@ -29,6 +40,29 @@ async function fixture(t: test.TestContext, initialize = true, count = 2, expiry
   }
   const directory = await directoryFixture(t, syntheticToken);
   const native = https.request; let contract = true;
+  const bindings = new Map<string, Map<string, Record<string, any>>>(); let kubernetesGate: Promise<void> | undefined; let kubernetesCalls = 0;
+  for (const target of config.targets) {
+    target.kubernetesBaseUrl = `https://${target.id}-kubernetes.example.invalid/`;
+    target.kubernetesTokenFile = join(files, `${target.id}-kubernetes.json`);
+    writeFileSync(target.kubernetesTokenFile, JSON.stringify({ token: 'synthetic-kubernetes', expiresAt: new Date(Date.now() + 3600000).toISOString() }), { mode: 0o600 });
+    bindings.set(target.id, new Map());
+  }
+  const kube = await httpsFixture(t, async (req, res) => {
+    kubernetesCalls++; await kubernetesGate;
+    const target = String(req.headers['fixture-target']); const saved = bindings.get(target)!; const path = new URL(req.url!, 'https://localhost').pathname;
+    let value: unknown;
+    if (path.endsWith('/gateways/teams')) value = { apiVersion: 'gateway.orka.ai/v1alpha1', kind: 'Gateway', metadata: { namespace: 'default', name: 'teams', uid: 'gateway-uid', generation: 1 }, status: { ready: true, observedGeneration: 1 } };
+    else if (path.endsWith('/agents/front')) value = { apiVersion: 'core.orka.ai/v1alpha1', kind: 'Agent', metadata: { namespace: 'default', name: 'front' } };
+    else if (path.endsWith('/gatewaybindings') && req.method === 'POST') {
+      let text = ''; for await (const chunk of req) text += chunk;
+      const created = JSON.parse(text); value = { ...created, metadata: { ...created.metadata, uid: randomUUID(), generation: 1 }, status: { ready: true, observedGeneration: 1 } };
+      saved.set(created.metadata.name, value as Record<string, any>);
+    } else if (path.endsWith('/gatewaybindings')) value = { kind: 'GatewayBindingList', metadata: {}, items: [...saved.values()] };
+    else value = saved.get(path.split('/').at(-1)!);
+    res.writeHead(value ? 200 : 404, { 'content-type': 'application/json' }); res.end(JSON.stringify(value ?? {}));
+  });
+  const kubernetesRequest = ((url: URL, options: https.RequestOptions, callback: any) => native(new URL(url.pathname + url.search, kube.baseUrl),
+    { ...options, ca: kube.ca, servername: 'localhost', headers: { ...options.headers, 'fixture-target': url.hostname.split('-kubernetes.')[0]! } }, callback)) as typeof https.request;
   const router = await httpsFixture(t, async (req, res) => {
     const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); const body = Buffer.concat(chunks);
     const data = decodeURIComponent(req.url ?? '') + body.toString();
@@ -44,15 +78,89 @@ async function fixture(t: test.TestContext, initialize = true, count = 2, expiry
     if (url.pathname.startsWith('/Directory')) return directory.request(url, options, callback!);
     return native(new URL(url.pathname + url.search, router.baseUrl), { ...options, ca: router.ca, servername: 'localhost' }, callback);
   }) as typeof https.request;
-  const auth = await authFixture(t); const deps = { ...auth.dependencies, tableRequest: request, storageIdentity: { request: identity.request } };
+  const auth = await authFixture(t); const deps = { ...auth.dependencies, tableRequest: request, kubernetesRequest, storageIdentity: { request: identity.request },
+    botToken: async () => 'synthetic-only', providerPost: async () => ({ status: 201, data: Buffer.from('{"id":"control-receipt"}') }) } satisfies RegistryRuntimeDependencies;
   if (initialize) for (const target of config.targets) for (const kind of ['ingress', 'delivery'] as const) {
     const c = target.config;
     await initializeTableStore({ kind, scope: c.scope, storage: { backend: 'table-v3', account: c.storage.account, table: c.storage.table, identity: c.storage.identity, storeId: kind === 'ingress' ? c.storage.ingressStoreId : c.storage.deliveryStoreId! },
       ...(kind === 'ingress' ? { audit: c.storage.audit, maxIndexBytes: c.storage.maxIndexBytes } : {}) } as never, { tableRequest: request, storageIdentity: deps.storageIdentity });
   }
   t.after(() => { assert.equal(contract, true); assert.equal(domains.some(d => d.service.stats.violation), false); });
-  return { config, deps, domains, auth, identity, directory };
+  return { config, deps, domains, auth, identity, directory, bindings, kubernetesCalls: () => kubernetesCalls,
+    holdKubernetes: (gate: Promise<void> | undefined) => { kubernetesGate = gate; } };
 }
+
+async function policyFixture(t: test.TestContext, f: Awaited<ReturnType<typeof fixture>>) {
+  const group = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'; const clientId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  writeFileSync(f.config.groupPolicyFile, JSON.stringify({ schemaVersion: 1, graphIdentityClientId: clientId,
+    policies: f.config.targets.map(target => ({ schemaVersion: 1, targetId: target.id, frontAgent: 'front', rules: [{ groupId: group, chatKinds: ['personal', 'groupChat'] }] })) }));
+  const identity = await identityFixture(t, (req, res) => {
+    const resource = new URL(req.url!, 'http://localhost').searchParams.get('resource'); assert.equal(resource, 'https://graph.microsoft.com/');
+    res.end(JSON.stringify({ access_token: 'synthetic-graph', resource, token_type: 'Bearer', client_id: clientId, expires_on: Math.floor(Date.now() / 1000) + 3600 }));
+  });
+  let status = 200; let calls = 0; let gate: Promise<void> | undefined;
+  const server = await httpsFixture(t, async (req, res) => {
+    calls++; let text = ''; for await (const chunk of req) text += chunk;
+    assert.deepEqual(JSON.parse(text), { groupIds: [group] }); await gate;
+    res.writeHead(status); res.end(JSON.stringify({ value: req.url!.includes('/dddddddd-') ? [] : [group] }));
+  });
+  const native = https.request;
+  const graphRequest = ((url: URL, options: https.RequestOptions, callback: any) => {
+    assert.equal(url.origin, 'https://graph.microsoft.com');
+    return native(new URL(url.pathname, server.baseUrl), { ...options, ca: server.ca, servername: 'localhost' }, callback);
+  }) as typeof https.request;
+  return { deps: { ...f.deps, graphIdentityRequest: identity.request, graphRequest }, calls: () => calls,
+    status: (value: number) => { status = value; }, hold: (value: Promise<void> | undefined) => { gate = value; } };
+}
+
+test('native live discovery, connection, current sender admission and recurring relay checks', async t => {
+  const f = await fixture(t); const graph = await policyFixture(t, f); let orka = 0;
+  const upstream = await httpsFixture(t, async (req, res) => {
+    let text = ''; for await (const chunk of req) text += chunk;
+    const event = JSON.parse(text); orka++; res.writeHead(202); res.end(JSON.stringify({ status: 'accepted', eventId: event.externalEventId, state: 'Queued' }));
+  });
+  const native = https.request;
+  t.mock.method(https, 'request', (url: URL, options: https.RequestOptions, callback: any) =>
+    url.hostname === 'tools.example.invalid' ? native(new URL(url.pathname, upstream.baseUrl), { ...options, ca: upstream.ca, servername: 'localhost' }, callback) : native(url, options, callback));
+  syncBuiltinESMExports(); t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const messages: string[] = []; const runtime = await startRegistryRuntime(f.config, { ...graph.deps, providerPost: async (_url, body) => {
+    messages.push(body.toString()); return { status: 201, data: Buffer.from('{"id":"receipt"}') };
+  } }); t.after(() => runtime.stop().catch(() => {}));
+  const input = activity(); input.from.aadObjectId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  assert.equal((await post(runtime.port, f.auth.token(), input)).status, 200); assert.equal(orka, 0); assert.match(messages[0]!, /use tools/);
+  input.id = 'connect'; input.text = 'use tools'; assert.equal((await post(runtime.port, f.auth.token(), input)).status, 200); assert.equal(orka, 0);
+  const before = f.kubernetesCalls(); input.id = 'request'; input.text = 'do work'; assert.equal((await post(runtime.port, f.auth.token(), input)).status, 200);
+  await eventually(() => orka === 1); assert.ok(f.kubernetesCalls() >= before + 12, 'admission and relay each perform fresh checks');
+  input.id = 'denied-sender'; input.from.aadObjectId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  assert.equal((await post(runtime.port, f.auth.token(), input)).status, 200); assert.match(messages.at(-1)!, /You don't have access/); assert.equal(orka, 1);
+  assert.equal(graph.calls(), 2);
+  const scope = { appId: f.config.targets[0]!.config.scope.appId, tenantId: f.config.targets[0]!.config.scope.tenantId };
+  const rows = [...f.directory.rows.values()].map(row => decodeEntity(scope, row).value);
+  assert.equal(rows.filter(row => row.kind === 'conn' && row.state === 'provisioned').length, 1);
+  assert.ok(rows.filter(row => row.kind === 'control').every(row => row.state === 'delivered'));
+});
+
+test('post-open directory corruption flushes fixed 503 and stops all targets', async t => {
+  const f = await fixture(t); const runtime = await startRegistryRuntime(f.config, f.deps); t.after(() => runtime.stop().catch(() => {}));
+  f.directory.controls.hook = ({ res }) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"invalid":"private-sentinel"}'); };
+  const done = assert.rejects(runtime.done, { message: 'Ingress storage failed' });
+  const response = await post(runtime.port, f.auth.token()); assert.equal(response.status, 503); assert.doesNotMatch(await response.text(), /private-sentinel/); await done;
+});
+
+test('Graph transient failure does not poison stores; shutdown drains held native lookup before lease release', async t => {
+  const f = await fixture(t); const graph = await policyFixture(t, f); graph.status(503);
+  const runtime = await startRegistryRuntime(f.config, graph.deps); const gate = deferred(); t.after(async () => { gate.resolve(); await runtime.stop().catch(() => {}); });
+  const input = activity(); input.from.aadObjectId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  assert.equal((await post(runtime.port, f.auth.token(), input)).status, 503);
+  assert.equal((await fetch(`http://127.0.0.1:${runtime.outboundPort}/targets/tools/v1/health`, { headers: { authorization: 'Bearer callback-tools' } })).status, 200);
+  graph.status(200); graph.hold(gate.promise); input.id = 'held-graph';
+  const response = post(runtime.port, f.auth.token(), input).catch(() => undefined); await eventually(() => graph.calls() === 2);
+  const owners = f.domains.map(d => d.service.rows.get('M')!.Owner); let stopped = false;
+  const stopping = runtime.stop().then(() => { stopped = true; }); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(stopped, false); assert.deepEqual(f.domains.map(d => d.service.rows.get('M')!.Owner), owners);
+  gate.resolve(); await response; await stopping; await runtime.done;
+  assert.equal(f.domains.some(d => [...d.service.rows.values()].some(row => row.T === 'event')), false);
+});
 
 test('registry runtime requires directory configuration before opening stores', async () => {
   const input = registryInput();
@@ -123,12 +231,12 @@ test('callback all-target revalidation overlaps independent domains instead of s
     providerPost: async () => ({ status: 201, data: Buffer.from('{"id":"receipt"}') }) });
   t.after(async () => { gate.resolve(); await runtime.stop().catch(() => {}); });
   const response = fetch(`http://127.0.0.1:${runtime.outboundPort}/targets/tools/v1/deliveries`, { method: 'POST', headers: {
-    authorization: 'Bearer callback-tools', 'content-type': 'application/json' }, body: JSON.stringify(finalDelivery) });
+    authorization: 'Bearer callback-tools', 'content-type': 'application/json' }, body: JSON.stringify({ ...finalDelivery, contextId: `${finalDelivery.contextId}-tools` }) });
   await eventually(() => entered > 0); const concurrent = entered; gate.resolve(); await response; await runtime.stop();
   assert.equal(concurrent, 4, 'one held remote lease read must not defer reads of the other independent domains');
 });
 
-test('all V3 audits and inherited directory recovery precede listeners; registry still refuses new intake', async t => {
+test('all V3 audits and inherited directory recovery precede listeners; registry denies personal/group access and refuses channels', async t => {
   const f = await fixture(t); let listens = 0;
   const scope = { appId: f.config.targets[0]!.config.scope.appId, tenantId: f.config.targets[0]!.config.scope.tenantId };
   const value: ControlRecord = { schema: 1, kind: 'control', scope, conversationId: 'old-chat', chatKind: 'personal', activityId: 'old-activity',
@@ -151,13 +259,13 @@ test('all V3 audits and inherited directory recovery precede listeners; registry
   const runtime = await startRegistryRuntime(f.config, f.deps); t.after(() => runtime.stop());
   assert.equal(listens, 1);
   for (const kind of ['personal', 'groupChat', 'channel']) {
-    const input = activity(); input.conversation.conversationType = kind;
+    const input = activity(); input.id += `-${kind}`; input.conversation.id += `-${kind}`; input.conversation.conversationType = kind;
     if (kind !== 'personal') {
       input.conversation.isGroup = true; input.from.aadObjectId = 'aad-requester';
       input.text = '<at>Orka</at> help';
       input.entities = [{ type: 'mention', text: '<at>Orka</at>', mentioned: { id: input.recipient.id } }];
     }
-    assert.equal((await post(runtime.port, f.auth.token(), input)).status, 409);
+    assert.equal((await post(runtime.port, f.auth.token(), input)).status, kind === 'channel' ? 409 : 200);
   }
   assert.equal(f.domains.some(d => [...d.service.rows.values()].some(row => row.T === 'event')), false);
   assert.equal(kubernetes, 0);
@@ -240,8 +348,20 @@ async function seed(f: Awaited<ReturnType<typeof fixture>>) {
     const c = target.config; const inbox = createTableIngressStoreV3({ kind: 'ingress', account: c.storage.account, table: c.storage.table,
       storeId: c.storage.ingressStoreId, scope: c.scope }, { token: provider.token, request: f.deps.tableRequest },
     { audit: c.storage.audit, maxIndexBytes: c.storage.maxIndexBytes, policy: c.policy });
-    await inbox.open(); await inbox.admit(expectedEvent, { serviceUrl, channelId: 'msteams', bot: { id: receiverConfig.recipientIds[0]!, role: 'bot' },
-      conversation: { id: expectedEvent.contextId, conversationType: 'personal', tenantId: expectedEvent.accountId } });
+    await inbox.open();
+    const event = { ...expectedEvent, contextId: target.id === 'primary' ? expectedEvent.contextId : `${expectedEvent.contextId}-${target.id}` };
+    const registered = snapshotRegistry(f.config).targets.find(t => t.id === target.id)!; const digest = registered.identityDigest!;
+    const scope = { appId: c.scope.appId, tenantId: c.scope.tenantId }; const name = bindingName(scope, event.contextId, digest);
+    const spec = { gatewayRef: { name: c.scope.gatewayName }, agentRef: { name: 'front' }, match: { accountId: c.scope.tenantId, contextId: event.contextId },
+      priority: 0, senderPolicy: { mode: 'all' }, session: { mode: 'context-sender' } };
+    const value = { schema: 1 as const, kind: 'conn' as const, scope, conversationId: event.contextId, chatKind: 'personal' as const,
+      targetId: target.id, identityDigest: digest, bindingName: name, state: 'provisioned' as const, binding: { namespace: 'default', name, uid: 'uid', generation: 1, spec } };
+    const row = encodeEntity(scope, { kind: 'conn', conversationId: event.contextId }, value);
+    f.directory.rows.set(String(row.RowKey), { ...row, Timestamp: '2026-01-01T00:00:00Z', 'odata.etag': '"seed"' });
+    f.bindings.get(target.id)!.set(name, { apiVersion: 'gateway.orka.ai/v1alpha1', kind: 'GatewayBinding', metadata: { namespace: 'default', name, uid: 'uid', generation: 1,
+      annotations: { 'gateway.orka.ai/teams-target-digest': digest, 'gateway.orka.ai/teams-gateway-uid': 'gateway-uid' } }, spec, status: { ready: true, observedGeneration: 1 } });
+    await inbox.admit(event, { serviceUrl, channelId: 'msteams', bot: { id: receiverConfig.recipientIds[0]!, role: 'bot' },
+      conversation: { id: event.contextId, conversationType: 'personal', tenantId: event.accountId } });
     await inbox.close();
   } } finally { await provider.close(); }
 }
@@ -262,11 +382,28 @@ test('retained second-slot work relays independently during primary outage; coll
   t.after(() => runtime.stop().catch(() => {})); await eventually(() => received.includes('tools') && received.includes('primary'));
   for (const [prefix, id, receipt] of [['/targets/primary', 'primary', 'receipt-1'], ['/targets/tools', 'tools', 'receipt-2']]) {
     const call = () => fetch(`http://127.0.0.1:${runtime.outboundPort}${prefix}/v1/deliveries`, { method: 'POST', headers: {
-      authorization: `Bearer callback-${id}`, 'content-type': 'application/json' }, body: JSON.stringify(finalDelivery) });
+      authorization: `Bearer callback-${id}`, 'content-type': 'application/json' }, body: JSON.stringify({ ...finalDelivery, contextId: id === 'primary' ? finalDelivery.contextId : `${finalDelivery.contextId}-${id}` }) });
     assert.deepEqual(await (await call()).json(), { status: 'delivered', providerMessageId: receipt });
     assert.deepEqual(await (await call()).json(), { status: 'delivered', providerMessageId: receipt });
   }
   assert.equal(posts, 2); await runtime.stop(); await runtime.done;
+});
+
+test('changed retained Binding prevents relay and uses native no-effect backoff without blocking another target', async t => {
+  const f = await fixture(t); await seed(f); const received: string[] = [];
+  for (const binding of f.bindings.get('tools')!.values()) binding.metadata.uid = 'changed-uid';
+  const upstream = await httpsFixture(t, (req, res) => {
+    received.push(req.headers.authorization === 'Bearer ingress-tools' ? 'tools' : 'primary');
+    res.writeHead(503, { 'retry-after': '60' }); res.end();
+  });
+  const native = https.request;
+  t.mock.method(https, 'request', (url: URL, options: https.RequestOptions, callback: any) =>
+    ['orka.example.invalid', 'tools.example.invalid'].includes(url.hostname) ? native(new URL(url.pathname, upstream.baseUrl), { ...options, ca: upstream.ca, servername: 'localhost' }, callback) : native(url, options, callback));
+  syncBuiltinESMExports(); t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const runtime = await startRegistryRuntime(f.config, f.deps); t.after(() => runtime.stop().catch(() => {}));
+  const inbox = f.domains.find(d => d.target === 'tools' && d.kind === 'ingress')!;
+  await eventually(() => [...inbox.service.rows.values()].filter(r => r.T === 'event').map(payload).some(v => v.state === 'pending' && v.attempt > 0 && v.nextAttempt >= v.received + 1000));
+  await eventually(() => received.includes('primary')); assert.equal(received.includes('tools'), false);
 });
 
 test('all-target shutdown retains every lease until held shared bot-token work actually drains', async t => {
@@ -275,7 +412,7 @@ test('all-target shutdown retains every lease until held shared bot-token work a
     providerPost: async () => { posts++; return { status: 201, data: Buffer.from('{"id":"forbidden"}') }; } });
   t.after(async () => { token.resolve(); await runtime.stop().catch(() => {}); });
   const sending = fetch(`http://127.0.0.1:${runtime.outboundPort}/targets/tools/v1/deliveries`, { method: 'POST', headers: {
-    authorization: 'Bearer callback-tools', 'content-type': 'application/json' }, body: JSON.stringify(finalDelivery) }).then(r => r.arrayBuffer(), () => undefined);
+    authorization: 'Bearer callback-tools', 'content-type': 'application/json' }, body: JSON.stringify({ ...finalDelivery, contextId: `${finalDelivery.contextId}-tools` }) }).then(r => r.arrayBuffer(), () => undefined);
   await eventually(() => waiting); const owners = f.domains.map(d => d.service.rows.get('M')!.Owner); let stopped = false;
   const stopping = runtime.stop().then(() => { stopped = true; }); await new Promise(resolve => setImmediate(resolve));
   assert.equal(stopped, false); assert.deepEqual(f.domains.map(d => d.service.rows.get('M')!.Owner), owners);

@@ -162,7 +162,7 @@ const MAX_MENTION_TOKENS = 64;
 const MAX_MENTION_WORK = 2 * 1024 * 1024;
 const MAX_MENTION_OCCURRENCES = 4096;
 
-function stripBotMentions(text: string, entities: unknown, recipientId: string): string | Exclude<ConversionResult, { kind: 'accepted' }> {
+export function stripBotMentions(text: string, entities: unknown, recipientId: string): string | Exclude<ConversionResult, { kind: 'accepted' }> {
   if (entities === undefined) return { kind: 'ignored', reason: 'unmentioned' };
   if (!Array.isArray(entities) || entities.length > MAX_MENTION_ENTITIES) return invalid();
   const botTexts = new Set<string>();

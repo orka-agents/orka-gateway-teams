@@ -1,4 +1,13 @@
 import { setTimeout as sleep } from 'node:timers/promises';
+import type https from 'node:https';
+import type { ImdsRequest } from '../auth/imds.js';
+import { createGraphIdentity } from '../auth/graph-identity.js';
+import { readGroupPolicy } from '../policy/config.js';
+import { createGroupAuthorizer } from '../policy/admission.js';
+import { createGraphMembershipClient } from '../policy/graph.js';
+import { createBindingProvisioner } from '../directory/provision.js';
+import { createKubernetesReader } from './kubernetes.js';
+import { createRegistryAdmission } from './admission.js';
 import { prepareStorageIdentity } from '../auth/storage-identity.js';
 import { createTableDeliveryJournalV3 } from '../delivery/table-journal.js';
 import { openDirectory } from '../directory/store.js';
@@ -19,17 +28,24 @@ import type { LeaseAuthority } from '../storage/table/types.js';
 import type { RegistryConfig } from './config.js';
 import { snapshotRegistry } from './config.js';
 
-export async function startRegistryRuntime(input: RegistryConfig, dependencies: IngressRuntimeDependencies = {}, signal?: AbortSignal): Promise<IngressRuntime> {
+export interface RegistryRuntimeDependencies extends IngressRuntimeDependencies {
+  graphIdentityRequest?: ImdsRequest; graphRequest?: typeof https.request; kubernetesRequest?: typeof https.request;
+}
+export async function startRegistryRuntime(input: RegistryConfig, dependencies: RegistryRuntimeDependencies = {}, signal?: AbortSignal): Promise<IngressRuntime> {
   const config = snapshotRegistry(input); const deps = { ...dependencies };
-  if (!config.directoryTable || !tlsVerificationEnabled() || deps.openIngressStore !== undefined || deps.openDeliveryJournal !== undefined) throw new ConfigurationError();
+  if (!config.directoryTable || !config.groupPolicyFile || !tlsVerificationEnabled() || deps.openIngressStore !== undefined || deps.openDeliveryJournal !== undefined) throw new ConfigurationError();
   if (signal?.aborted) throw new Error('Registry startup cancelled');
-  const shared = config.targets[0]!;
+  const shared = config.targets[0]!; const policy = readGroupPolicy(config.groupPolicyFile, config);
+  const readers = config.targets.map(t => createKubernetesReader(t, deps.kubernetesRequest === undefined ? {} : { request: deps.kubernetesRequest }));
+  const authorizer = createGroupAuthorizer(policy, createGraphMembershipClient(createGraphIdentity(policy.graphIdentityClientId,
+    deps.graphIdentityRequest === undefined ? {} : { request: deps.graphIdentityRequest }), deps.graphRequest === undefined ? {} : { request: deps.graphRequest }));
   const prepared = prepareReceiver(shared.config.receiver, deps);
   const abort = new AbortController(); const loss = new AbortController(); const authorities: LeaseAuthority[] = [];
   const subscriptions: (() => void)[] = []; const handles: { open(): Promise<unknown>; close(): Promise<unknown> }[] = [];
   let ready = false; let fatal = false; let opening = true; let receiver: Receiver | undefined; let api: OutboundServer | undefined;
   let stopRuntime: (() => Promise<void>) | undefined; let closing: Promise<void> | undefined;
   let directory: Directory | undefined; let directoryTable: DirectoryTable | undefined;
+  let admission: ReturnType<typeof createRegistryAdmission> | undefined;
   const authority: LeaseAuthority = {
     allowed: () => !loss.signal.aborted && !abort.signal.aborted && authorities.every(a => a.allowed()),
     revalidate: async () => (await Promise.all(authorities.map(a => a.revalidate()))).every(Boolean) && authority.allowed(), lost: loss.signal,
@@ -40,8 +56,10 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   const provider = prepareStorageIdentity(shared.config.storage.identity).createProvider(deps.storageIdentity, Math.max(32, config.targets.length * 2 + 4));
   const unsubscribe = () => { for (const remove of subscriptions.splice(0)) remove(); };
   const closeStores = async () => {
-    // Keep every V3 lease and the token source until actual directory work drains.
-    const results: PromiseSettledResult<unknown>[] = await Promise.allSettled([Promise.resolve().then(() => directory?.close() ?? directoryTable?.close())]);
+    // Handler/relay work drains first, then all native policy/provisioner work,
+    // then directory requests, while every V3 lease and token source remain owned.
+    const results: PromiseSettledResult<unknown>[] = await Promise.allSettled([authorizer.close(), ...readers.map(r => r.close())]);
+    results.push(...await Promise.allSettled([Promise.resolve().then(() => directory?.close() ?? directoryTable?.close())]));
     unsubscribe(); results.push(...await Promise.allSettled(handles.map(h => Promise.resolve().then(() => h.close()))));
     results.push(...await Promise.allSettled([Promise.resolve().then(() => provider.close())])); return results;
   };
@@ -86,8 +104,10 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
     directory = await openDirectory(directoryTable, { signal: abort.signal,
       deadline: performance.now() + shared.config.storage.audit.maxDurationMs }, authority);
     assertStarting();
-    // No implicit target: self-service admission is wired separately.
-    receiver = await prepared.start({ scope: shared.config.scope, admit: () => ({ kind: active() ? 'conflict' : 'full' }) },
+    admission = createRegistryAdmission({ config, directory, authority, active, authorizer,
+      slots: slots.map((s, i) => ({ ...s, provisioner: createBindingProvisioner(s.target, readers[i]!) })),
+      log: (category, id) => { process.stderr.write(`teams-ingress: ${category}${id ? ` (${id})` : ''}\n`); } });
+    receiver = await prepared.start(admission,
       { targets: slots.map(s => ({ id: s.target.id, journal: s.journal, correlation: s.journal, authority,
         getRoute: key => s.inbox.getRoute(key),
         ...(s.target.config.outbound!.interimDelivery === undefined ? {} : { interimDelivery: s.target.config.outbound!.interimDelivery }),
@@ -108,7 +128,7 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   const relays = slots.map((s, i) => (async () => {
     try {
       while (!abort.signal.aborted) {
-        if (!await relayOne(s.inbox, clients[i]!, abort.signal, active)) {
+        if (!await relayOne(s.inbox, clients[i]!, abort.signal, active, (claim) => admission!.preflight(s.target.id, claim, abort.signal))) {
           try { await sleep(100, undefined, { signal: abort.signal }); }
           catch { if (!abort.signal.aborted) throw new Error('Relay scheduling failed'); }
         }

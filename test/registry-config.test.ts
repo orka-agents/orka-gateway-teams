@@ -88,6 +88,11 @@ test('digest excludes mutable labels/files/credentials but includes each routing
   ]) { const input = structuredClone(original); change(input.targets[0]);
     assert.notEqual(snapshotRegistry(input).targets[0]!.identityDigest, digest); }
 });
+test('registry CLI requires an explicit absolute policy file reference', t => {
+  const f = registryFixture(t);
+  for (const value of [undefined, '', 'relative.json']) assert.throws(() => parseRegistryConfig({ ...f.env, ORKA_GROUP_POLICY_FILE: value }), ConfigurationError);
+});
+
 test('library snapshot rejects mismatched shared bot, listener, policy and storage identities', () => {
   for (const change of [
     (v: any) => { v.receiver.clientSecret = 'other'; }, (v: any) => { v.receiver.port = 4000; },

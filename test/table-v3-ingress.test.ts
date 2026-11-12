@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { randomUUID } from 'node:crypto';
 import type { TestContext } from 'node:test';
 import { createTableIngressStoreV3 as create } from '../src/ingress/table-store.js';
 import { expireTableIngressV3, reclaimTableIngressV3 } from '../src/ingress/table-recovery.js';
+import { relayOne } from '../src/ingress/relay.js';
 import { auditInbox } from '../src/ingress/table-audit.js';
 import { encodeState } from '../src/ingress/table-codec.js';
 import { encodeResult, stateDigest } from '../src/ingress/table-result.js';
@@ -44,6 +46,16 @@ async function opened(t: TestContext) {
   const j = create(ingressBinding, dependencies, options); await j.open(); t.after(() => j.close().catch(() => undefined));
   return { s, j, clock, dependencies };
 }
+
+test('failed relay preflight retires untaken V3 grant, retries with backoff and permits later due events', async t => {
+  const { j, s } = await opened(t); const p = pair(); const other = pair('second', 'second-route', 2);
+  await j.admit(p.event.body!, p.route.route); await j.admit(other.event.body!, other.route.route); let posts = 0;
+  const client = { post: async () => { posts++; return { kind: 'retry' as const }; } };
+  assert.equal(await relayOne(j, client, undefined, () => true, async () => false), true);
+  assert.equal(posts, 0); assert.equal(state(s).handoffClockArm, null);
+  const next = await j.claimForForwarding(); assert.ok(next); assert.equal(next.claim.externalEventId, 'second'); next.retire();
+  assert.equal(await j.retry({ ...next.claim, attemptId: randomUUID() }, 1000), false);
+});
 
 test('V3 ingress initialized/opened lifecycle retains completed receipts across ordinary restart', async t => {
   const { s, j, dependencies } = await opened(t); const p = pair();

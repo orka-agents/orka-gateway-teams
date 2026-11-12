@@ -28,7 +28,7 @@ export function registryFixture(t: FixtureHooks) {
       kubernetesBaseUrl: target.kubernetesBaseUrl, kubernetesTokenFile: target.kubernetesTokenFile };
   }) };
   const path = join(directory, 'registry.json'); const save = () => writeFileSync(path, JSON.stringify(manifest), { mode: 0o600 }); save();
-  const env = { ORKA_REGISTRY_FILE: path, GATEWAY_STORAGE_BACKEND: 'table-v3', OUTBOUND_ENABLED: 'true',
+  const env = { ORKA_GROUP_POLICY_FILE: join(directory, 'group-policy.json'), ORKA_REGISTRY_FILE: path, GATEWAY_STORAGE_BACKEND: 'table-v3', OUTBOUND_ENABLED: 'true',
     TEAMS_APP_ID: scope.appId, TEAMS_TENANT_ID: scope.tenantId, TEAMS_CLIENT_SECRET: receiverConfig.clientSecret,
     TEAMS_RECIPIENT_IDS: JSON.stringify(receiverConfig.recipientIds), TEAMS_SERVICE_URLS: JSON.stringify(receiverConfig.serviceUrls),
     TABLE_ACCOUNT: 'example123', TABLE_NAME: 'journal', TABLE_DIRECTORY_TABLE: 'Directory', TABLE_MANAGED_IDENTITY_HOST: 'azure-container-apps', TABLE_MANAGED_IDENTITY_CLIENT_ID: storageClientId,
