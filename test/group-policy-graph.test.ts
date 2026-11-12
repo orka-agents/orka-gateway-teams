@@ -17,10 +17,14 @@ async function fixture(t: test.TestContext) {
   let response: { status: number; body: string | Buffer } = { status: 200, body: JSON.stringify({ '@odata.context': 'https://graph.microsoft.com/v1.0/$metadata#Collection(Edm.String)', value: [groups[0]] }) };
   let custom: ((n: number) => typeof response) | undefined; let gate: Promise<void> | undefined;
   const bodies: string[][] = []; let paths = true; let closes = 0; let sockets = 0; let tokenCalls = 0; let identityClosed = false;
-  const reached = deferred();
+  const reached = deferred(); const smallBatch = deferred(); let reverseArrival = false;
   const server = await httpsFixture(t, async (req, res) => {
-    reached.resolve(); let text = ''; for await (const chunk of req) text += chunk;
-    bodies.push(JSON.parse(text).groupIds); const n = bodies.length;
+    let text = ''; for await (const chunk of req) text += chunk;
+    const groupIds = JSON.parse(text).groupIds as string[];
+    if (reverseArrival && groupIds.length === 20) await smallBatch.promise;
+    bodies.push(groupIds); const n = bodies.length;
+    if (groupIds.length === 1) smallBatch.resolve();
+    reached.resolve();
     if (gate) await gate;
     const value = custom?.(n) ?? response; res.writeHead(value.status, { 'content-type': 'application/json' }); res.end(value.body);
   });
@@ -36,13 +40,13 @@ async function fixture(t: test.TestContext) {
     async token() { tokenCalls++; return 'synthetic-graph'; }, async close() { identityClosed = true; } };
   const client = createGraphMembershipClient(identity, { request }); t.after(() => client.close());
   return { client, request, identity, bodies, reached, server, paths: () => paths, closes: () => closes, sockets: () => sockets, tokenCalls: () => tokenCalls,
-    response(value: typeof response) { response = value; }, responseFor(value: (n: number) => typeof response) { custom = value; },
+    reverseArrivals() { reverseArrival = true; }, response(value: typeof response) { response = value; }, responseFor(value: (n: number) => typeof response) { custom = value; },
     hold(value: Promise<void>) { gate = value; } };
 }
 test('Graph checks only configured groups in 20-ID batches, merges complete transitive result and drains native sockets', async t => {
-  const f = await fixture(t); f.responseFor(n => ({ status: 200, body: JSON.stringify({ '@odata.context': 'https://graph.microsoft.com/v1.0/$metadata#Collection(Edm.String)', value: [n === 1 ? groups[0]!.toUpperCase() : groups[20]] }) }));
+  const f = await fixture(t); f.reverseArrivals(); f.responseFor(n => ({ status: 200, body: JSON.stringify({ '@odata.context': 'https://graph.microsoft.com/v1.0/$metadata#Collection(Edm.String)', value: [f.bodies[n - 1]![0]!.toUpperCase()] }) }));
   assert.deepEqual(await f.client.lookup(objectId, groups, context()), [groups[0], groups[20]]);
-  assert.deepEqual(f.bodies.map(v => v.length), [20, 1]); assert.equal(f.paths(), true); assert.equal(f.tokenCalls(), 1);
+  assert.deepEqual(f.bodies.map(v => v.length).sort((a, b) => a - b), [1, 20]); assert.equal(f.paths(), true); assert.equal(f.tokenCalls(), 1);
   assert.equal(f.closes(), 2); assert.equal(f.sockets(), 2);
 });
 for (const [name, status, body] of [

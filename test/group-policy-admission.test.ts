@@ -68,6 +68,18 @@ for (const denial of [false, true]) test(`complete ${denial ? 'denial' : 'positi
   offset = 59000; t.mock.timers.setTime(start + 59000); assert.deepEqual(await f.authorizer.authorize(subject(), context()), first); assert.equal(f.calls(), 1);
   offset = 60000; t.mock.timers.setTime(start + 60000); await f.authorizer.authorize(subject(), context()); assert.equal(f.calls(), 2);
 });
+test('reverse completion never extends an older complete grant past its original 60-second window', async t => {
+  const start = Date.now(); t.mock.timers.enable({ apis: ['Date'], now: start });
+  const old = deferred<readonly string[]>(); const recent = deferred<readonly string[]>(); let calls = 0;
+  const membership: GraphMembershipClient = { lookup: async () => ++calls === 1 ? old.promise : calls === 2 ? recent.promise : [], close: async () => {} };
+  const authorizer = createGroupAuthorizer(policy(), membership); t.after(() => authorizer.close());
+  const first = authorizer.authorize(subject(), context());
+  t.mock.timers.setTime(start + 1000); const second = authorizer.authorize(subject(), context());
+  recent.resolve([]); assert.equal((await second).kind, 'no-access');
+  old.resolve([groupA]); assert.equal((await first).kind, 'eligible');
+  t.mock.timers.setTime(start + 59999); assert.equal((await authorizer.authorize(subject(), context())).kind, 'eligible');
+  t.mock.timers.setTime(start + 60000); assert.equal((await authorizer.authorize(subject(), context())).kind, 'no-access'); assert.equal(calls, 3);
+});
 test('failed complete lookup is unavailable, never denial or a cached partial result', async t => {
   const f = fixture(t); f.fail();
   for (let n = 0; n < 2; n++) assert.deepEqual(await f.authorizer.authorize(subject(), context()), { kind: 'unavailable', category: 'graph-unavailable' });
