@@ -96,9 +96,11 @@ export function createKubernetesReader(input: RegistryTarget, dependencies: { re
       return { kind: [200, 201, 202].includes(result.status) ? 'ack' : result.status === 409 ? 'conflict' : 'uncertain' };
     },
     async listBindings(context?: RequestContext): Promise<Record<string, unknown>[]> {
+      // A caller may reuse its context while pages are pending; the operation's budget cannot move.
+      const captured = context && 'signal' in context ? { signal: context.signal, deadline: context.deadline, allowed: context.allowed.bind(context) } : context;
       const result: Record<string, unknown>[] = []; const continuations = new Set<string>(); let continuation = '';
       for (let page = 0; page < 100; page++) {
-        const value = await get(`${bindingPath}?limit=100${continuation ? `&continue=${encodeURIComponent(continuation)}` : ''}`, context);
+        const value = await get(`${bindingPath}?limit=100${continuation ? `&continue=${encodeURIComponent(continuation)}` : ''}`, captured);
         if (!Array.isArray(value.items) || !value.items.every(record) || value.items.length > 10000 - result.length) throw failed();
         result.push(...value.items as Record<string, unknown>[]);
         const next = (value.metadata as Record<string, unknown>).continue;

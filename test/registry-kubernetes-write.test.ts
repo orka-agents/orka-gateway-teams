@@ -60,6 +60,17 @@ test('late authority loss never reports POST success or GET absence to a direct 
   await eventually(() => f.seen.length === 2); allowed = false; getGate.resolve(); await read;
   assert.equal(f.closes(), 2);
 });
+test('paginated Binding reads retain the original deadline when caller context is reused', async t => {
+  const f = await fixture(t); const first = deferred(); const second = deferred(); t.after(() => { first.resolve(); second.resolve(); });
+  f.response(200, '{"kind":"GatewayBindingList","metadata":{"continue":"next"},"items":[]}'); f.hold(first.promise);
+  const ctx = context(1000); const original = ctx.deadline;
+  const outcome = f.reader.listBindings(ctx).then(() => 'success', () => 'failed');
+  await eventually(() => f.seen.length === 1); ctx.deadline = performance.now() + 100000;
+  f.hold(second.promise); first.resolve(); await eventually(() => f.seen.length === 2);
+  f.response(200, '{"kind":"GatewayBindingList","metadata":{},"items":[]}');
+  await new Promise(resolve => setTimeout(resolve, Math.max(1, original - performance.now() + 30))); second.resolve();
+  assert.equal(await outcome, 'failed'); assert.equal(f.closes(), 2);
+});
 test('captured deadline and cancellation drain held requests; four actual calls bound native work', async t => {
   const f = await fixture(t); const gate = deferred(); t.after(() => gate.resolve()); f.hold(gate.promise);
   const ctx = context(150); const pending = assert.rejects(f.reader.getBinding('teams-test', ctx));
