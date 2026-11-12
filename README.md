@@ -65,7 +65,9 @@ make startup succeed, or replace an active storage owner.
 
 For operator-managed Table V3 targets behind one bot, see the
 [Orka registry](docs/registry.md). New Teams intake remains pinned to one legacy
-target; self-service connections and group policy are not implemented.
+target; self-service connections and live group-policy enforcement are not
+implemented. The [group-policy library](docs/group-policy.md) supplies membership
+and admission decisions for later directory integration.
 
 ## Install from a release
 
