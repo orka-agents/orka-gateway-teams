@@ -96,22 +96,29 @@ async function policyFixture(t: test.TestContext, f: Awaited<ReturnType<typeof f
     policies: f.config.targets.map(target => ({ schemaVersion: 1, targetId: target.id, frontAgent: 'front', rules: [{ groupId: group, chatKinds: ['personal', 'groupChat'] }] })) }));
   const identity = await identityFixture(t, (req, res) => {
     const resource = new URL(req.url!, 'http://localhost').searchParams.get('resource'); assert.equal(resource, 'https://graph.microsoft.com/');
+    res.setHeader('content-type', 'application/json');
     res.end(JSON.stringify({ access_token: 'synthetic-graph', resource, token_type: 'Bearer', client_id: clientId, expires_on: Math.floor(Date.now() / 1000) + 3600 }));
   });
   let status = 200; let calls = 0; let gate: Promise<void> | undefined;
   const server = await httpsFixture(t, async (req, res) => {
     calls++; let text = ''; for await (const chunk of req) text += chunk;
     assert.deepEqual(JSON.parse(text), { groupIds: [group] }); await gate;
-    res.writeHead(status); res.end(JSON.stringify({ value: req.url!.includes('/dddddddd-') ? [] : [group] }));
+    res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify({ value: req.url!.includes('/dddddddd-') ? [] : [group] }));
   });
   const native = https.request;
   const graphRequest = ((url: URL, options: https.RequestOptions, callback: any) => {
     assert.equal(url.origin, 'https://graph.microsoft.com');
     return native(new URL(url.pathname, server.baseUrl), { ...options, ca: server.ca, servername: 'localhost' }, callback);
   }) as typeof https.request;
-  return { deps: { ...f.deps, graphIdentityRequest: identity.request, graphRequest }, calls: () => calls,
+  return { deps: { ...f.deps, graphIdentityRequest: identity.request, graphRequest }, identityBaseUrl: identity.baseUrl, calls: () => calls,
     status: (value: number) => { status = value; }, hold: (value: Promise<void> | undefined) => { gate = value; } };
 }
+
+test('synthetic identity response explicitly declares JSON content', async t => {
+  const f = await fixture(t); const graph = await policyFixture(t, f);
+  const response = await fetch(new URL('?resource=https%3A%2F%2Fgraph.microsoft.com%2F', graph.identityBaseUrl));
+  await response.arrayBuffer(); assert.equal(response.headers.get('content-type'), 'application/json');
+});
 
 test('native live discovery, connection, current sender admission and recurring relay checks', async t => {
   const f = await fixture(t); const graph = await policyFixture(t, f); let orka = 0;
