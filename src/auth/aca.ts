@@ -19,18 +19,19 @@ export function prepareAcaIdentity() {
     identityHeader();
   };
   assertUsable();
-  async function acquire(clientId: string, purpose: 'bot' | 'storage', request?: ImdsRequest): Promise<Record<string, unknown>> {
+  async function acquire(clientId: string, purpose: 'bot' | 'storage' | 'graph', request?: ImdsRequest): Promise<Record<string, unknown>> {
     assertUsable();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(clientId)) throw failure();
     const url = new URL(endpoint);
     url.search = new URLSearchParams({ 'api-version': '2019-08-01',
-      resource: purpose === 'bot' ? 'api://AzureADTokenExchange' : 'https://storage.azure.com/', client_id: clientId }).toString();
+      resource: purpose === 'bot' ? 'api://AzureADTokenExchange' : purpose === 'graph' ? 'https://graph.microsoft.com/' : 'https://storage.azure.com/', client_id: clientId }).toString();
     const result = await requestIdentityJSON(url, { 'X-IDENTITY-HEADER': identityHeader() }, request);
     assertUsable(); return result;
   }
   return { assertUsable,
     requestBotAssertion: (clientId: string, request?: ImdsRequest) => acquire(clientId, 'bot', request),
-    requestStorageToken: (clientId: string, request?: ImdsRequest) => acquire(clientId, 'storage', request) };
+    requestStorageToken: (clientId: string, request?: ImdsRequest) => acquire(clientId, 'storage', request),
+    requestGraphToken: (clientId: string, request?: ImdsRequest) => acquire(clientId, 'graph', request) };
 }
 
 function identityHeader(): string {
