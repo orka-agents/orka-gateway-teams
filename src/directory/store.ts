@@ -23,25 +23,34 @@ export async function openDirectory(table: DirectoryTable, startup: DirectoryCon
   };
   const run = <T>(context: DirectoryContext, operation: (ctx: DirectoryContext) => Promise<T>): Promise<T> => {
     try {
-      const ctx = guarded(context); const pending = operation(ctx).then(value => { check(ctx); return value; });
+      const ctx = guarded(context);
+      if (work.size >= 4) throw new DirectoryError('busy');
+      const pending = operation(ctx).then(value => { check(ctx); return value; });
       work.add(pending); void pending.then(() => work.delete(pending), () => work.delete(pending)); return pending;
     } catch (error) { return Promise.reject(error); }
   };
   const read = async (key: DirectoryKey, context: DirectoryContext) => {
     const result = await table.get(key, context); check(context, !ready); return result;
   };
-  const persist = async (previous: DirectoryRow | undefined, desired: DirectoryRecord, context: DirectoryContext) => {
+  const persist = async (previous: DirectoryRow | undefined, desired: DirectoryRecord, context: DirectoryContext,
+    acceptWinner?: (saved: DirectoryRow) => boolean) => {
     const value = snapshotDirectoryRecord(desired); const key = recordKey(value); check(context, !ready);
     const result = previous ? await table.replace(key, previous.etag, value, context) : await table.insert(key, value, context);
     check(context, !ready);
     // Neither an ACK nor a conflict is commit authority; an exact row is the proof.
     const saved = await read(key, context);
-    if (saved && canonicalJSON(saved.value) === canonicalJSON(value)) return saved;
+    if (saved && (canonicalJSON(saved.value) === canonicalJSON(value) || acceptWinner?.(saved))) return saved;
     throw new DirectoryError(result.kind === 'conflict' ? 'conflict' : 'unavailable');
   };
   const recover = async (row: DirectoryRow, context: DirectoryContext): Promise<DirectoryRow> => {
     if (row.value.kind !== 'control' || row.value.state !== 'armed' || row.value.ownerUUID === ownerUUID) return row;
-    return persist(row, { ...row.value, state: 'unknown' }, context);
+    return persist(row, { ...row.value, state: 'unknown' }, context, saved => {
+      if (saved.value.kind !== 'control' || !['delivered', 'rejected', 'unknown'].includes(saved.value.state)) return false;
+      // A late receipt may beat recovery, including when its CAS response was lost.
+      // Preserve only the exact old attempt and all its original saved observations.
+      const base = saved.value.state === 'delivered' ? (({ providerMessageId: _receipt, ...value }) => value)(saved.value) : saved.value;
+      return canonicalJSON({ ...base, state: 'armed' }) === canonicalJSON(row.value);
+    });
   };
   const connectionIdentity = (value: ConnectionRecord) => canonicalJSON([value.scope, value.conversationId, value.chatKind,
     value.targetId, value.identityDigest, value.bindingName]);
@@ -52,11 +61,11 @@ export async function openDirectory(table: DirectoryTable, startup: DirectoryCon
   };
   try {
     const context = guarded(startup, true);
-    const inherited = await table.list(context, true); check(context, true);
-    for (const row of inherited) {
+    await table.list(context, true, async row => {
+      check(context, true);
       if (row.value.kind !== 'control' || row.value.state !== 'armed') throw new DirectoryError('corrupt');
       await recover(row, context);
-    }
+    });
     check(context, true); ready = true;
   } catch {
     closed = true; await table.close().catch(() => {}); throw new DirectoryError('unready');

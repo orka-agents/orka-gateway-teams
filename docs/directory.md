@@ -2,9 +2,10 @@
 
 The directory is a separate Azure Table storage domain for personal and group
 chat connections and control replies. It is not an inbox, a delivery journal or
-a third V3 kernel domain. The storage library does not start a listener, admit an
-Orka Task or send a Teams message. The separate provisioning library below can
-create and check Bindings, but is not wired into serving yet.
+a third V3 kernel domain. The registry runtime opens and recovers it before listening, and drains it before
+releasing V3 ownership or its shared storage identity. It does not yet admit an
+Orka Task or send a Teams control message. The separate provisioning library below
+can create and check Bindings, but is not wired into serving yet.
 
 ## Identity and permanent choice
 
@@ -51,10 +52,20 @@ lost notification.
 
 Before allowing sends, opening the directory converts inherited armed attempts
 to terminal unknown. A foreign-owner arm found later is treated the same way.
-Late old-owner receipts cannot reverse that terminal result. Recovery traverses
-bounded pages; malformed rows, repeated continuations, exhausted budgets or a
-failed page leave opening incomplete. This is not a general message queue or a
-replacement for actual prior-owner termination and drain.
+Late old-owner receipts cannot reverse that terminal result. If the old owner's
+terminal receipt wins the conditional write first, recovery preserves it only
+when the complete saved attempt and original observations match. A ready or
+changed-attempt winner fails that opening closed; a ready row is excluded on the
+next armed scan.
+
+Recovery converts each validated page's arms before requesting the next page.
+Malformed rows, repeated continuations, exhausted budgets or a failed page leave
+opening incomplete, but completed unknown transitions survive. The existing
+1,000-page (four rows per page), 32 MiB and caller-deadline budgets remain. More
+than 4,000 arms cannot complete in one opening, but no longer prevent all progress:
+a later stopped-owner startup resumes from the remaining arms. There is no
+automatic startup retry or unbounded capacity promise. This is not a general
+message queue or a replacement for actual prior-owner termination and drain.
 
 ## Caller obligations
 
@@ -78,16 +89,17 @@ stores or the shared storage token provider. Directory integrity failure must
 make the combined process unready; a Graph or target outage must not poison
 healthy storage.
 
-The transport permits at most four concurrent operations and uses fixed,
-verified Azure Table HTTPS destinations. A write and its confirming readback
-are separate operations. If local saturation interrupts an arm's readback,
-that activity can remain armed until restart and then become unknown without
-being sent; a fresh activity can ask again. Live integration should bound whole
-directory operations to avoid this contention. A terminal old-owner receipt
-racing startup recovery can make opening fail once; retrying opening preserves
-the terminal result. It does not follow redirects or remote
-pagination URLs. The runtime must budget these callers alongside all 2N V3
-domains when it lends the existing storage token provider.
+Both the store and transport permit at most four concurrent operations, without
+a queue. A complete store operation retains its place through write readback and
+actual completion; a fifth caller gets `busy` before I/O. This prevents unrelated
+store callers from consuming an arm's confirming readback capacity. Direct table
+callers still share the transport's separate bound; runtime borrowers must use
+the owned store rather than competing on its raw table.
+
+The transport uses fixed, verified Azure Table HTTPS destinations and does not
+follow redirects or remote pagination URLs. Registry token capacity budgets four
+directory callers alongside all 2N V3 domains, up to 68 at 32 targets, retaining
+the default 32 for other runtimes.
 
 ## Binding provisioning library
 
@@ -135,8 +147,11 @@ RBAC, controller reconciliation, concurrent-writer safety or a Teams walk.
 
 ## Live integration
 
-The subsequent live integration owns current-policy handler wiring, directory
-startup/drain, calling the Binding provisioner, recurring relay readiness/overlap
+Registry startup now requires an operator-precreated distinct directory table;
+see [configuration and handover](registry.md#storage-and-handover). Its startup and
+drain are live, but new Teams intake remains refused and retained relays do not
+consult the directory yet. Subsequent integration owns current-policy handler
+wiring, calling the Binding provisioner, recurring relay readiness/overlap
 checks, transient HTTP outcome mapping, and actual control sends
 through the shared confined Teams sender. The directory library alone does not
 make self-service connection available.

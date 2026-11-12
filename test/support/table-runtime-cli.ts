@@ -19,6 +19,7 @@ import { entraEndpoint, miConfig } from './managed-identity.js';
 import { syntheticAccessToken } from './certificate.js';
 import { syntheticToken } from './table-service.js';
 import { finalDelivery, finalMessage } from '../fixtures/outgoing.js';
+import { directoryFixture } from './directory-table.js';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const marker = 'table-cli-native: ';
@@ -128,6 +129,7 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string, backen
   });
   mkdirSync(fixtureDir); mkdirSync(work);
   const tables = await runtimeTableService(t, scope); const identity = await runtimeIdentity(t, 30);
+  const controlTable = registry ? await directoryFixture(t, syntheticToken) : undefined;
   // Exercise generic point-404 compatibility in BOTH the fresh CLI and image journey.
   // Other fixture users retain EntityNotFound; routing remains per-request.
   tables.inbox.controls.missingCode = 'ResourceNotFound'; tables.delivery.controls.missingCode = 'ResourceNotFound';
@@ -168,7 +170,8 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string, backen
       } else { effects.contract = false; res.writeHead(400); res.end(); }
     } catch { effects.contract = false; res.destroy(); }
   });
-  const observers = [tables.fixture.server, tables.inbox.fixture.server, tables.delivery.fixture.server, identity.server, services.server].map(observe);
+  const observers = [tables.fixture.server, tables.inbox.fixture.server, tables.delivery.fixture.server, identity.server, services.server,
+    ...(controlTable ? [controlTable.fixture.server] : [])].map(observe);
   tables.fixture.server.on('request', req => {
     effects.contract &&= req.headers['x-identity-header'] === undefined && req.headers.authorization === `Bearer ${syntheticToken}`;
   });
@@ -191,6 +194,7 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string, backen
   copyFileSync(join(root, 'test/support/table-runtime-cli-preload.mjs'), join(fixtureDir, 'preload.mjs'));
   writeFileSync(join(fixtureDir, 'native-settings.json'), JSON.stringify({ entraEndpoint, identity: common.IDENTITY_ENDPOINT,
     table: { baseUrl: tables.fixture.baseUrl, ca: tables.fixture.ca.toString() },
+    ...(controlTable ? { directory: { baseUrl: controlTable.fixture.baseUrl, ca: controlTable.fixture.ca.toString() } } : {}),
     services: { baseUrl: services.baseUrl, ca: services.ca.toString() } }));
   let entrypoint = '/app/dist/ingress/main.js';
   if (!image) {
@@ -260,7 +264,7 @@ export async function qualifyTableCli(t: CliFixtureHooks, image?: string, backen
       const ingressTokenFile = join(directory, 'ingress-token'); const callbackTokenFile = join(directory, 'callback-token');
       writeFileSync(ingressTokenFile, serving.ORKA_BEARER_TOKEN, { mode: 0o600 });
       writeFileSync(callbackTokenFile, serving.ORKA_OUTBOUND_BEARER_TOKEN, { mode: 0o600 });
-      settings.ORKA_REGISTRY_FILE = join(directory, 'registry.json');
+      settings.ORKA_REGISTRY_FILE = join(directory, 'registry.json'); settings.TABLE_DIRECTORY_TABLE = 'Directory';
       writeFileSync(settings.ORKA_REGISTRY_FILE, JSON.stringify({ schemaVersion: 1, targets: [{
         id: 'primary', label: 'Primary', orkaBaseUrl: scope.orkaBaseUrl, gatewayNamespace: scope.gatewayNamespace, gatewayName: scope.gatewayName,
         gatewayUid: 'synthetic-uid', frontAgent: { namespace: scope.gatewayNamespace, name: 'front' },

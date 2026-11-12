@@ -1,6 +1,10 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { prepareStorageIdentity } from '../auth/storage-identity.js';
 import { createTableDeliveryJournalV3 } from '../delivery/table-journal.js';
+import { openDirectory } from '../directory/store.js';
+import type { Directory } from '../directory/store.js';
+import { createDirectoryTable } from '../directory/table.js';
+import type { DirectoryTable } from '../directory/types.js';
 import { createOrkaClient } from '../ingress/client.js';
 import { ConfigurationError, tlsVerificationEnabled } from '../ingress/config.js';
 import type { IngressRuntime, IngressRuntimeDependencies } from '../ingress/main.js';
@@ -17,7 +21,7 @@ import { snapshotRegistry } from './config.js';
 
 export async function startRegistryRuntime(input: RegistryConfig, dependencies: IngressRuntimeDependencies = {}, signal?: AbortSignal): Promise<IngressRuntime> {
   const config = snapshotRegistry(input); const deps = { ...dependencies };
-  if (!tlsVerificationEnabled() || deps.openIngressStore !== undefined || deps.openDeliveryJournal !== undefined) throw new ConfigurationError();
+  if (!config.directoryTable || !tlsVerificationEnabled() || deps.openIngressStore !== undefined || deps.openDeliveryJournal !== undefined) throw new ConfigurationError();
   if (signal?.aborted) throw new Error('Registry startup cancelled');
   const shared = config.targets[0]!;
   const prepared = prepareReceiver(shared.config.receiver, deps);
@@ -25,17 +29,20 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   const subscriptions: (() => void)[] = []; const handles: { open(): Promise<unknown>; close(): Promise<unknown> }[] = [];
   let ready = false; let fatal = false; let opening = true; let receiver: Receiver | undefined; let api: OutboundServer | undefined;
   let stopRuntime: (() => Promise<void>) | undefined; let closing: Promise<void> | undefined;
+  let directory: Directory | undefined; let directoryTable: DirectoryTable | undefined;
   const authority: LeaseAuthority = {
     allowed: () => !loss.signal.aborted && !abort.signal.aborted && authorities.every(a => a.allowed()),
     revalidate: async () => (await Promise.all(authorities.map(a => a.revalidate()))).every(Boolean) && authority.allowed(), lost: loss.signal,
   };
   const clients = config.targets.map(t => createOrkaClient(t.config.scope, { bearerToken: t.config.bearerToken, authority,
     ...(t.config.caFile === undefined ? {} : { ca: readCaBundle(t.config.caFile) }) }));
-  // Each serialized domain can hold one token caller; 32 targets own 64 domains.
-  const provider = prepareStorageIdentity(shared.config.storage.identity).createProvider(deps.storageIdentity, Math.max(32, config.targets.length * 2));
+  // One caller per serialized V3 domain plus the directory's four native slots.
+  const provider = prepareStorageIdentity(shared.config.storage.identity).createProvider(deps.storageIdentity, Math.max(32, config.targets.length * 2 + 4));
   const unsubscribe = () => { for (const remove of subscriptions.splice(0)) remove(); };
   const closeStores = async () => {
-    unsubscribe(); const results = await Promise.allSettled(handles.map(h => Promise.resolve().then(() => h.close())));
+    // Keep every V3 lease and the token source until actual directory work drains.
+    const results: PromiseSettledResult<unknown>[] = await Promise.allSettled([Promise.resolve().then(() => directory?.close() ?? directoryTable?.close())]);
+    unsubscribe(); results.push(...await Promise.allSettled(handles.map(h => Promise.resolve().then(() => h.close()))));
     results.push(...await Promise.allSettled([Promise.resolve().then(() => provider.close())])); return results;
   };
   const cancel = () => {
@@ -71,6 +78,14 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
     // Every handle is retained and subscribed before the first ownership await.
     for (const h of handles) { assertStarting(); await h.open(); assertStarting(); }
     opening = false;
+    // Directory startup borrows authority, but is not a third V3 domain. From here
+    // cancellation must drain its real requests before closing any owned store.
+    directoryTable = createDirectoryTable({ account: shared.config.storage.account, table: config.directoryTable,
+      appId: shared.config.scope.appId, tenantId: shared.config.scope.tenantId },
+    { token: provider.token, ...(deps.tableRequest === undefined ? {} : { request: deps.tableRequest }) });
+    directory = await openDirectory(directoryTable, { signal: abort.signal,
+      deadline: performance.now() + shared.config.storage.audit.maxDurationMs }, authority);
+    assertStarting();
     // No implicit target: self-service admission is wired separately.
     receiver = await prepared.start({ scope: shared.config.scope, admit: () => ({ kind: active() ? 'conflict' : 'full' }) },
       { targets: slots.map(s => ({ id: s.target.id, journal: s.journal, correlation: s.journal, authority,

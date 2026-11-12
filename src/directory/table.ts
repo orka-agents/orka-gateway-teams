@@ -197,7 +197,7 @@ export function createDirectoryTable(input: DirectoryBinding, deps: DirectoryDep
       try { etag(tag); } catch { return Promise.reject(new DirectoryError('invalid-input')); }
       return mutation(key, value, context, tag);
     },
-    list(context: DirectoryContext, armedOnly = false) {
+    list(context: DirectoryContext, armedOnly = false, visit?: (row: DirectoryRow) => Promise<void>) {
       return run(context, async ctx => {
         const rows: DirectoryRow[] = []; const seenRows = new Set<string>(); const seenCursors = new Set<string>();
         let next: ReturnType<typeof cursor>; let size = 0;
@@ -208,7 +208,9 @@ export function createDirectoryTable(input: DirectoryBinding, deps: DirectoryDep
           if (size > 32 * 1024 * 1024) throw unready();
           for (const row of page(response, 4)) {
             if (seenRows.has(row.row) || (armedOnly && !(row.value.kind === 'control' && row.value.state === 'armed'))) throw corrupt();
-            seenRows.add(row.row); rows.push(row); if (rows.length > 100000) throw unready();
+            seenRows.add(row.row); if (seenRows.size > 100000) throw unready();
+            // Recover as we traverse: an exhausted later page must not erase progress.
+            if (visit) { await visit(row); usable(ctx); } else rows.push(row);
           }
           next = cursor(response); if (!next) return rows;
           const serialized = JSON.stringify(next); if (seenCursors.has(serialized)) throw unready(); seenCursors.add(serialized);

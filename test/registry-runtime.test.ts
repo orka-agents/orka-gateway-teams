@@ -13,7 +13,11 @@ import { activity, authFixture, post, receiverConfig, serviceUrl } from './suppo
 import { httpsFixture } from './support/ingress-https.js';
 import { registryInput } from './support/registry.js';
 import { runtimeIdentity } from './support/table-runtime.js';
-import { deferred, eventually, tableService } from './support/table-service.js';
+import { deferred, eventually, syntheticToken, tableService } from './support/table-service.js';
+import { directoryFixture } from './support/directory-table.js';
+import { encodeEntity } from '../src/directory/codec.js';
+import { randomUUID } from 'node:crypto';
+import type { ControlRecord } from '../src/directory/types.js';
 import { TestClock } from './support/table-v3.js';
 
 async function fixture(t: test.TestContext, initialize = true, count = 2, expirySeconds = 3600) {
@@ -23,6 +27,7 @@ async function fixture(t: test.TestContext, initialize = true, count = 2, expiry
     const storeId = kind === 'ingress' ? target.config.storage.ingressStoreId : target.config.storage.deliveryStoreId!;
     domains.push({ target: target.id, kind, storeId, service: await tableService(t, kind, 3, target.config.scope, httpsFixture, storeId) });
   }
+  const directory = await directoryFixture(t, syntheticToken);
   const native = https.request; let contract = true;
   const router = await httpsFixture(t, async (req, res) => {
     const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk)); const body = Buffer.concat(chunks);
@@ -36,6 +41,7 @@ async function fixture(t: test.TestContext, initialize = true, count = 2, expiry
   });
   const request = ((url: URL, options: https.RequestOptions, callback: Parameters<typeof https.request>[2]) => {
     contract &&= url.origin === 'https://example123.table.core.windows.net' && options.rejectUnauthorized === true;
+    if (url.pathname.startsWith('/Directory')) return directory.request(url, options, callback!);
     return native(new URL(url.pathname + url.search, router.baseUrl), { ...options, ca: router.ca, servername: 'localhost' }, callback);
   }) as typeof https.request;
   const auth = await authFixture(t); const deps = { ...auth.dependencies, tableRequest: request, storageIdentity: { request: identity.request } };
@@ -45,8 +51,48 @@ async function fixture(t: test.TestContext, initialize = true, count = 2, expiry
       ...(kind === 'ingress' ? { audit: c.storage.audit, maxIndexBytes: c.storage.maxIndexBytes } : {}) } as never, { tableRequest: request, storageIdentity: deps.storageIdentity });
   }
   t.after(() => { assert.equal(contract, true); assert.equal(domains.some(d => d.service.stats.violation), false); });
-  return { config, deps, domains, auth, identity };
+  return { config, deps, domains, auth, identity, directory };
 }
+
+test('registry runtime requires directory configuration before opening stores', async () => {
+  const input = registryInput();
+  await assert.rejects(startRegistryRuntime({ schemaVersion: 1, targets: input.targets }), { message: 'Invalid ingress configuration' });
+});
+
+for (const fault of ['missing', 'corrupt'] as const) test(`${fault} directory fails startup without listening and releases V3 ownership`, async t => {
+  const f = await fixture(t); let listens = 0;
+  t.mock.method(NativeAdapter.prototype, 'listen', async () => { listens++; throw new Error('must not listen'); });
+  f.directory.controls.hook = ({ res }) => {
+    res.writeHead(fault === 'missing' ? 404 : 200, { 'content-type': 'application/json' });
+    res.end(fault === 'missing' ? '' : '{"value":[{"invalid":"row"}]}');
+  };
+  await assert.rejects(startRegistryRuntime(f.config, f.deps), { message: 'Ingress storage failed' });
+  assert.equal(listens, 0); assert.ok(f.domains.every(d => d.service.rows.get('M')!.Owner === ''));
+});
+
+test('cancellation during directory opening retains all leases until its native socket really closes', async t => {
+  const f = await fixture(t); const abort = new AbortController(); const releases: (() => void)[] = []; let waiting = false;
+  f.directory.controls.hook = () => { waiting = true; };
+  const request = f.deps.tableRequest;
+  f.deps.tableRequest = ((...args: Parameters<typeof request>) => {
+    const req = request(...args);
+    if (args[0] instanceof URL && args[0].pathname.startsWith('/Directory')) req.once('socket', socket => {
+      const destroy = socket.destroy.bind(socket); socket.destroy = (() => socket) as typeof socket.destroy;
+      releases.push(() => { socket.destroy = destroy; destroy(); });
+    });
+    return req;
+  }) as typeof request;
+  let settled = false;
+  const starting = startRegistryRuntime(f.config, f.deps, abort.signal);
+  const rejected = assert.rejects(starting, { message: 'Ingress storage failed' }).then(() => { settled = true; });
+  try {
+    await eventually(() => waiting); const owners = f.domains.map(d => d.service.rows.get('M')!.Owner); abort.abort();
+    await new Promise(resolve => setImmediate(resolve)); assert.equal(settled, false);
+    assert.deepEqual(f.domains.map(d => d.service.rows.get('M')!.Owner), owners);
+  } finally { for (const release of releases) release(); await rejected; }
+  assert.ok(f.domains.every(d => d.service.rows.get('M')!.Owner === ''));
+  assert.equal(f.directory.stats.socketCloses, f.directory.stats.sockets);
+});
 
 test('32 targets drain a shared held refresh and release all 64 domains cleanly', async t => {
   const f = await fixture(t, true, 32, 30); const gate = deferred();
@@ -82,11 +128,20 @@ test('callback all-target revalidation overlaps independent domains instead of s
   assert.equal(concurrent, 4, 'one held remote lease read must not defer reads of the other independent domains');
 });
 
-test('all four V3 audits precede listeners; registry refuses new intake without a fallback target', async t => {
+test('all V3 audits and inherited directory recovery precede listeners; registry still refuses new intake', async t => {
   const f = await fixture(t); let listens = 0;
+  const scope = { appId: f.config.targets[0]!.config.scope.appId, tenantId: f.config.targets[0]!.config.scope.tenantId };
+  const value: ControlRecord = { schema: 1, kind: 'control', scope, conversationId: 'old-chat', chatKind: 'personal', activityId: 'old-activity',
+    fingerprint: 'a'.repeat(64), currentTargetDigest: null, desiredTargetDigest: null, state: 'armed', ownerUUID: randomUUID(), attemptUUID: randomUUID(),
+    route: { serviceUrl, channelId: 'msteams', bot: { id: receiverConfig.recipientIds[0]!, role: 'bot' },
+      conversation: { id: 'old-chat', tenantId: scope.tenantId, conversationType: 'personal' } }, reply: { kind: 'no-access' } };
+  const row = encodeEntity(scope, { kind: 'control', conversationId: value.conversationId, activityId: value.activityId }, value);
+  f.directory.rows.set(String(row.RowKey), { ...row, Timestamp: '2026-01-01T00:00:00Z', 'odata.etag': '"old"' });
+  f.directory.controls.hook = ({ reply }) => { assert.ok(f.domains.every(d => !!d.service.rows.get('M')?.Owner)); reply(); };
   const listen = NativeAdapter.prototype.listen;
   t.mock.method(NativeAdapter.prototype, 'listen', function(this: NativeAdapter, ...args: Parameters<typeof listen>) {
-    assert.ok(f.domains.every(d => !!d.service.rows.get('M')?.Owner)); listens++; return listen.apply(this, args);
+    assert.ok(f.domains.every(d => !!d.service.rows.get('M')?.Owner));
+    assert.equal(f.directory.rows.get(String(row.RowKey))!.Armed, false); listens++; return listen.apply(this, args);
   });
   const native = https.request; let kubernetes = 0;
   t.mock.method(https, 'request', (url: URL, options: https.RequestOptions, callback: any) => {

@@ -10,7 +10,7 @@ export interface RegistryTarget {
   kubernetesBaseUrl: string; kubernetesTokenFile: string; kubernetesCaFile?: string;
   config: TableServeConfig; readonly identityDigest?: string;
 }
-export interface RegistryConfig { schemaVersion: 1; targets: readonly RegistryTarget[] }
+export interface RegistryConfig { schemaVersion: 1; directoryTable?: string; targets: readonly RegistryTarget[] }
 const perTarget = ['ORKA_BASE_URL', 'ORKA_GATEWAY_NAMESPACE', 'ORKA_GATEWAY_NAME', 'ORKA_BEARER_TOKEN', 'ORKA_OUTBOUND_BEARER_TOKEN', 'ORKA_CA_FILE', 'TABLE_INGRESS_STORE_ID', 'TABLE_DELIVERY_STORE_ID'];
 const metadataKeys = ['id', 'label', 'gatewayUid', 'frontAgent', 'kubernetesBaseUrl', 'kubernetesTokenFile', 'kubernetesCaFile'];
 
@@ -41,7 +41,9 @@ function targetMetadata(input: Record<string, unknown>, config: TableServeConfig
 /** Public library boundary: callers cannot combine different shared identities or listeners. */
 export function snapshotRegistry(input: RegistryConfig): RegistryConfig {
   try {
-    const root = auditFields(input, ['schemaVersion', 'targets']);
+    const root = auditFields(input, ['schemaVersion', 'directoryTable', 'targets']);
+    const directoryTable = root.directoryTable === undefined ? undefined : text(root.directoryTable, 63);
+    if (directoryTable !== undefined && !/^[A-Za-z][A-Za-z0-9]{2,62}$/u.test(directoryTable)) throw new ConfigurationError();
     if (root.schemaVersion !== 1 || !Array.isArray(root.targets) || !root.targets.length || root.targets.length > 32) throw new ConfigurationError();
     const ids = new Set<string>(); const inboxes = new Set<string>(); const deliveries = new Set<string>(); const tokens = new Set<string>();
     let shared: string | undefined;
@@ -50,6 +52,7 @@ export function snapshotRegistry(input: RegistryConfig): RegistryConfig {
       const config = snapshotTableServeConfig(raw.config as TableServeConfig);
       if (config.storage.backend !== 'table-v3' || !config.outbound || config.scope.orkaBaseUrl !== (raw.config as TableServeConfig).scope.orkaBaseUrl) throw new ConfigurationError();
       const metadata = targetMetadata(raw, config); const { scope, storage, receiver, policy, outbound } = config;
+      if (directoryTable?.toLowerCase() === storage.table.toLowerCase()) throw new ConfigurationError();
       const common = JSON.stringify([receiver, policy, storage.account, storage.table, storage.identity, storage.audit, storage.maxIndexBytes,
         outbound.host, outbound.port, outbound.interimDelivery, outbound.meetingDrafts]);
       if (shared !== undefined && shared !== common) throw new ConfigurationError(); shared = common;
@@ -62,7 +65,7 @@ export function snapshotRegistry(input: RegistryConfig): RegistryConfig {
         metadata.frontAgent.namespace, metadata.frontAgent.name])).digest('hex');
       return Object.freeze({ ...metadata, config, identityDigest });
     });
-    return Object.freeze({ schemaVersion: 1, targets: Object.freeze(targets) });
+    return Object.freeze({ schemaVersion: 1, ...(directoryTable === undefined ? {} : { directoryTable }), targets: Object.freeze(targets) });
   } catch { throw new ConfigurationError(); }
 }
 export function parseRegistryConfig(env: NodeJS.ProcessEnv): RegistryConfig {
@@ -81,6 +84,6 @@ export function parseRegistryConfig(env: NodeJS.ProcessEnv): RegistryConfig {
       if (!('storage' in parsed) || parsed.scope.orkaBaseUrl !== raw.orkaBaseUrl) throw new ConfigurationError();
       return { ...targetMetadata(raw, parsed), config: parsed };
     });
-    return snapshotRegistry({ schemaVersion: root.schemaVersion as 1, targets });
+    return snapshotRegistry({ schemaVersion: root.schemaVersion as 1, directoryTable: text(captured.TABLE_DIRECTORY_TABLE, 63), targets });
   } catch { throw new ConfigurationError(); }
 }

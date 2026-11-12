@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import https from 'node:https';
 import { test } from 'node:test';
-import { directoryKey, encodeEntity } from '../src/directory/codec.js';
+import { bindingName, directoryKey, encodeEntity } from '../src/directory/codec.js';
 import { createDirectoryTable } from '../src/directory/table.js';
 import { DirectoryError } from '../src/directory/types.js';
 import { binding, context, deferred, directoryFixture, eventually, key, sample } from './support/directory-table.js';
@@ -173,10 +173,20 @@ test('list follows empty pages, filters Armed and rejects repeated cursors, dupl
     await assert.rejects(table.list(context()), code(fault === 'repeat' ? 'unready' : fault === 'late' ? 'unavailable' : 'corrupt'));
   }
 });
-test('list traversal refuses 1001st page and 32MiB total bytes rather than publishing a prefix', async t => {
+test('stream traversal visits 4000 rows before its page cap; list still refuses 32MiB rather than publishing a prefix', async t => {
   const f = await directoryFixture(t); const table = createDirectoryTable(binding, f.dependencies); t.after(() => table.close());
-  let page = 0; f.controls.hook = ({ res }) => { res.setHeader('content-type', 'application/json;odata=fullmetadata'); res.setHeader('x-ms-continuation-nextrowkey', String(++page)); res.end('{"value":[]}'); };
-  await assert.rejects(table.list(context()), code('unready')); assert.equal(page, 1000);
+  let page = 0; let visited = 0;
+  f.controls.hook = ({ res }) => {
+    res.setHeader('content-type', 'application/json;odata=fullmetadata'); res.setHeader('x-ms-continuation-nextrowkey', String(++page));
+    const value = Array.from({ length: 4 }, (_, i) => {
+      const conversationId = `page-${page}-row-${i}`;
+      const record = { ...sample(), conversationId, bindingName: bindingName(scope, conversationId, 'a'.repeat(64)) };
+      return { ...encodeEntity(scope, { kind: 'conn', conversationId }, record), Timestamp: '2026-11-11T00:00:00Z', 'odata.etag': '"one"' };
+    });
+    res.end(JSON.stringify({ value }));
+  };
+  await assert.rejects(table.list(context(), false, async () => { visited++; }), code('unready'));
+  assert.equal(page, 1000); assert.equal(visited, 4000);
   page = 0; const padding = ' '.repeat(500*1024);
   f.controls.hook = ({ res }) => { res.setHeader('content-type', 'application/json;odata=fullmetadata'); res.setHeader('x-ms-continuation-nextrowkey', String(++page)); res.end('{"value":[]}'+padding); };
   await assert.rejects(table.list(context()), code('unready')); assert.ok(page > 64 && page < 70);
