@@ -38,9 +38,9 @@ export function bindingName(scope: DirectoryScope, conversationId: string, ident
   const s = validateScope(scope); return `teams-${hash(['teams-binding-v1', s.appId, s.tenantId, identity(conversationId), hex(identityDigest)]).slice(0, 56)}`;
 }
 /** Full Binding specs include fractional backoff; the kernel envelope remains integer-only. */
-export function parseCanonicalJSON(input: Uint8Array): CanonicalValue {
+export function parseCanonicalJSON(input: Uint8Array, maxNodes = 16384): CanonicalValue {
   try {
-    if (!(input instanceof Uint8Array) || input.byteLength > 512 * 1024) bad();
+    if (!(input instanceof Uint8Array) || input.byteLength > 512 * 1024 || !Number.isInteger(maxNodes) || maxNodes < 1 || maxNodes > 131072) bad();
     const source = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(input); let pos = 0; let nodes = 0;
     const space = () => { while (/[\x20\t\r\n]/u.test(source[pos] ?? '!')) pos++; };
     const string = (): string => {
@@ -53,7 +53,7 @@ export function parseCanonicalJSON(input: Uint8Array): CanonicalValue {
       return bad();
     };
     const value = (depth: number): void => {
-      if (++nodes > 16384 || depth > 24) bad(); space(); const c = source[pos];
+      if (++nodes > maxNodes || depth > 24) bad(); space(); const c = source[pos];
       if (c === '"') { string(); return; }
       if (c === '{' || c === '[') {
         const end = c === '{' ? '}' : ']'; const keys = new Set<string>(); pos++; space();

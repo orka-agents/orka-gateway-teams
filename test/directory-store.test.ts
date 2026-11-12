@@ -55,6 +55,18 @@ test('control receipt before connection deduplicates identity and rejects altere
   await directory.close();
 });
 
+test('duplicate receipts preserve original observations without granting current send authority', async () => {
+  const f = memoryDirectoryTable(); const directory = await openDirectory(f.table, context());
+  const input: ControlRecord = { ...control(), desiredTargetDigest: 'a'.repeat(64), reply: { kind: 'connected', targetId: 'tools', label: 'Tools' } };
+  await directory.reserveControl(input, context());
+  const saved = await directory.reserveControl({ ...input, currentTargetDigest: 'a'.repeat(64),
+    reply: { kind: 'connected', targetId: 'tools', label: 'Renamed tools' }, route: { ...input.route, serviceUrl: 'https://current.example.invalid/' } }, context());
+  assert.deepEqual(saved, input); assert.equal(f.writes(), 1);
+  const key = { kind: 'control' as const, conversationId: input.conversationId, activityId: input.activityId };
+  await assert.rejects(directory.armControl(key, { ...context(), authorizeWrite: () => false }), { code: 'unready' });
+  assert.equal((await directory.getControl(key, context()))?.state, 'ready'); await directory.close();
+});
+
 test('control attempt fencing allows only proved no-effect retry and preserves terminal outcomes', async () => {
   const f = memoryDirectoryTable(); const directory = await openDirectory(f.table, context()); const input = control();
   await directory.reserveControl(input, context()); const key = { kind: 'control' as const, conversationId: input.conversationId, activityId: input.activityId };

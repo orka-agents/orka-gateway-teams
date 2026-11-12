@@ -39,7 +39,7 @@ export function createDirectoryTable(input: DirectoryBinding, deps: DirectoryDep
     const remove = subscribeAuditAbort(context.signal, () => controller.abort());
     const ctx = { ...context, signal: controller.signal }; let timer: ReturnType<typeof setTimeout>;
     const expire = () => {
-      const remaining = context.deadline - performance.now();
+      const remaining = ctx.deadline - performance.now();
       if (remaining <= 0) controller.abort(); else timer = setTimeout(expire, Math.min(remaining, 2147483647));
     };
     expire(); cancellations.add(controller);
@@ -142,7 +142,8 @@ export function createDirectoryTable(input: DirectoryBinding, deps: DirectoryDep
   function query(key?: DirectoryKey, armedOnly = false, next?: { partition?: string; row?: string }): string {
     const partition = directoryKey(scope, key ?? { kind: 'conn', conversationId: 'query' }).partition;
     const filter = `PartitionKey eq '${partition}'${key ? ` and RowKey eq '${directoryKey(scope, key).row}'` : armedOnly ? ' and Armed eq true' : ''}`;
-    const params = new URLSearchParams({ '$filter': filter, '$top': key ? '1' : '100' });
+    // Four maximum payloads plus bounded FULLmetadata fit the 512 KiB response cap.
+    const params = new URLSearchParams({ '$filter': filter, '$top': key ? '1' : '4' });
     if (next?.partition !== undefined) params.set('NextPartitionKey', next.partition);
     if (next?.row !== undefined) params.set('NextRowKey', next.row);
     return `/${table}()?${params}`;
@@ -205,7 +206,7 @@ export function createDirectoryTable(input: DirectoryBinding, deps: DirectoryDep
           if (response.status !== 200) throw failed();
           size += response.body.length;
           if (size > 32 * 1024 * 1024) throw unready();
-          for (const row of page(response, 100)) {
+          for (const row of page(response, 4)) {
             if (seenRows.has(row.row) || (armedOnly && !(row.value.kind === 'control' && row.value.state === 'armed'))) throw corrupt();
             seenRows.add(row.row); rows.push(row); if (rows.length > 100000) throw unready();
           }

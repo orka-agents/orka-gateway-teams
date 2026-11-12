@@ -66,6 +66,19 @@ test('canonical import ignores object key ordering, not sender/session/priority 
   await assert.rejects(importDirectory(validateDirectoryImport(reordered, registry), directory, ctx()), { code: 'conflict' }); assert.equal(f.writes(), 1); await directory.close();
 });
 
+test('partial import rerun preserves the first row and inserts only the missing suffix', async () => {
+  const input = document(); const second = structuredClone(input.connections[0]!);
+  second.conversationId = 'chat-b'; second.binding.spec.match.contextId = 'chat-b'; input.connections.push(second);
+  const rows = validateDirectoryImport(input, registry); const f = memoryDirectoryTable(); const directory = await openDirectory(f.table, ctx());
+  const insert = f.table.insert;
+  f.table.insert = async (...args) => { if (args[0].conversationId === 'chat-b') throw new Error('synthetic unavailable'); return insert(...args); };
+  await assert.rejects(importDirectory(rows, directory, ctx()), /synthetic unavailable/u);
+  assert.equal(f.rows.size, 1); const first = structuredClone([...f.rows.values()][0]);
+  f.table.insert = insert; await importDirectory(rows, directory, ctx());
+  assert.equal(f.rows.size, 2); assert.deepEqual([...f.rows.values()][0], first); assert.equal(f.writes(), 2);
+  await directory.close();
+});
+
 test('import CLI help and invalid invocations never reach identity or storage', () => {
   for (const [args, status] of [[['--help'], 0], [[], 1], [['import'], 1], [['--unknown'], 1], [['import', 'relative.json'], 1]] as const) {
     const result = spawnSync(process.execPath, ['--import', 'tsx', 'src/directory/main.ts', ...args], { encoding: 'utf8', env: { PATH: process.env.PATH } });

@@ -15,7 +15,7 @@ async function main(args: string[]): Promise<void> {
   const file = absoluteFile(args[1]); const registry = parseRegistryConfig(process.env); const target = registry.targets[0]!;
   const name = process.env.TABLE_DIRECTORY_TABLE;
   if (!name || !/^[a-z][a-z0-9]{2,62}$/iu.test(name) || name.toLowerCase() === target.config.storage.table.toLowerCase()) throw new Error();
-  const rows = validateDirectoryImport(parseCanonicalJSON(Buffer.from(readRegistryFile(file, 256 * 1024))), registry);
+  const rows = validateDirectoryImport(parseCanonicalJSON(Buffer.from(readRegistryFile(file, 256 * 1024)), 131072), registry);
   const provider = prepareStorageIdentity(target.config.storage.identity).createProvider();
   const table = createDirectoryTable({ account: target.config.storage.account, table: name,
     appId: target.config.scope.appId, tenantId: target.config.scope.tenantId }, { token: provider.token });

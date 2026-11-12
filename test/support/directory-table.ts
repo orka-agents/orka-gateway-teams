@@ -34,10 +34,14 @@ export async function directoryFixture(t: TestContext) {
       if (req.method === 'GET') {
         res.setHeader('content-type', 'application/json;odata=fullmetadata');
         if (url.pathname === '/Directory()') {
-          const filter = url.searchParams.get('$filter')!; assert.equal(url.searchParams.get('$top'), filter.includes('RowKey eq') ? '1' : '100');
+          const filter = url.searchParams.get('$filter')!; assert.equal(url.searchParams.get('$top'), filter.includes('RowKey eq') ? '1' : '4');
           const partition = /^PartitionKey eq '([^']+)'/.exec(filter)?.[1]; const row = /RowKey eq '([^']+)'/.exec(filter)?.[1];
-          const values = [...rows.values()].filter(r => r.PartitionKey === partition && (!row || r.RowKey === row) && (!filter.includes('Armed eq true') || r.Armed === true));
-          res.end(JSON.stringify({ 'odata.metadata': 'https://example123.table.core.windows.net/$metadata#Directory', value: values })); return;
+          const next = url.searchParams.get('NextRowKey'); const top = Number(url.searchParams.get('$top'));
+          const values = [...rows.values()].filter(r => r.PartitionKey === partition && (!row || r.RowKey === row) &&
+            (!filter.includes('Armed eq true') || r.Armed === true) && (!next || String(r.RowKey) >= next))
+            .sort((a, b) => String(a.RowKey).localeCompare(String(b.RowKey)));
+          if (values.length > top) res.setHeader('x-ms-continuation-nextrowkey', String(values[top]!.RowKey));
+          res.end(JSON.stringify({ 'odata.metadata': 'https://example123.table.core.windows.net/$metadata#Directory', value: values.slice(0, top) })); return;
         }
         const row = /RowKey='([^']+)'/.exec(decodeURIComponent(url.pathname))?.[1]; const value = rows.get(row!);
         if (!value) { error(404, 'EntityNotFound'); return; }
