@@ -80,6 +80,17 @@ test('control attempt fencing allows only proved no-effect retry and preserves t
   await assert.rejects(directory.armControl(key, context()), { code: 'conflict' }); await directory.close();
 });
 
+test('settlement snapshots the outcome before awaiting storage so unknown cannot become ready', async () => {
+  const f = memoryDirectoryTable(); const directory = await openDirectory(f.table, context()); await directory.reserveControl(control(), context());
+  const key = { kind: 'control' as const, conversationId: 'chat-a', activityId: 'activity-a' }; const armed = await directory.armControl(key, context());
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; }); const get = f.table.get;
+  f.table.get = async (...args) => { await gate; return get(...args); };
+  const outcome: { kind: 'unknown' | 'no-effect' } = { kind: 'unknown' };
+  const settling = directory.settleControl(key, armed.attemptUUID, outcome, context()); outcome.kind = 'no-effect'; release();
+  assert.equal((await settling).state, 'unknown');
+  await assert.rejects(directory.armControl(key, context()), { code: 'conflict' }); await directory.close();
+});
+
 test('successor retires inherited arms and late old receipts cannot reverse unknown', async () => {
   const f = memoryDirectoryTable(); const old = await openDirectory(f.table, context()); const input = control();
   await old.reserveControl(input, context()); const key = { kind: 'control' as const, conversationId: 'chat-a', activityId: 'activity-a' };

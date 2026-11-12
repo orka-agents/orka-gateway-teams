@@ -130,6 +130,7 @@ export async function openDirectory(table: DirectoryTable, startup: DirectoryCon
       });
     },
     settleControl(key: ControlKey, attemptUUID: string, outcome: ControlSettlement, context: DirectoryContext): Promise<ControlRecord> {
+      outcome = { ...outcome };
       return run(context, async ctx => {
         const row = await controlRow(key, ctx);
         if (!row || row.value.kind !== 'control' || row.value.state !== 'armed' ||

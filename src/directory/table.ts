@@ -152,7 +152,7 @@ export function createDirectoryTable(input: DirectoryBinding, deps: DirectoryDep
     const k = directoryKey(scope, key); return `/${table}(PartitionKey='${k.partition}',RowKey='${k.row}')`;
   }
   function mutation(key: DirectoryKey, value: DirectoryRecord, context: DirectoryContext, tag?: string): Promise<DirectoryWriteResult> {
-    let body: Buffer;
+    key = { ...key }; let body: Buffer;
     try { body = Buffer.from(JSON.stringify(encodeEntity(scope, key, value))); if (tag !== undefined) etag(tag); }
     catch { return Promise.reject(new DirectoryError('invalid-input')); }
     return run(context, async ctx => {
@@ -167,7 +167,7 @@ export function createDirectoryTable(input: DirectoryBinding, deps: DirectoryDep
   }
   return Object.freeze({
     get(key: DirectoryKey, context: DirectoryContext) {
-      let endpoint: string; try { endpoint = path(key); } catch { return Promise.reject(new DirectoryError('invalid-input')); }
+      key = { ...key }; let endpoint: string; try { endpoint = path(key); } catch { return Promise.reject(new DirectoryError('invalid-input')); }
       return run(context, async ctx => {
         const response = await native(endpoint, 'GET', ctx);
         if (response.status === 404) {

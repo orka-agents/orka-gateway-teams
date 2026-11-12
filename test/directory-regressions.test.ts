@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
-import { encodeEntity, parseCanonicalJSON } from '../src/directory/codec.js';
+import { bindingName, directoryKey, encodeEntity, parseCanonicalJSON } from '../src/directory/codec.js';
 import { validateDirectoryImport } from '../src/directory/import.js';
 import { openDirectory } from '../src/directory/store.js';
 import { createDirectoryTable } from '../src/directory/table.js';
 import type { ControlRecord } from '../src/directory/types.js';
 import { snapshotRegistry } from '../src/registry/config.js';
-import { binding, context, directoryFixture, eventually } from './support/directory-table.js';
+import { binding, context, deferred, directoryFixture, eventually, key, sample } from './support/directory-table.js';
 import { registryInput } from './support/registry.js';
 
 test('native timeout retains the original deadline when caller context is reused', async t => {
@@ -19,6 +19,24 @@ test('native timeout retains the original deadline when caller context is reused
   try { assert.equal(await Promise.race([result, new Promise(resolve => { timer = setTimeout(() => resolve('overdue'), 500); })]), 'aborted'); }
   finally { clearTimeout(timer!); }
   assert.equal(f.stats.socketCloses, 1);
+});
+
+test('Table read fallback and conditional write retain their original request keys', async t => {
+  const f = await directoryFixture(t); const scope = { appId: binding.appId, tenantId: binding.tenantId };
+  const other = { ...sample(), conversationId: 'other-chat', bindingName: bindingName(scope, 'other-chat', 'a'.repeat(64)) };
+  const otherKey = { kind: 'conn' as const, conversationId: other.conversationId }; const otherRow = encodeEntity(scope, otherKey, other);
+  f.rows.set(String(otherRow.RowKey), { ...otherRow, Timestamp: '2026-01-01T00:00:00Z', 'odata.etag': '"other"' });
+  const table = createDirectoryTable(binding, f.dependencies); t.after(() => table.close()); const gate = deferred(); let waiting = false;
+  f.controls.hook = async ({ url, res, reply }) => {
+    if (url.pathname !== '/Directory()') { waiting = true; await gate.promise; res.writeHead(404, { 'x-ms-error-code': 'ResourceNotFound' }); res.end(); }
+    else reply();
+  };
+  const requested = { ...key }; const pending = table.get(requested, context()); await eventually(() => waiting);
+  requested.conversationId = other.conversationId; gate.resolve(); assert.equal(await pending, undefined);
+  delete f.controls.hook; await table.insert(key, sample(), context()); const saved = await table.get(key, context());
+  const replaceKey = { ...key }; const replacing = table.replace(replaceKey, saved!.etag, sample(), context()); replaceKey.conversationId = other.conversationId;
+  await replacing;
+  assert.ok(f.requests.at(-1)?.url.pathname.includes(`RowKey='${directoryKey(scope, key).row}'`));
 });
 
 test('startup recovers multiple pages of large valid discovery receipts without an oversized response', async t => {
