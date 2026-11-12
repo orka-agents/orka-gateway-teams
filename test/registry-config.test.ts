@@ -10,7 +10,7 @@ import { registryFixture, registryInput } from './support/registry.js';
 
 test('registry requires a distinct valid directory table before runtime ownership', t => {
   const f = registryFixture(t);
-  for (const name of [undefined, '', 'ab', '1table', 'bad-name', 'a'.repeat(64), 'JOURNAL']) {
+  for (const name of [undefined, '', 'ab', '1table', 'bad-name', 'a'.repeat(64), 'JOURNAL', 'Kab', 'ſab', 'abK']) {
     assert.throws(() => parseRegistryConfig({ ...f.env, TABLE_DIRECTORY_TABLE: name }), ConfigurationError);
     if (name !== undefined) assert.throws(() => snapshotRegistry({ ...registryInput(), directoryTable: name }), ConfigurationError);
   }

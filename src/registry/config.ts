@@ -43,7 +43,7 @@ export function snapshotRegistry(input: RegistryConfig): RegistryConfig {
   try {
     const root = auditFields(input, ['schemaVersion', 'directoryTable', 'targets']);
     const directoryTable = root.directoryTable === undefined ? undefined : text(root.directoryTable, 63);
-    if (directoryTable !== undefined && !/^[a-z][a-z0-9]{2,62}$/iu.test(directoryTable)) throw new ConfigurationError();
+    if (directoryTable !== undefined && !/^[A-Za-z][A-Za-z0-9]{2,62}$/u.test(directoryTable)) throw new ConfigurationError();
     if (root.schemaVersion !== 1 || !Array.isArray(root.targets) || !root.targets.length || root.targets.length > 32) throw new ConfigurationError();
     const ids = new Set<string>(); const inboxes = new Set<string>(); const deliveries = new Set<string>(); const tokens = new Set<string>();
     let shared: string | undefined;
