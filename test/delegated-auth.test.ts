@@ -5,6 +5,7 @@ import type https from 'node:https';
 import test from 'node:test';
 import jwt from 'jsonwebtoken';
 import { createDelegatedAuth, WORK_IQ_SCOPE } from '../src/auth/delegated.js';
+import { prepareFederatedAssertion } from '../src/auth/managed-identity.js';
 import { miConfig, imdsFixture } from './support/managed-identity.js';
 import { deferred } from './support/ingress-auth.js';
 
@@ -83,6 +84,22 @@ test('OBO uses fresh federated assertion, access-token assertion and fixed Work 
   const aborted = new AbortController(); aborted.abort();
   await assert.rejects(auth.exchange(raw, { signal: aborted.signal, deadline: performance.now() + 9000 }));
   assert.equal(posts, before); await auth.close();
+});
+
+test('federated assertion preparation freezes caller-owned transports and tenant', async t => {
+  const local = await imdsFixture(t); const input = { ...miConfig }; const dependencies = { imdsRequest: local.imdsRequest };
+  const acquire = prepareFederatedAssertion(input, dependencies);
+  dependencies.imdsRequest = () => { throw new Error('Replaced transport must not run'); };
+  input.tenantId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  assert.equal(typeof await acquire(), 'string'); assert.equal(local.calls(), 1);
+});
+
+test('equivalent GUID tenant casing does not reject a valid delegated token', async () => {
+  const lower = 'abcdef12-abcd-4abc-8abc-abcdefabcdef';
+  const auth = createDelegatedAuth({ ...miConfig, tenantId: lower.toUpperCase() }, {
+    fetchKeys: async () => new Response(JSON.stringify({ keys: [jwk] })) });
+  try { await auth.verify(token({ tid: lower, iss: `https://login.microsoftonline.com/${lower}/v2.0` }), oid, context()); }
+  finally { await auth.close(); }
 });
 
 test('shutdown waits held key retrieval and cancellation never publishes usable verification', async () => {

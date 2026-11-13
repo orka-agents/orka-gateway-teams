@@ -49,13 +49,14 @@ export function prepareFederatedAssertion(input: ManagedIdentityConfig, dependen
   const config = validateBotCredential(input);
   if (config.credentialMode !== 'managed-identity-federation') throw tokenFailure();
   const aca = config.managedIdentityHost === 'azure-container-apps' ? prepareAcaIdentity() : undefined;
+  const { acaRequest, imdsRequest } = dependencies; const tenantId = input.tenantId.toLowerCase();
   return async () => {
     assertManagedIdentityEnvironment(process.env, config.managedIdentityHost); aca?.assertUsable();
     if (!tlsVerificationEnabled()) throw tokenFailure();
-    const response = aca ? await aca.requestBotAssertion(config.managedIdentityClientId, dependencies.acaRequest) :
-      await requestManagedIdentity(config.managedIdentityClientId, dependencies.imdsRequest);
+    const response = aca ? await aca.requestBotAssertion(config.managedIdentityClientId, acaRequest) :
+      await requestManagedIdentity(config.managedIdentityClientId, imdsRequest);
     if (!tlsVerificationEnabled()) throw tokenFailure();
-    return selectedAssertion(response, input.tenantId.toLowerCase(), config.managedIdentityPrincipalId);
+    return selectedAssertion(response, tenantId, config.managedIdentityPrincipalId);
   };
 }
 function selectedAssertion(response: unknown, tenantId: string, principalId: string): string {

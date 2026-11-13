@@ -8,6 +8,7 @@ import { BindingCheckError } from '../src/directory/provision.js';
 import { bindingName } from '../src/directory/codec.js';
 import { openDirectory } from '../src/directory/store.js';
 import { DirectoryError } from '../src/directory/types.js';
+import { AccountError } from '../src/accounts/store.js';
 import type { ConnectionRecord } from '../src/directory/types.js';
 import type { PolicyAdmission } from '../src/policy/admission.js';
 import type { AdmissionContext } from '../src/ingress/server.js';
@@ -20,7 +21,7 @@ import { deferred } from './support/ingress-auth.js';
 
 const context = (activityId: string = randomUUID()): AdmissionContext => ({ activityId, signal: new AbortController().signal,
   deadline: performance.now() + 10000, commandText: 'help', subject: { tenantId: expectedEvent.accountId, objectId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', chatKind: 'personal' } });
-async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<typeof createRegistryAdmission>[0]['delegated']) {
+async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<typeof createRegistryAdmission>[0]['delegated'], chatKind: 'personal' | 'groupChat' = 'personal') {
   const input = registryInput(count); if (count === 32) for (const target of input.targets) target.label = '\\'.repeat(256);
   const config = snapshotRegistry(input); const scope = { appId: config.targets[0]!.config.scope.appId, tenantId: expectedEvent.accountId };
   const memory = memoryDirectoryTable(); const directory = await openDirectory(memory.table, context()); t.after(() => directory.close());
@@ -41,13 +42,15 @@ async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<ty
   sink.bindControlSender({ send: async (route, message) => {
     sent.push({ text: JSON.stringify(message), route }); await sendGate; return outcome;
   } });
-  const event = { ...expectedEvent, text: 'help' }; const route: ReplyRoute = { serviceUrl: 'https://teams-service.example.invalid/', channelId: 'msteams',
-    bot: { id: '28:fixture-app', role: 'bot' }, conversation: { id: event.contextId, tenantId: scope.tenantId, conversationType: 'personal' } };
+  const event = { ...expectedEvent, text: 'help' }; const baseRoute = { serviceUrl: 'https://teams-service.example.invalid/', channelId: 'msteams' as const,
+    bot: { id: '28:fixture-app', role: 'bot' as const } };
+  const route: ReplyRoute = chatKind === 'groupChat' ? { ...baseRoute, conversation: { id: event.contextId, tenantId: scope.tenantId, conversationType: 'groupChat' }, requester: event.sender } :
+    { ...baseRoute, conversation: { id: event.contextId, tenantId: scope.tenantId, conversationType: 'personal' } };
   const run = (text = 'help', id: string = randomUUID(), changed = {}) => sink.admit({ ...event, ...changed, text }, route, { ...context(id), commandText: text,
-    delegatedTenant: true, controlRecipient: { id: '29:fixture-person' } });
-  const provision = async (id = 'primary', conversationId = event.contextId) => {
+    delegatedTenant: true, controlRecipient: { id: '29:fixture-person', ...(chatKind === 'groupChat' ? { isTargeted: true as const } : {}) } });
+  const provision = async (id = 'primary', conversationId = event.contextId, chatKind: 'personal' | 'groupChat' = 'personal') => {
     const target = config.targets.find(t => t.id === id)!;
-    const conn: ConnectionRecord = { schema: 1, kind: 'conn', scope, conversationId, chatKind: 'personal', targetId: id,
+    const conn: ConnectionRecord = { schema: 1, kind: 'conn', scope, conversationId, chatKind, targetId: id,
       identityDigest: target.identityDigest!, bindingName: bindingName(scope, conversationId, target.identityDigest!), state: 'reserved' };
     return directory.markProvisioned(await directory.reserveConnection(conn, context()), evidence(conn), context());
   };
@@ -162,7 +165,8 @@ test('one connection conflict or caller cancellation does not pause healthy chat
     const abort = new AbortController(); const pending = f.sink.admit(f.event, f.route, { ...context(), signal: abort.signal });
     while (!entered) await new Promise(resolve => setImmediate(resolve));
     if (failure === 'cancel') abort.abort(); gate.resolve(); assert.equal((await pending).kind, 'full');
-    const healthy = { ...f.event, contextId: 'healthy-chat' }; const route = { ...f.route, conversation: { ...f.route.conversation, id: healthy.contextId } };
+    const healthy = { ...f.event, contextId: 'healthy-chat' }; const route: ReplyRoute = { serviceUrl: f.route.serviceUrl, channelId: 'msteams', bot: f.route.bot,
+      conversation: { id: healthy.contextId, tenantId: f.scope.tenantId, conversationType: 'personal' } };
     assert.equal((await f.sink.admit(healthy, route, context())).kind, 'accepted');
     assert.equal(await f.sink.preflight('primary', { externalEventId: healthy.externalEventId, attemptId: randomUUID(), attempt: 1, event: healthy }, context().signal), true);
   }
@@ -238,7 +242,7 @@ function delegatedFixture() {
   let linked = false; let claimed = false; let done = false; let exchanges = 0; let verifies = 0; let disconnects = 0;
   let gate: Promise<void> | undefined;
   const accounts = {
-    inspect: async () => ({ generation: 1, linked }),
+    inspect: async (_subject?: unknown, _ctx?: unknown, _forDisconnect?: boolean) => ({ generation: 1, linked }),
     challenge: async () => ch, getChallenge: async (id: string) => id === ch.id ? ch : undefined,
     claim: async () => done ? 'done' as const : claimed ? 'unavailable' as const : (claimed = true, 'claimed' as const),
     complete: async () => { done = true; linked = true; return true; },
@@ -283,4 +287,41 @@ test('SSO wrong sender/conversation/token rejects before effects; duplicate invo
   await f.run('new work'); assert.equal(f.admitted.length, 1);
   await f.run('disconnect'); assert.equal(d.disconnects(), 1); assert.equal(f.admitted.length, 1);
   assert.doesNotMatch(JSON.stringify({ sent: f.sent, logs: f.logs, admitted: f.admitted }), /synthetic-private/);
+});
+
+test('group sign-in rendering preserves the targeted Teams recipient through durable controls', async t => {
+  const d = delegatedFixture(); const f = await fixture(t, 2, d.delegated, 'groupChat');
+  await f.provision('primary', f.event.contextId, 'groupChat');
+  await f.run('work', 'group-signin'); assert.equal(f.admitted.length, 0);
+  const card = JSON.parse(f.sent[0]!.text);
+  assert.deepEqual(card.recipient, { id: '29:fixture-person', isTargeted: true });
+  assert.equal(card.attachments[0].contentType, 'application/vnd.microsoft.card.oauth');
+});
+
+test('overlapping copies of one work activity cannot cross its later sign-in reservation', async t => {
+  const d = delegatedFixture(); const f = await fixture(t, 2, d.delegated); await f.provision();
+  const held = deferred<void>(); let inspecting = false; let inspections = 0;
+  d.delegated.accounts.inspect = async () => { if (++inspections === 1) { inspecting = true; await held.promise; return { generation: 1, linked: false }; }
+    return { generation: 1, linked: true }; };
+  d.delegated.accounts.acquire = async () => ({ kind: 'token', accessToken: 'synthetic-private-workiq' });
+  const first = f.run('work', 'overlap'); while (!inspecting) await new Promise(r => setImmediate(r));
+  try { assert.equal((await f.run('work', 'overlap')).kind, 'full'); assert.equal(f.admitted.length, 0); }
+  finally { held.resolve(); await first; }
+  assert.equal((await f.run('work', 'overlap')).kind, 'duplicate'); assert.equal(f.admitted.length, 0); assert.equal(f.sent.length, 1);
+});
+
+test('disconnect generation inspection uses the reserved account capacity', async t => {
+  const d = delegatedFixture(); const f = await fixture(t, 2, d.delegated); await f.provision();
+  d.delegated.accounts.inspect = async (_s, _c, forDisconnect) => {
+    if (!forDisconnect) throw new AccountError('busy'); return { generation: 1, linked: false };
+  };
+  assert.equal((await f.run('disconnect')).kind, 'accepted'); assert.equal(d.disconnects(), 1);
+});
+
+test('stale ready disconnect does not confirm that a newly linked account is disconnected', async t => {
+  const d = delegatedFixture(); const f = await fixture(t, 2, d.delegated); await f.provision();
+  f.outcome({ kind: 'retryable' }); await f.run('disconnect', 'old-disconnect'); const sends = f.sent.length;
+  d.delegated.accounts.inspect = async () => ({ generation: 2, linked: true });
+  f.outcome({ kind: 'delivered', providerMessageId: 'receipt' });
+  assert.equal((await f.run('disconnect', 'old-disconnect')).kind, 'duplicate'); assert.equal(f.sent.length, sends);
 });

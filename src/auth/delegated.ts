@@ -69,7 +69,7 @@ export function createDelegatedAuth(input: ReceiverConfig, deps: {
     const result = jwt.verify(raw, createPublicKey({ format: 'jwk', key: { kty: 'RSA', n: key.n, e: key.e } }),
       { algorithms: ['RS256'], issuer: `${root}/v2.0`, audience: config.appId });
     if (typeof result === 'string' || result.aud !== config.appId || typeof result.exp !== 'number' || !Number.isFinite(result.exp) ||
-      result.exp * 1000 <= Date.now() || result.tid !== config.tenantId || typeof result.oid !== 'string' ||
+      result.exp * 1000 <= Date.now() || typeof result.tid !== 'string' || result.tid.toLowerCase() !== config.tenantId.toLowerCase() || typeof result.oid !== 'string' ||
       typeof result.scp !== 'string' || !result.scp.split(' ').includes('access_as_user')) throw failure();
     return result;
   }

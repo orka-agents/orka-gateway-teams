@@ -35,21 +35,22 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
   } catch { bad('invalid-input'); }
   const secret = Buffer.from(key); const ownerUUID = randomUUID();
   // SSO assertions are short-lived process memory, not durable account caches.
-  const assertions = new Map<string, { generation: number; assertion: string; assertionExpiresAt: number; timer: ReturnType<typeof setTimeout> }>();
+  const assertions = new Map<string, { generation: number; etag: string; assertion: string; assertionExpiresAt: number; timer: ReturnType<typeof setTimeout> }>();
   const forget = (id: string) => { const prior = assertions.get(id); if (prior) clearTimeout(prior.timer); assertions.delete(id); };
   const durable = ({ assertion: _assertion, assertionExpiresAt: _expiry, ...tokens }: AccountTokens) => tokens;
-  function remember(id: string, generation: number, tokens: AccountTokens) {
+  function remember(id: string, generation: number, etag: string, tokens: AccountTokens) {
     forget(id);
     if (!tokens.assertion || !tokens.assertionExpiresAt || tokens.assertionExpiresAt <= now()) return;
     if (assertions.size >= 1024) forget(assertions.keys().next().value!);
     const assertionExpiresAt = Math.min(tokens.assertionExpiresAt, now() + 10 * minute);
     const timer = setTimeout(() => forget(id), assertionExpiresAt - now()); timer.unref();
-    assertions.set(id, { generation, assertion: tokens.assertion, assertionExpiresAt, timer });
+    assertions.set(id, { generation, etag, assertion: tokens.assertion, assertionExpiresAt, timer });
   }
-  function tokensFor(a: Account): AccountTokens | undefined {
+  function tokensFor(a: Account, etag: string): AccountTokens | undefined {
     const id = accountKey(a.objectId).row; const cached = assertions.get(id);
-    if (cached && (cached.generation !== a.generation || cached.assertionExpiresAt <= now())) forget(id);
-    const live = assertions.get(id); return a.tokens && { ...a.tokens, ...(live ? { assertion: live.assertion, assertionExpiresAt: live.assertionExpiresAt } : {}) };
+    if (cached && cached.assertionExpiresAt <= now()) forget(id);
+    const live = assertions.get(id); return a.tokens && { ...a.tokens, ...(live?.generation === a.generation && live.etag === etag ?
+      { assertion: live.assertion, assertionExpiresAt: live.assertionExpiresAt } : {}) };
   }
   const partition = `accounts_${hash(['teams-accounts-v1', binding.appId, binding.tenantId])}`;
   const accountKey = (objectId: string) => ({ row: `account_${hash([identity(objectId), 'workiq'])}` });
@@ -126,7 +127,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
   });
   let closed = false; let closing: Promise<void> | undefined;
   const work = new Set<Promise<unknown>>();
-  const flights = new Map<string, Promise<{ row: string; etag: string; accessToken: string } | undefined>>();
+  const flights = new Map<string, Promise<{ accessToken: string } | undefined>>();
   function check(ctx: DirectoryContext) {
     if (closed) bad('closed');
     if (!authority.allowed() || ctx.authorizeWrite?.() === false) bad('unready');
@@ -164,10 +165,10 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     return { row, account: a };
   }
   return {
-    inspect(subject: AccountSubject, ctx: DirectoryContext): Promise<{ generation: number; linked: boolean }> {
+    inspect(subject: AccountSubject, ctx: DirectoryContext, forDisconnect = false): Promise<{ generation: number; linked: boolean }> {
       return run(ctx, async c => { const r = await read(accountKey(subject.objectId), c); const v = r?.value as Account | undefined;
         return { generation: v?.generation ?? 0, linked: !!v && usable(v) && !!v.tokens &&
-          (v.tokens.expiresAt > now() || (tokensFor(v)?.assertionExpiresAt ?? 0) > now()) }; });
+          (v.tokens.expiresAt > now() || (tokensFor(v, r!.etag)?.assertionExpiresAt ?? 0) > now()) }; }, forDisconnect);
     },
     challenge(subject: AccountSubject, conversationId: string, activityId: string, ctx: DirectoryContext): Promise<AccountChallenge> {
       return run(ctx, async c => {
@@ -207,24 +208,25 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
           const value = { ...validTokens(tokens) };
           if (value.expiresAt <= now()) return false;
           if (value.assertionExpiresAt !== undefined) value.assertionExpiresAt = Math.min(value.assertionExpiresAt, now() + 10 * minute);
-          await persist(owned.account, { kind: 'account', objectId: ch.objectId, generation: ch.generation, lastUsed: now(), tokens: durable(value) }, c);
-          const after = await current(ch, c); if (!after) return false;
+          const published = await persist(owned.account, { kind: 'account', objectId: ch.objectId, generation: ch.generation, lastUsed: now(), tokens: durable(value) }, c);
+          const after = await current(ch, c); if (!after || after.account.etag !== published.etag) return false;
           await persist(after.row, { ...after.row.value as Challenge, state: 'done' }, c);
           const saved = await current(ch, c, true);
-          if (saved) remember(accountKey(ch.objectId).row, ch.generation, value);
-          return !!saved;
+          if (!saved || saved.account.etag !== published.etag) return false;
+          remember(accountKey(ch.objectId).row, ch.generation, published.etag, value);
+          return true;
         } catch (e) { if (e instanceof AccountError && ['conflict', 'unavailable'].includes(e.code)) return false; throw e; }
       });
     },
     acquire(subject: AccountSubject, generation: number, refresh: (assertion: string) => Promise<AccountTokens>, ctx: DirectoryContext): Promise<{ kind: 'token'; accessToken: string } | { kind: 'signin-required' }> {
       return run(ctx, async c => {
         const k = accountKey(subject.objectId); integer(generation, 0, Number.MAX_SAFE_INTEGER);
-        let flight = flights.get(k.row);
+        const flightKey = `${k.row}:${generation}`; let flight = flights.get(flightKey);
         if (!flight) {
           flight = (async () => {
             const row = await read(k, c); const a = row?.value as Account | undefined;
             if (!row || !a || a.generation !== generation || !usable(a) || !a.tokens) return undefined;
-            let tokens = tokensFor(a)!;
+            let tokens = tokensFor(a, row.etag)!;
             if (tokens.expiresAt <= now()) {
               if (!tokens.assertion || (tokens.assertionExpiresAt ?? 0) <= now()) return undefined;
               try { const renewed = validTokens(await refresh(tokens.assertion)); check(c);
@@ -241,14 +243,15 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
             try {
               // Pin the original ETag through remote renewal, including its failure path.
               const saved = await persist(row, { ...a, tokens: durable(tokens), lastUsed: now() }, c);
-              return { row: k.row, etag: saved.etag, accessToken: tokens.accessToken };
+              const cached = assertions.get(k.row); if (cached?.etag === row.etag) cached.etag = saved.etag;
+              return { accessToken: tokens.accessToken };
             } catch { check(c); return undefined; }
           })();
-          flights.set(k.row, flight); const active = flight;
-          void active.then(() => { if (flights.get(k.row) === active) flights.delete(k.row); }, () => { if (flights.get(k.row) === active) flights.delete(k.row); });
+          flights.set(flightKey, flight); const active = flight;
+          void active.then(() => { if (flights.get(flightKey) === active) flights.delete(flightKey); }, () => { if (flights.get(flightKey) === active) flights.delete(flightKey); });
         }
         const result = await flight; check(c); const latest = await read(k, c);
-        if (!result || latest?.value.kind !== 'account' || latest.value.generation !== generation || latest.etag !== result.etag ||
+        if (!result || latest?.value.kind !== 'account' || latest.value.generation !== generation || latest.value.tokens?.accessToken !== result.accessToken ||
           !usable(latest.value) || (latest.value.tokens?.expiresAt ?? 0) <= now()) return { kind: 'signin-required' };
         return { kind: 'token', accessToken: result.accessToken };
       });

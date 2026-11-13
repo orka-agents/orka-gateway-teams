@@ -37,6 +37,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
   const scope = { appId: options.config.targets[0]!.config.scope.appId, tenantId: options.config.targets[0]!.config.scope.tenantId };
   const slots = new Map(options.slots.map(slot => [slot.target.id, slot]));
   const exchanges = new Map<string, Promise<boolean>>();
+  const activities = new Set<string>();
   const paused = new Map<string, { next: number; pending?: Promise<void> }>();
   const logged = new Map<string, Set<Category>>(); let consumers = 0;
   let sender: Pick<ProviderSender, 'send'> | undefined;
@@ -125,7 +126,10 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     if (route.conversation.conversationType === 'channel') return { kind: 'conflict' };
     if (!supplied || consumers >= 4) return { kind: 'full' };
     const context = { ...supplied }; const ctx: DirectoryContext = { signal: context.signal, deadline: context.deadline, authorizeWrite: () => active(ctx) };
-    if (!active(ctx)) return { kind: 'full' }; consumers++;
+    // Do not queue old work across a later sign-in reservation; retry the overlap.
+    const activityKey = options.delegated ? JSON.stringify([event.contextId, context.activityId]) : undefined;
+    if (!active(ctx) || activityKey !== undefined && activities.has(activityKey)) return { kind: 'full' };
+    consumers++; if (activityKey !== undefined) activities.add(activityKey);
     try {
       const command = context.commandText === undefined ? undefined : parseUseCommand(context.commandText);
       const desired = command === undefined ? undefined : slots.get(command);
@@ -150,17 +154,22 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
       if (denied) reply = { kind: 'no-access' };
       else if (previous && (previous.state !== 'ready' || previous.reply.kind !== 'connected')) {
         if (previous.state === 'ready' && previous.reply.kind === 'disconnected' && options.delegated && context.subject.objectId) {
-          await options.delegated.accounts.disconnect({ objectId: context.subject.objectId }, ctx, previous.reply.generation); assertActive(ctx);
+          const subject = { objectId: context.subject.objectId };
+          await options.delegated.accounts.disconnect(subject, ctx, previous.reply.generation); assertActive(ctx);
+          if ((await options.delegated.accounts.inspect(subject, ctx, true)).linked) return { kind: 'duplicate', replyTarget: '' };
         }
         return await control(previous, eligible, false, ctx, connection);
       }
       else if (options.delegated && context.commandText?.trim() === 'disconnect') {
         if (!context.delegatedTenant || !context.subject.objectId || !context.controlRecipient) return { kind: 'conflict' };
-        const subject = { objectId: context.subject.objectId }; const account = await options.delegated.accounts.inspect(subject, ctx); assertActive(ctx);
+        const subject = { objectId: context.subject.objectId }; const account = await options.delegated.accounts.inspect(subject, ctx, true); assertActive(ctx);
         const saved = await directory.reserveControl(candidate({ kind: 'disconnected', generation: account.generation,
           targetId: eligible[0]!.id, recipient: context.controlRecipient }, connection?.identityDigest ?? null), ctx); assertActive(ctx);
         if (saved.reply.kind !== 'disconnected') return { kind: 'conflict' };
-        if (saved.state === 'ready') await options.delegated.accounts.disconnect(subject, ctx, saved.reply.generation);
+        if (saved.state === 'ready') {
+          await options.delegated.accounts.disconnect(subject, ctx, saved.reply.generation);
+          if ((await options.delegated.accounts.inspect(subject, ctx, true)).linked) return { kind: 'duplicate', replyTarget: '' };
+        }
         return await control(saved, eligible, false, ctx, connection);
       }
       else if (!connection && command === undefined) reply = { kind: 'discovery', targets: eligible.map(t => ({ ...t })) };
@@ -215,7 +224,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
         return { kind: error instanceof DirectoryError && error.code === 'conflict' ? 'conflict' : 'full' };
       }
       throw error;
-    } finally { consumers--; }
+    } finally { consumers--; if (activityKey !== undefined) activities.delete(activityKey); }
   }
   async function exchange(input: unknown, supplied: ExchangeContext): Promise<ExchangeResponse> {
     const d = options.delegated!; let id = '';

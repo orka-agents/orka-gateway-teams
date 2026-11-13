@@ -115,6 +115,31 @@ for (const failure of [false, true]) for (const competitor of ['disconnect', 'co
   });
 }
 
+test('a held old-generation renewal does not block acquire after disconnect and relink', async t => {
+  const f = await setup(t); await f.link(); f.advance(1001);
+  const entered = deferred(); const release = deferred(); let oldSettled = false;
+  const old = f.store.acquire(subject, 1, async () => {
+    entered.resolve(); await release.promise; return { accessToken: 'OLD-RENEWAL', expiresAt: epoch + 60_000 };
+  }, context()).finally(() => { oldSettled = true; });
+  await entered.promise;
+  assert.equal(await f.store.disconnect(subject, context()), 2);
+  await f.link('relinked-during-renewal', { ...tokens(epoch + 1001), accessToken: 'RELINKED', assertion: 'NEW-ASSERTION' });
+  f.advance(1001);
+  const newRelease = deferred(); let newRefreshing = false; let observed: string | undefined;
+  const fresh = f.store.acquire(subject, 2, async assertion => {
+    observed = assertion; newRefreshing = true; await newRelease.promise;
+    return { accessToken: 'NEW-RENEWAL', expiresAt: epoch + 60_000 };
+  }, context());
+  try {
+    await eventually(() => newRefreshing);
+    assert.equal(observed, 'NEW-ASSERTION'); assert.equal(oldSettled, false);
+    newRelease.resolve();
+    assert.deepEqual(await fresh, { kind: 'token', accessToken: 'NEW-RENEWAL' });
+    assert.equal(oldSettled, false);
+  } finally { newRelease.resolve(); release.resolve(); await Promise.allSettled([old, fresh]); }
+  assert.deepEqual(await old, { kind: 'signin-required' });
+});
+
 test('renewal is singleflight, preserves assertion expiry, and invalidation is durable', async t => {
   const f = await setup(t); await f.link(); f.advance(1001); let calls = 0;
   const refresh = async (assertion: string) => { calls++; assert.equal(assertion, 'ASSERTION-SENTINEL');
@@ -183,6 +208,36 @@ test('completion CAS cannot overwrite a newer same-generation completion', async
     { kind: 'token', accessToken: 'WINNER' });
 });
 
+test('late completion cannot pair a newer account token with its stale cached assertion', async t => {
+  const f = await setup(t);
+  const old = await f.store.challenge(subject, 'chat', 'old-publication', context());
+  const winner = await f.store.challenge(subject, 'chat', 'winning-publication', context());
+  assert.equal(await f.store.claim(old, context()), 'claimed');
+  assert.equal(await f.store.claim(winner, context()), 'claimed');
+  const entered = deferred(); const release = deferred(); let published = false; let held = false;
+  f.controls.hook = async r => {
+    if (r.req.method === 'PUT' && String(r.body?.RowKey).startsWith('account_')) published = true;
+    if (published && !held && r.req.method === 'GET' && r.url.pathname.includes("RowKey='challenge_")) {
+      held = true; entered.resolve(); await release.promise;
+    }
+    r.reply();
+  };
+  const pending = f.store.complete(old, { ...tokens(), accessToken: 'OLD', assertion: 'OLD-ASSERTION' }, context());
+  await entered.promise;
+  assert.equal(await f.store.complete(winner, { ...tokens(), accessToken: 'WINNER', assertion: 'WINNING-ASSERTION' }, context()), true);
+  release.resolve(); const completed = await pending;
+  // Usage-only writes must carry the winning assertion's exact revision forward.
+  for (let i = 0; i < 2; i++) assert.deepEqual(await f.store.acquire(subject, 1, async () => {
+    assert.fail('winning token is still valid');
+  }, context()), { kind: 'token', accessToken: 'WINNER' });
+  f.advance(1001); let observed: string | undefined;
+  assert.deepEqual(await f.store.acquire(subject, 1, async assertion => {
+    observed = assertion; return { accessToken: 'RENEWED-WINNER', expiresAt: epoch + 60_000 };
+  }, context()), { kind: 'token', accessToken: 'RENEWED-WINNER' });
+  assert.equal(observed, 'WINNING-ASSERTION');
+  assert.equal(completed, false);
+});
+
 test('cancellation and authority loss fence publication and close drains held refresh', async t => {
   const f = await setup(t); await f.link(); f.advance(1001);
   const entered = deferred(); const release = deferred(); const controller = new AbortController();
@@ -206,6 +261,48 @@ test('each singleflight waiter rechecks its own cancellation before returning a 
   controller.abort(); release.resolve();
   assert.deepEqual(await first, { kind: 'token', accessToken: 'RENEWED' }); await rejected;
 });
+
+test('a later usage-only write does not invalidate an acquire waiting at its final GET', async t => {
+  const f = await setup(t); await f.link();
+  const entered = deferred(); const release = deferred(); let gets = 0;
+  f.controls.hook = async r => {
+    if (r.req.method === 'GET' && r.url.pathname.includes("RowKey='account_") && ++gets === 3) {
+      entered.resolve(); await release.promise;
+    }
+    r.reply();
+  };
+  const noRefresh = async (): Promise<AccountTokens> => { assert.fail('cached access token remains valid'); };
+  const first = f.store.acquire(subject, 1, noRefresh, context()); await entered.promise;
+  try {
+    f.advance(1);
+    assert.deepEqual(await f.store.acquire(subject, 1, noRefresh, context()), { kind: 'token', accessToken: 'ACCESS-SENTINEL' });
+  } finally { release.resolve(); await first; }
+  assert.deepEqual(await first, { kind: 'token', accessToken: 'ACCESS-SENTINEL' });
+});
+
+for (const replacement of ['credentials', 'generation', 'expiry', 'idle'] as const) {
+  test(`final acquire GET refuses concurrent ${replacement} changes`, async t => {
+    const f = await setup(t);
+    await f.link('initial', { ...tokens(), expiresAt: epoch + (replacement === 'idle' ? 90 * 86_400_000 : 1000) });
+    const entered = deferred(); const release = deferred(); let gets = 0;
+    f.controls.hook = async r => {
+      if (r.req.method === 'GET' && r.url.pathname.includes("RowKey='account_") && ++gets === 3) {
+        entered.resolve(); await release.promise;
+      }
+      r.reply();
+    };
+    const pending = f.store.acquire(subject, 1, async () => { assert.fail('initial token remains valid'); }, context());
+    await entered.promise;
+    try {
+      if (replacement === 'credentials') await f.link('replacement', { accessToken: 'REPLACEMENT', expiresAt: epoch + 60_000 });
+      else if (replacement === 'generation') {
+        assert.equal(await f.store.disconnect(subject, context()), 2);
+        await f.link('relinked-same-token', { ...tokens(), expiresAt: epoch + 60_000 });
+      } else f.advance(replacement === 'idle' ? 30 * 86_400_000 : 1001);
+    } finally { release.resolve(); await pending; }
+    assert.deepEqual(await pending, { kind: 'signin-required' });
+  });
+}
 
 test('expiry between account CAS and caller publication does not return an expired token', async t => {
   const f = await setup(t); await f.link(); let advanced = false;
@@ -256,9 +353,14 @@ test('bounded admission leaves disconnect independent of held renewals', async t
   const refresh = async () => { entered.resolve(); await release.promise; return tokens(); };
   const a = f.store.acquire(subject, 1, refresh, context()); await entered.promise;
   const b = f.store.acquire(subject, 1, refresh, context()); const c = f.store.acquire(subject, 1, refresh, context());
-  await assert.rejects(f.store.inspect(subject, context()), /Account storage: busy/u);
-  assert.equal(await f.store.disconnect(subject, context()), 2);
-  release.resolve(); await Promise.all([a, b, c]);
+  const acquired = Promise.all([a, b, c]);
+  try {
+    await assert.rejects(f.store.inspect(subject, context()), /Account storage: busy/u);
+    const before = await f.store.inspect(subject, context(), true);
+    assert.deepEqual(before, { generation: 1, linked: true });
+    assert.equal(await f.store.disconnect(subject, context(), before.generation), 2);
+  } finally { release.resolve(); await acquired; }
+  assert.deepEqual(await acquired, [{ kind: 'signin-required' }, { kind: 'signin-required' }, { kind: 'signin-required' }]);
   await eventually(() => f.stats.sockets === f.stats.socketCloses);
 });
 
