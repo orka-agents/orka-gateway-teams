@@ -11,7 +11,7 @@ import type { DeliveryJournalPort } from '../src/delivery/types.js';
 import type { ReplyRoute } from '../src/ingress/types.js';
 import { createDeliveryDispatcher } from '../src/outbound/dispatcher.js';
 import type { DispatcherOptions } from '../src/outbound/types.js';
-import type { OutgoingTeamsMessage } from '../src/teams/format.js';
+import type { ProviderMessage as OutgoingTeamsMessage } from '../src/outbound/types.js';
 import { finalDelivery } from './fixtures/outgoing.js';
 import { deferred } from './support/ingress-auth.js';
 import { tableBinding, tableService } from './support/table-service.js';

@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { identity } from '../delivery/identity.js';
+import type { ControlRecipient } from '../outbound/types.js';
 import { App } from '@microsoft/teams.apps';
 import { PUBLIC } from '@microsoft/teams.api';
 import type { Activity, CloudEnvironment, TokenCredentials } from '@microsoft/teams.api';
@@ -28,9 +30,12 @@ import type { EventEnvelope } from '../protocol/types.js';
 export interface ReceiverDependencies { sdkCloud?: CloudEnvironment; fetchKeys?: (url: string, options: RequestInit) => Promise<Response>;
   botToken?: Token; providerPost?: ProviderPost; providerGet?: ProviderGet; certificateNetwork?: INetworkModule; managedIdentity?: ManagedIdentityDependencies }
 export interface AdmissionContext { readonly signal: AbortSignal; readonly deadline: number; readonly subject: PolicySubject;
-  readonly activityId: string; readonly commandText?: string }
+  readonly activityId: string; readonly commandText?: string; readonly delegatedTenant?: boolean; readonly controlRecipient?: ControlRecipient }
+export interface ExchangeContext { readonly signal: AbortSignal; readonly deadline: number; readonly subject: PolicySubject }
+export interface ExchangeResponse { status: 200 | 412; body: { id: string; connectionName: string; failureDetail?: 'signin-required' } }
 export interface AdmissionSink { readonly scope: IngressStore['scope'];
   bindControlSender?(sender: Pick<ProviderSender, 'send'>): void;
+  exchange?(activity: unknown, context: ExchangeContext): Promise<ExchangeResponse>;
   admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>, context?: AdmissionContext): AdmissionResult | Promise<AdmissionResult> }
 export interface ReceiverOutbound { authority?: import('../storage/table/types.js').LeaseAuthority; interimDelivery?: boolean; meetingDrafts?: boolean; journal: DeliveryJournalPort; correlation?: SessionCorrelationPort; getRoute: (key: string) => ReplyRoute | undefined | Promise<ReplyRoute | undefined> }
 export type ReceiverOutbounds = ReceiverOutbound | { targets: readonly (ReceiverOutbound & { id: string })[] };
@@ -104,6 +109,15 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
       claims.push(input.channelData.tenant.id);
     }
     if (!claims.length || claims.some((value) => value !== config.tenantId)) return { status: 403 };
+    if (input.type === 'invoke' && input.name === 'signin/tokenExchange' && sink.exchange) {
+      const subject = readPolicySubject(input, config.tenantId);
+      if (!record(input.channelData) || !record(input.channelData.tenant) || input.channelData.tenant.id !== config.tenantId ||
+          !subject.objectId || !controlRecipient(input)) return { status: 403 };
+      try {
+        const result = await sink.exchange(input, { ...adapter.requestContext, subject });
+        return { status: result.status, body: { invokeResponse: result.body } };
+      } catch { return { status: 412, body: { invokeResponse: { id: '', connectionName: '', failureDetail: 'signin-required' } } }; }
+    }
     const converted = convertActivity(input as unknown as Activity, { tenantId: config.tenantId, replyTarget: randomUUID() });
     if (converted.kind === 'invalid') return { status: 400 };
     if (converted.kind === 'ignored') return { status: 200, body: { status: 'ignored' } };
@@ -120,6 +134,8 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
         kind === 'personal' && normalized.kind === 'ignored' ? converted.event.text : undefined;
       const result = await sink.admit(converted.event, route, Object.freeze({ ...adapter.requestContext,
         subject: readPolicySubject(input, tenantId), activityId: input.id as string,
+        delegatedTenant: record(input.channelData) && record(input.channelData.tenant) && input.channelData.tenant.id === tenantId,
+        ...(controlRecipient(input) ? { controlRecipient: controlRecipient(input)! } : {}),
         ...(commandText === undefined ? {} : { commandText }) }));
       if (result.kind === 'full') return { status: 503 };
       if (result.kind === 'conflict') return { status: 409 };
@@ -180,6 +196,11 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
   }
 }
 
+function controlRecipient(input: Record<string, unknown>): ControlRecipient | undefined {
+  try { if (!record(input.from) || !record(input.conversation)) return undefined;
+    return { id: identity(input.from.id), ...(input.conversation.conversationType === 'groupChat' ? { isTargeted: true as const } : {}) };
+  } catch { return undefined; }
+}
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }

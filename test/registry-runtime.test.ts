@@ -23,7 +23,10 @@ import { runtimeIdentity } from './support/table-runtime.js';
 import { deferred, eventually, syntheticToken, tableService } from './support/table-service.js';
 import { directoryFixture } from './support/directory-table.js';
 import { encodeEntity } from '../src/directory/codec.js';
-import { randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import jwt from 'jsonwebtoken';
+import { miConfig, entraNetwork } from './support/managed-identity.js';
+import { WORK_IQ_SCOPE } from '../src/auth/delegated.js';
 import type { ControlRecord } from '../src/directory/types.js';
 import { TestClock } from './support/table-v3.js';
 import { payload } from './support/table-ingress-store.js';
@@ -38,7 +41,7 @@ async function fixture(t: test.TestContext, initialize = true, count = 2, expiry
     const storeId = kind === 'ingress' ? target.config.storage.ingressStoreId : target.config.storage.deliveryStoreId!;
     domains.push({ target: target.id, kind, storeId, service: await tableService(t, kind, 3, target.config.scope, httpsFixture, storeId) });
   }
-  const directory = await directoryFixture(t, syntheticToken);
+  const directory = await directoryFixture(t, syntheticToken); const accounts = await directoryFixture(t, syntheticToken);
   const native = https.request; let contract = true;
   const bindings = new Map<string, Map<string, Record<string, any>>>(); let kubernetesGate: Promise<void> | undefined; let kubernetesCalls = 0;
   for (const target of config.targets) {
@@ -76,6 +79,7 @@ async function fixture(t: test.TestContext, initialize = true, count = 2, expiry
   const request = ((url: URL, options: https.RequestOptions, callback: Parameters<typeof https.request>[2]) => {
     contract &&= url.origin === 'https://example123.table.core.windows.net' && options.rejectUnauthorized === true;
     if (url.pathname.startsWith('/Directory')) return directory.request(url, options, callback!);
+    if (url.pathname.startsWith('/Accounts')) return accounts.request(url, options, callback!);
     return native(new URL(url.pathname + url.search, router.baseUrl), { ...options, ca: router.ca, servername: 'localhost' }, callback);
   }) as typeof https.request;
   const auth = await authFixture(t); const deps = { ...auth.dependencies, tableRequest: request, kubernetesRequest, storageIdentity: { request: identity.request },
@@ -86,7 +90,7 @@ async function fixture(t: test.TestContext, initialize = true, count = 2, expiry
       ...(kind === 'ingress' ? { audit: c.storage.audit, maxIndexBytes: c.storage.maxIndexBytes } : {}) } as never, { tableRequest: request, storageIdentity: deps.storageIdentity });
   }
   t.after(() => { assert.equal(contract, true); assert.equal(domains.some(d => d.service.stats.violation), false); });
-  return { config, deps, domains, auth, identity, directory, bindings, kubernetesCalls: () => kubernetesCalls,
+  return { config, deps, domains, auth, identity, directory, accounts, files, bindings, kubernetesCalls: () => kubernetesCalls,
     holdKubernetes: (gate: Promise<void> | undefined) => { kubernetesGate = gate; } };
 }
 
@@ -437,4 +441,62 @@ test('all-target shutdown retains every lease until held shared bot-token work a
   assert.equal(stopped, false); assert.deepEqual(f.domains.map(d => d.service.rows.get('M')!.Owner), owners);
   token.resolve(); await sending; await stopping; await runtime.done; assert.equal(posts, 0);
   assert.ok(f.domains.every(d => d.service.rows.get('M')!.Owner === ''));
+});
+
+test('native registry SSO stores only ciphertext, authenticates invokes, survives restart and disconnects without replaying old work', async t => {
+  const f = await fixture(t); const graph = await policyFixture(t, f); const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const oid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'; const keyFile = join(f.files, 'account-key');
+  writeFileSync(keyFile, 'ab'.repeat(32), { mode: 0o600 });
+  for (const target of f.config.targets) target.config.receiver = { ...miConfig, managedIdentityHost: 'azure-container-apps' };
+  const config = { ...f.config, sso: { accountTable: 'Accounts', keyFile, apiUri: 'api://gateway', connectionName: 'workiq' } };
+  let obo = 0; const workiq = await httpsFixture(t, async (req, res) => {
+    let body = ''; for await (const chunk of req) body += chunk;
+    const form = new URLSearchParams(body); assert.equal(form.get('scope'), WORK_IQ_SCOPE); assert.equal(form.has('client_secret'), false);
+    assert.equal(form.get('requested_token_use'), 'on_behalf_of'); obo++;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ access_token: 'synthetic-private-workiq', expires_in: 3600, token_type: 'Bearer', scope: WORK_IQ_SCOPE }));
+  });
+  const native = https.request; const sent: { url: string; body: string }[] = []; const events: string[] = [];
+  const upstream = await httpsFixture(t, async (req, res) => { let text = ''; for await (const chunk of req) text += chunk;
+    events.push(text); const event = JSON.parse(text); res.writeHead(202); res.end(JSON.stringify({ status: 'accepted', eventId: event.externalEventId, state: 'Queued' })); });
+  t.mock.method(https, 'request', (url: URL, options: https.RequestOptions, callback: any) => url.hostname === 'orka.example.invalid' ?
+    native(new URL(url.pathname, upstream.baseUrl), { ...options, ca: upstream.ca, servername: 'localhost' }, callback) : native(url, options, callback));
+  syncBuiltinESMExports(); t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const { botToken: _notUsed, ...base } = graph.deps;
+  const deps: RegistryRuntimeDependencies = { ...base,
+    managedIdentity: { acaRequest: f.identity.request, entraNetwork: entraNetwork() },
+    delegatedKeys: async () => new Response(JSON.stringify({ keys: [{ ...pair.publicKey.export({ format: 'jwk' }), kid: 'sso', alg: 'RS256', use: 'sig' }] })),
+    delegatedRequest: ((url: URL, options: https.RequestOptions, cb: any) => {
+      assert.equal(url.href, `https://login.microsoftonline.com/${miConfig.tenantId}/oauth2/v2.0/token`);
+      return native(new URL('/token', workiq.baseUrl), { ...options, ca: workiq.ca, servername: 'localhost' }, cb);
+    }) as typeof https.request,
+    providerPost: async (url, bytes) => { sent.push({ url, body: bytes.toString() }); return { status: 201, data: Buffer.from('{"id":"sso-receipt"}') }; } };
+  let runtime = await startRegistryRuntime(config, deps); t.after(() => runtime.stop().catch(() => {}));
+  const message = activity(); message.from.aadObjectId = oid;
+  message.id = 'connect-sso'; message.text = 'use primary'; assert.equal((await post(runtime.port, f.auth.token(), message)).status, 200);
+  message.id = 'work-sso'; message.text = 'do work'; assert.equal((await post(runtime.port, f.auth.token(), message)).status, 200);
+  assert.equal(events.length, 0); assert.equal(obo, 0); const card = JSON.parse(sent.at(-1)!.body);
+  assert.equal(card.attachments[0].contentType, 'application/vnd.microsoft.card.oauth');
+  const id = card.attachments[0].content.tokenExchangeResource.id;
+  const token = (objectId: string) => jwt.sign({ tid: miConfig.tenantId, oid: objectId, scp: 'access_as_user', aud: miConfig.appId,
+    iss: `https://login.microsoftonline.com/${miConfig.tenantId}/v2.0`, exp: Math.floor(Date.now() / 1000) + 3600 }, pair.privateKey, { algorithm: 'RS256', keyid: 'sso' });
+  const invoke = { ...message, type: 'invoke', name: 'signin/tokenExchange', value: { id, connectionName: 'workiq', token: token(miConfig.appId) } };
+  const before = f.accounts.rows.size; let result = await post(runtime.port, f.auth.token(), invoke);
+  assert.equal(result.status, 412); assert.equal(obo, 0); assert.equal(f.accounts.rows.size, before);
+  invoke.value.token = token(oid); result = await post(runtime.port, f.auth.token(), invoke);
+  assert.equal(result.status, 200); assert.deepEqual(await result.json(), { id, connectionName: 'workiq' });
+  assert.equal(obo, 1); assert.equal(events.length, 0); assert.match(sent.at(-1)!.body, /Send your request again/);
+  await post(runtime.port, f.auth.token(), invoke); assert.equal(obo, 1);
+  const notifications = sent.length; await post(runtime.port, f.auth.token(), message); assert.equal(sent.length, notifications); assert.equal(events.length, 0);
+  await runtime.stop(); await runtime.done; runtime = await startRegistryRuntime(config, deps);
+  await post(runtime.port, f.auth.token(), invoke); assert.equal(obo, 1); assert.equal(sent.length, notifications);
+  message.id = 'fresh-work'; await post(runtime.port, f.auth.token(), message); await eventually(() => events.length === 1);
+  message.id = 'disconnect-sso'; message.text = 'disconnect'; await post(runtime.port, f.auth.token(), message);
+  assert.match(sent.at(-1)!.body, /disconnected/);
+  message.id = 'after-disconnect'; message.text = 'do more work'; await post(runtime.port, f.auth.token(), message);
+  assert.match(sent.at(-1)!.body, /card.oauth/); assert.equal(events.length, 1);
+  const external = JSON.stringify({ sent, events, directory: [...f.directory.rows.values()], inbox: f.domains.map(d => [...d.service.rows.values()]) });
+  assert.equal(external.includes('synthetic-private-workiq'), false); assert.equal(external.includes(invoke.value.token), false);
+  for (const row of f.accounts.rows.values()) { const payload = Buffer.from(String(row.Payload), 'base64').toString();
+    assert.equal(payload.includes('synthetic-private-workiq'), false); assert.equal(payload.includes(invoke.value.token), false); }
 });

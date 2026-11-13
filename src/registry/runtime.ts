@@ -1,3 +1,7 @@
+import { createAccountStore } from '../accounts/store.js';
+import type { AccountStore } from '../accounts/store.js';
+import { createDelegatedAuth } from '../auth/delegated.js';
+import type { FetchKeys } from '../ingress/auth.js';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type https from 'node:https';
 import type { ImdsRequest } from '../auth/imds.js';
@@ -26,16 +30,21 @@ import type { OutboundServer } from '../outbound/server.js';
 import { startTargetOutboundServer } from '../outbound/server.js';
 import type { LeaseAuthority } from '../storage/table/types.js';
 import type { RegistryConfig } from './config.js';
-import { snapshotRegistry } from './config.js';
+import { readSigninKey, snapshotRegistry } from './config.js';
 
 export interface RegistryRuntimeDependencies extends IngressRuntimeDependencies {
   graphIdentityRequest?: ImdsRequest; graphRequest?: typeof https.request; kubernetesRequest?: typeof https.request;
+  delegatedRequest?: typeof https.request; delegatedKeys?: FetchKeys;
 }
 export async function startRegistryRuntime(input: RegistryConfig, dependencies: RegistryRuntimeDependencies = {}, signal?: AbortSignal): Promise<IngressRuntime> {
   const config = snapshotRegistry(input); const deps = { ...dependencies };
   if (!config.directoryTable || !config.groupPolicyFile || !tlsVerificationEnabled() || deps.openIngressStore !== undefined || deps.openDeliveryJournal !== undefined) throw new ConfigurationError();
   if (signal?.aborted) throw new Error('Registry startup cancelled');
-  const shared = config.targets[0]!; const policy = readGroupPolicy(config.groupPolicyFile, config);
+  const shared = config.targets[0]!; const key = config.sso ? readSigninKey(config.sso.keyFile) : undefined;
+  const policy = readGroupPolicy(config.groupPolicyFile, config);
+  const delegatedAuth = config.sso ? createDelegatedAuth(shared.config.receiver, {
+    ...(deps.managedIdentity ? { managedIdentity: deps.managedIdentity } : {}), ...(deps.delegatedRequest ? { request: deps.delegatedRequest } : {}),
+    ...(deps.delegatedKeys ? { fetchKeys: deps.delegatedKeys } : {}) }) : undefined;
   const readers = config.targets.map(t => createKubernetesReader(t, deps.kubernetesRequest === undefined ? {} : { request: deps.kubernetesRequest }));
   const authorizer = createGroupAuthorizer(policy, createGraphMembershipClient(createGraphIdentity(policy.graphIdentityClientId,
     deps.graphIdentityRequest === undefined ? {} : { request: deps.graphIdentityRequest }), deps.graphRequest === undefined ? {} : { request: deps.graphRequest }));
@@ -44,7 +53,7 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   const subscriptions: (() => void)[] = []; const handles: { open(): Promise<unknown>; close(): Promise<unknown> }[] = [];
   let ready = false; let fatal = false; let opening = true; let receiver: Receiver | undefined; let api: OutboundServer | undefined;
   let stopRuntime: (() => Promise<void>) | undefined; let closing: Promise<void> | undefined;
-  let directory: Directory | undefined; let directoryTable: DirectoryTable | undefined;
+  let directory: Directory | undefined; let directoryTable: DirectoryTable | undefined; let accounts: AccountStore | undefined;
   let admission: ReturnType<typeof createRegistryAdmission> | undefined;
   const authority: LeaseAuthority = {
     allowed: () => !loss.signal.aborted && !abort.signal.aborted && authorities.every(a => a.allowed()),
@@ -52,13 +61,14 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   };
   const clients = config.targets.map(t => createOrkaClient(t.config.scope, { bearerToken: t.config.bearerToken, authority,
     ...(t.config.caFile === undefined ? {} : { ca: readCaBundle(t.config.caFile) }) }));
-  // One caller per serialized V3 domain plus the directory's four native slots.
-  const provider = prepareStorageIdentity(shared.config.storage.identity).createProvider(deps.storageIdentity, Math.max(32, config.targets.length * 2 + 4));
+  // Each ciphertext transport has its own four native slots; all borrow this identity.
+  const provider = prepareStorageIdentity(shared.config.storage.identity).createProvider(deps.storageIdentity, Math.max(32, config.targets.length * 2 + (config.sso ? 8 : 4)));
   const unsubscribe = () => { for (const remove of subscriptions.splice(0)) remove(); };
   const closeStores = async () => {
     // Handler/relay work drains first, then all native policy/provisioner work,
     // then directory requests, while every V3 lease and token source remain owned.
     const results: PromiseSettledResult<unknown>[] = await Promise.allSettled([authorizer.close(), ...readers.map(r => r.close())]);
+    results.push(...await Promise.allSettled([delegatedAuth?.close(), accounts?.close()])); key?.fill(0);
     results.push(...await Promise.allSettled([Promise.resolve().then(() => directory?.close() ?? directoryTable?.close())]));
     unsubscribe(); results.push(...await Promise.allSettled(handles.map(h => Promise.resolve().then(() => h.close()))));
     results.push(...await Promise.allSettled([Promise.resolve().then(() => provider.close())])); return results;
@@ -104,7 +114,13 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
     directory = await openDirectory(directoryTable, { signal: abort.signal,
       deadline: performance.now() + shared.config.storage.audit.maxDurationMs }, authority);
     assertStarting();
+    if (config.sso) {
+      accounts = createAccountStore({ account: shared.config.storage.account, table: config.sso.accountTable,
+        appId: shared.config.scope.appId, tenantId: shared.config.scope.tenantId }, key!,
+      { token: provider.token, ...(deps.tableRequest ? { request: deps.tableRequest } : {}) }, authority); key!.fill(0);
+    }
     admission = createRegistryAdmission({ config, directory, authority, active, authorizer,
+      ...(accounts && delegatedAuth && config.sso ? { delegated: { accounts, auth: delegatedAuth, apiUri: config.sso.apiUri, connectionName: config.sso.connectionName } } : {}),
       slots: slots.map((s, i) => ({ ...s, provisioner: createBindingProvisioner(s.target, readers[i]!) })),
       log: (category, id) => { process.stderr.write(`teams-ingress: ${category}${id ? ` (${id})` : ''}\n`); } });
     receiver = await prepared.start(admission,
