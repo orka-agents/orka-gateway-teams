@@ -14,10 +14,11 @@ export interface DeliveryContext { signal?: AbortSignal; deadline?: number; auth
 export type ProviderResult = { kind: 'delivered'; providerMessageId: string } | { kind: 'retryable' | 'unknown' };
 export type ProviderRoute = Pick<ReplyRoute, 'serviceUrl' | 'conversation'>;
 export type ControlRecipient = { id: string; isTargeted?: true };
+type SigninButton = { type: 'signin'; title: string; value: string };
 export type ProviderMessage = OutgoingTeamsMessage | { type: 'message'; replyToId?: string; recipient?: ControlRecipient; attachments: [{
   contentType: 'application/vnd.microsoft.card.oauth'; content: { text: string; connectionName: string;
-    tokenExchangeResource: { id: string; uri: string; providerId: 'Azure Active Directory v2' }; buttons: [] };
-}] };
+    tokenExchangeResource: { id: string; uri: string; providerId: 'Azure Active Directory v2' }; buttons: [] | [SigninButton] };
+}] | [{ contentType: 'application/vnd.microsoft.card.signin'; content: { text: string; buttons: [SigninButton] } }] };
 export interface ProviderSender {
   getMembers?(route: Readonly<ReplyRoute>, context?: DeliveryContext): Promise<MembersResult>;
   send(route: Readonly<ProviderRoute>, message: Readonly<ProviderMessage>, context?: DeliveryContext): Promise<ProviderResult>;

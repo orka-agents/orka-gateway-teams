@@ -9,6 +9,7 @@ import { bindingName } from '../src/directory/codec.js';
 import { openDirectory } from '../src/directory/store.js';
 import { DirectoryError } from '../src/directory/types.js';
 import { AccountError } from '../src/accounts/store.js';
+import type { AccountChallenge, BrowserAttempt } from '../src/accounts/store.js';
 import type { ConnectionRecord } from '../src/directory/types.js';
 import type { PolicyAdmission } from '../src/policy/admission.js';
 import type { AdmissionContext } from '../src/ingress/server.js';
@@ -240,8 +241,15 @@ function delegatedFixture() {
   const ch = { id: 'opaque-challenge', objectId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', conversationId: expectedEvent.contextId,
     activityId: 'work', generation: 1, expiresAt: Date.now() + 600000, state: 'open' as const };
   let linked = false; let claimed = false; let done = false; let exchanges = 0; let verifies = 0; let disconnects = 0;
-  let gate: Promise<void> | undefined;
+  let gate: Promise<void> | undefined; let consumed = false;
+  const attempt = { challenge: ch, state: 'synthetic-private-state', nonce: 'synthetic-private-nonce', verifier: 'synthetic-private-verifier' };
   const accounts = {
+    prepareBrowser: async (_ch: AccountChallenge) => consumed || done ? undefined : attempt,
+    claimBrowser: async (state: string) => {
+      if (consumed || state !== attempt.state) return undefined;
+      consumed = true; return { ...attempt, challenge: { ...ch, method: 'browser' as const } };
+    },
+    published: async (_ch: AccountChallenge) => done && linked,
     inspect: async (_subject?: unknown, _ctx?: unknown, _forDisconnect?: boolean) => ({ generation: 1, linked }),
     challenge: async () => ch, getChallenge: async (id: string) => id === ch.id ? ch : undefined,
     claim: async () => done ? 'done' as const : claimed ? 'unavailable' as const : (claimed = true, 'claimed' as const),
@@ -249,13 +257,119 @@ function delegatedFixture() {
     acquire: async () => linked ? { kind: 'token' as const, accessToken: 'synthetic-private-workiq' } : { kind: 'signin-required' as const },
     disconnect: async () => { disconnects++; linked = false; return 2; }, close: async () => {},
   };
-  const auth = { verify: async (raw: string, oid: string) => { verifies++; if (raw !== 'synthetic-private-assertion' || oid !== ch.objectId) throw new Error('Rejected');
+  const auth = {
+    authorizeUrl: (_attempt: BrowserAttempt, redirectUri: string) => 'https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize?' + new URLSearchParams({ redirect_uri: redirectUri }),
+    redeemCode: async (code: string) => { if (code !== 'synthetic-private-code') throw new Error('Rejected');
+      return { accessToken: 'synthetic-private-workiq', expiresAt: Date.now() + 60000, refreshToken: 'synthetic-private-refresh' }; },
+    refresh: async () => ({ accessToken: 'synthetic-private-workiq', expiresAt: Date.now() + 60000 }),
+    verify: async (raw: string, oid: string) => { verifies++; if (raw !== 'synthetic-private-assertion' || oid !== ch.objectId) throw new Error('Rejected');
     return { assertionExpiresAt: Date.now() + 600000 }; },
     exchange: async () => { exchanges++; await gate; return { accessToken: 'synthetic-private-workiq', expiresAt: Date.now() + 60000 }; }, close: async () => {} };
   return { delegated: { accounts, auth, apiUri: 'api://gateway', connectionName: 'workiq' }, ch,
     exchanges: () => exchanges, verifies: () => verifies, disconnects: () => disconnects,
     gate: (value: Promise<void>) => { gate = value; } };
 }
+
+for (const failure of ['mixed-case', 'partial-false', 'partial-throw', 'new-generation'] as const)
+  test(`SSO completion reconciles ${failure} without weakening the account generation fence`, async t => {
+    const d = delegatedFixture(); const f = await fixture(t, 2, d.delegated); await f.provision();
+    const complete = d.delegated.accounts.complete;
+    let claims = 0;
+    if (failure !== 'mixed-case') d.delegated.accounts.claim = async () => ++claims === 1 ? 'claimed' : 'unavailable';
+    if (failure !== 'mixed-case') d.delegated.accounts.complete = async () => {
+      await complete(); if (failure === 'partial-throw') throw new AccountError('unavailable'); return false;
+    };
+    if (failure === 'new-generation') {
+      d.delegated.accounts.inspect = async () => ({ generation: 2, linked: true });
+      d.delegated.accounts.published = async () => false;
+    }
+    const invoke = { channelData: { tenant: { id: f.scope.tenantId } }, conversation: f.route.conversation,
+      from: { id: '29:fixture-person', aadObjectId: failure === 'mixed-case' ? d.ch.objectId.toUpperCase() : d.ch.objectId },
+      recipient: f.route.bot, serviceUrl: f.route.serviceUrl,
+      value: { id: d.ch.id, connectionName: 'workiq', token: 'synthetic-private-assertion' } };
+    assert.equal((await f.sink.exchange!(invoke, context())).status, failure === 'new-generation' ? 412 : 200);
+    assert.equal(d.exchanges(), 1); assert.equal(f.admitted.length, 0);
+    if (failure !== 'new-generation') {
+      assert.equal((await f.sink.exchange!(invoke, context())).status, 200);
+      assert.equal(d.exchanges(), 1);
+      await f.run('new work'); assert.equal(f.admitted.length, 1);
+    }
+  });
+
+test('configured fallback is direct in personal chat and retains sender SSO in group chat', async t => {
+  for (const kind of ['personal', 'groupChat'] as const) {
+    const d = delegatedFixture(); const f = await fixture(t, 2, { ...d.delegated, publicOrigin: 'https://signin.example.invalid' }, kind);
+    await f.provision('primary', f.event.contextId, kind); await f.run('work', 'work');
+    const attachment = JSON.parse(f.sent[0]!.text).attachments[0];
+    assert.equal(attachment.contentType, 'application/vnd.microsoft.card.' + (kind === 'personal' ? 'signin' : 'oauth'));
+    assert.equal(attachment.content.buttons[0].value, 'https://signin.example.invalid/signin?challenge=' + d.ch.id);
+    assert.equal(!!attachment.content.tokenExchangeResource, kind === 'groupChat');
+    assert.doesNotMatch(f.sent[0]!.text, /verifier|nonce|synthetic-private/);
+  }
+});
+
+test('browser completion correlates the saved sign-in control and asks only for resend', async t => {
+  const d = delegatedFixture(); const f = await fixture(t, 2, { ...d.delegated, publicOrigin: 'https://signin.example.invalid' });
+  await f.provision(); await f.run('work', 'work');
+  const browser = f.sink.browser!;
+  assert.notEqual(browser, undefined);
+  const url = new URL((await browser.begin(d.ch.id, context()))!);
+  assert.equal(url.searchParams.get('redirect_uri'), 'https://signin.example.invalid/oauth/callback');
+  assert.equal(await browser.callback(new URLSearchParams({ state: 'synthetic-private-state', code: 'synthetic-private-code' }), context()), true);
+  assert.equal(await browser.callback(new URLSearchParams({ state: 'synthetic-private-state', code: 'synthetic-private-code' }), context()), false);
+  assert.equal(await browser.begin(d.ch.id, context()), undefined);
+  assert.equal(f.admitted.length, 0); assert.equal(f.sent.length, 2);
+  assert.match(f.sent[1]!.text, /[Ss]end your request again/);
+  assert.doesNotMatch(JSON.stringify({ sent: f.sent, logs: f.logs }), /synthetic-private/);
+  await f.run('new work'); assert.equal(f.admitted.length, 1);
+});
+
+test('browser wrong account, OAuth error, missing original control and changed policy never link or replay work', async t => {
+  for (const reason of ['account', 'error', 'control', 'policy', 'connection'] as const) {
+    const d = delegatedFixture(); const f = await fixture(t, 2, { ...d.delegated, publicOrigin: 'https://signin.example.invalid' });
+    await f.provision(); await f.run('work', 'work');
+    assert.notEqual(f.sink.browser, undefined);
+    if (reason === 'control') f.directory.getControl = async () => undefined;
+    if (reason === 'policy') f.policy({ kind: 'no-access', text: '' });
+    if (reason === 'connection') f.directory.getConnection = async () => undefined;
+    const form = new URLSearchParams({ state: 'synthetic-private-state', ...(reason === 'error' ? { error: 'consent_required' } :
+      { code: reason === 'account' ? 'wrong-account' : 'synthetic-private-code' }) });
+    assert.equal(await f.sink.browser!.callback(form, context()), false);
+    assert.equal((await d.delegated.accounts.inspect()).linked, false); assert.equal(f.admitted.length, 0);
+    assert.equal(await f.sink.browser!.callback(new URLSearchParams({ state: 'synthetic-private-state', code: 'synthetic-private-code' }), context()), false);
+  }
+});
+
+test('an old refresh-capable account cannot masquerade as this challenge publication', async t => {
+  for (const flow of ['browser', 'sso-retry'] as const) {
+    const d = delegatedFixture(); const f = await fixture(t, 2, { ...d.delegated, publicOrigin: 'https://signin.example.invalid' });
+    await f.provision(); await f.run('work', 'work');
+    d.delegated.accounts.inspect = async () => ({ generation: 1, linked: true });
+    d.delegated.accounts.complete = async () => false;
+    if (flow === 'browser') {
+      assert.equal(await f.sink.browser!.callback(new URLSearchParams({ state: 'synthetic-private-state', code: 'synthetic-private-code' }), context()), false);
+    } else {
+      d.delegated.accounts.claim = async () => 'unavailable';
+      const invoke = { channelData: { tenant: { id: f.scope.tenantId } }, conversation: f.route.conversation,
+        from: { id: '29:fixture-person', aadObjectId: d.ch.objectId }, recipient: f.route.bot, serviceUrl: f.route.serviceUrl,
+        value: { id: d.ch.id, connectionName: 'workiq', token: 'synthetic-private-assertion' } };
+      assert.equal((await f.sink.exchange!(invoke, context())).status, 412); assert.equal(d.exchanges(), 0);
+    }
+    assert.equal(f.sent.length, 1); assert.equal(f.admitted.length, 0);
+  }
+});
+
+test('browser capacity reserves Bot admission and late shutdown cannot publish a link', async t => {
+  const d = delegatedFixture(); const f = await fixture(t, 2, { ...d.delegated, publicOrigin: 'https://signin.example.invalid' });
+  await f.provision(); await f.run('work', 'work'); assert.notEqual(f.sink.browser, undefined);
+  const held = deferred<void>(); let entered = false;
+  d.delegated.accounts.prepareBrowser = async () => { entered = true; await held.promise; return undefined; };
+  const pending = f.sink.browser!.begin(d.ch.id, context());
+  while (!entered) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(await f.sink.browser!.begin(d.ch.id, context()), undefined);
+  assert.equal((await f.run('help')).kind, 'accepted'); f.revoke(); held.resolve();
+  assert.equal(await pending, undefined);
+});
 
 test('SSO is not needed for discovery/use; work reserves one sign-in card, never an old event', async t => {
   const d = delegatedFixture(); const f = await fixture(t, 2, d.delegated);

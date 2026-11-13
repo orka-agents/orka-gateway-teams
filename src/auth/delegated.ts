@@ -1,4 +1,4 @@
-import { createPublicKey } from 'node:crypto';
+import { createHash, createPublicKey } from 'node:crypto';
 import https from 'node:https';
 import type { ClientRequest } from 'node:http';
 import jwt from 'jsonwebtoken';
@@ -8,7 +8,8 @@ import type { ReceiverConfig } from '../ingress/config.js';
 import { tlsVerificationEnabled, validateReceiverConfig } from '../ingress/config.js';
 import type { DirectoryContext } from '../directory/types.js';
 import type { FetchKeys } from '../ingress/auth.js';
-import type { AccountTokens } from '../accounts/store.js';
+import type { AccountTokens, BrowserAttempt } from '../accounts/store.js';
+import { uuid } from '../policy/config.js';
 
 export const WORK_IQ_SCOPE = 'api://workiq.svc.cloud.microsoft/WorkIQAgent.Ask';
 export class DelegatedAuthError extends Error {
@@ -69,9 +70,29 @@ export function createDelegatedAuth(input: ReceiverConfig, deps: {
     const result = jwt.verify(raw, createPublicKey({ format: 'jwk', key: { kty: 'RSA', n: key.n, e: key.e } }),
       { algorithms: ['RS256'], issuer: `${root}/v2.0`, audience: config.appId });
     if (typeof result === 'string' || result.aud !== config.appId || typeof result.exp !== 'number' || !Number.isFinite(result.exp) ||
-      result.exp * 1000 <= Date.now() || typeof result.tid !== 'string' || result.tid.toLowerCase() !== config.tenantId.toLowerCase() || typeof result.oid !== 'string' ||
-      typeof result.scp !== 'string' || !result.scp.split(' ').includes('access_as_user')) throw failure();
-    return result;
+      result.exp * 1000 <= Date.now() || uuid(result.tid) !== uuid(config.tenantId)) throw failure();
+    uuid(result.oid); return result;
+  }
+  function ssoClaims(raw: string) {
+    const p = claims(raw);
+    if (typeof p.scp !== 'string' || !p.scp.split(' ').includes('access_as_user')) throw failure();
+    return p;
+  }
+  const browserScope = `openid profile offline_access ${WORK_IQ_SCOPE}`;
+  const credential = (v: unknown): v is string => typeof v === 'string' && v.length <= 16384 && /^[A-Za-z0-9._~+/-]+=*$/u.test(v);
+  function tokens(value: Record<string, unknown>, previousRefresh?: string): AccountTokens {
+    if (!credential(value.access_token) || value.token_type !== 'Bearer' || typeof value.expires_in !== 'number' ||
+      !Number.isFinite(value.expires_in) || value.expires_in <= 0 || value.expires_in > 86400 ||
+      typeof value.scope !== 'string' || !value.scope.split(' ').some(s => s === WORK_IQ_SCOPE || s === 'WorkIQAgent.Ask') ||
+      value.refresh_token !== undefined && !credential(value.refresh_token)) throw failure();
+    const refreshToken = value.refresh_token as string | undefined ?? previousRefresh;
+    return { accessToken: value.access_token, expiresAt: Date.now() + value.expires_in * 1000, ...(refreshToken ? { refreshToken } : {}) };
+  }
+  async function requestTokens(fields: Record<string, string>, ctx: DirectoryContext) {
+    active(ctx); if (ctx.deadline - performance.now() < 1000) throw failure();
+    const federated = await assertion(); active(ctx);
+    return post(Buffer.from(new URLSearchParams({ client_id: config.appId,
+      client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer', client_assertion: federated, ...fields }).toString()), ctx);
   }
   function post(body: Buffer, ctx: DirectoryContext): Promise<Record<string, unknown>> {
     return new Promise((resolve, reject) => {
@@ -110,22 +131,39 @@ export function createDelegatedAuth(input: ReceiverConfig, deps: {
     });
   }
   return {
+    authorizeUrl(attempt: BrowserAttempt, redirectUri: string): string {
+      if (closed) throw failure();
+      const query = new URLSearchParams({ client_id: config.appId, response_type: 'code', response_mode: 'form_post',
+        redirect_uri: redirectUri, scope: browserScope, state: attempt.state, nonce: attempt.nonce,
+        code_challenge: createHash('sha256').update(attempt.verifier).digest('base64url'), code_challenge_method: 'S256' });
+      return `${root}/oauth2/v2.0/authorize?${query}`;
+    },
+    redeemCode(code: string, attempt: BrowserAttempt, redirectUri: string, ctx: DirectoryContext): Promise<AccountTokens> {
+      return run(ctx, async () => {
+        if (!credential(code)) throw failure();
+        const value = await requestTokens({ grant_type: 'authorization_code', code, code_verifier: attempt.verifier,
+          redirect_uri: redirectUri, scope: browserScope }, ctx);
+        await keys(); active(ctx); const p = claims(value.id_token as string);
+        if (p.nonce !== attempt.nonce || uuid(p.oid) !== uuid(attempt.challenge.objectId)) throw failure();
+        const result = tokens(value); if (!result.refreshToken) throw failure(); return result;
+      });
+    },
+    refresh(refreshToken: string, ctx: DirectoryContext): Promise<AccountTokens> {
+      return run(ctx, async () => {
+        if (!credential(refreshToken)) throw failure();
+        return tokens(await requestTokens({ grant_type: 'refresh_token', refresh_token: refreshToken, scope: WORK_IQ_SCOPE }, ctx), refreshToken);
+      });
+    },
     verify(raw: string, objectId: string, ctx: DirectoryContext): Promise<{ assertionExpiresAt: number }> {
-      return run(ctx, async () => { await keys(); active(ctx); const p = claims(raw);
-        if (p.oid !== objectId) throw failure(); return { assertionExpiresAt: Math.min(p.exp! * 1000, Date.now() + 600000) }; });
+      return run(ctx, async () => { await keys(); active(ctx); const p = ssoClaims(raw);
+        if (uuid(p.oid) !== uuid(objectId)) throw failure(); return { assertionExpiresAt: Math.min(p.exp! * 1000, Date.now() + 600000) }; });
     },
     exchange(raw: string, ctx: DirectoryContext): Promise<AccountTokens> {
       return run(ctx, async () => {
-        await keys(); active(ctx); const p = claims(raw);
-        if (ctx.deadline - performance.now() < 1000) throw failure();
-        const federated = await assertion(); active(ctx);
-        const body = Buffer.from(new URLSearchParams({ client_id: config.appId, client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
-          client_assertion: federated, grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', requested_token_use: 'on_behalf_of', assertion: raw, scope: WORK_IQ_SCOPE }).toString());
-        const value = await post(body, ctx); active(ctx);
-        if (typeof value.access_token !== 'string' || value.access_token.length > 16384 || !/^[A-Za-z0-9._~+/-]+=*$/u.test(value.access_token) ||
-          value.token_type !== 'Bearer' || typeof value.expires_in !== 'number' || !Number.isFinite(value.expires_in) || value.expires_in <= 0 || value.expires_in > 86400 ||
-          typeof value.scope !== 'string' || !value.scope.split(' ').some(s => s === WORK_IQ_SCOPE || s === 'WorkIQAgent.Ask')) throw failure();
-        return { accessToken: value.access_token, expiresAt: Date.now() + value.expires_in * 1000, assertion: raw,
+        await keys(); active(ctx); const p = ssoClaims(raw);
+        const value = await requestTokens({ grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+          requested_token_use: 'on_behalf_of', assertion: raw, scope: WORK_IQ_SCOPE }, ctx); active(ctx);
+        return { ...tokens(value), assertion: raw,
           assertionExpiresAt: Math.min(p.exp! * 1000, Date.now() + 600000) };
       });
     },

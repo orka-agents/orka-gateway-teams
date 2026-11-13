@@ -102,6 +102,16 @@ test('equivalent GUID tenant casing does not reject a valid delegated token', as
   finally { await auth.close(); }
 });
 
+test('delegated verify compares signed sender oid using the same canonical GUID representation as policy', async () => {
+  const mixed = 'abcdef12-abcd-4abc-8abc-abcdefabcdef';
+  const auth = createDelegatedAuth(miConfig, { fetchKeys: keys });
+  try {
+    assert.ok((await auth.verify(token({ oid: mixed.toUpperCase() }), mixed, context())).assertionExpiresAt > Date.now());
+    assert.ok((await auth.verify(token({ oid: mixed }), mixed.toUpperCase(), context())).assertionExpiresAt > Date.now());
+    await assert.rejects(auth.verify(token({ oid: 'not-a-guid' }), 'not-a-guid', context()), { message: 'Delegated sign-in unavailable' });
+  } finally { await auth.close(); }
+});
+
 test('shutdown waits held key retrieval and cancellation never publishes usable verification', async () => {
   const held = deferred<Response>(); let finished = false;
   const auth = createDelegatedAuth(miConfig, { fetchKeys: async () => held.promise });

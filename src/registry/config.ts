@@ -10,7 +10,7 @@ export interface RegistryTarget {
   kubernetesBaseUrl: string; kubernetesTokenFile: string; kubernetesCaFile?: string;
   config: TableServeConfig; readonly identityDigest?: string;
 }
-export interface SigninConfig { accountTable: string; keyFile: string; apiUri: string; connectionName: string }
+export interface SigninConfig { accountTable: string; keyFile: string; apiUri: string; connectionName: string; publicOrigin?: string }
 export interface RegistryConfig { sso?: Readonly<SigninConfig>; schemaVersion: 1; directoryTable?: string; groupPolicyFile?: string; targets: readonly RegistryTarget[] }
 const perTarget = ['ORKA_BASE_URL', 'ORKA_GATEWAY_NAMESPACE', 'ORKA_GATEWAY_NAME', 'ORKA_BEARER_TOKEN', 'ORKA_OUTBOUND_BEARER_TOKEN', 'ORKA_CA_FILE', 'TABLE_INGRESS_STORE_ID', 'TABLE_DELIVERY_STORE_ID'];
 const metadataKeys = ['id', 'label', 'gatewayUid', 'frontAgent', 'kubernetesBaseUrl', 'kubernetesTokenFile', 'kubernetesCaFile'];
@@ -75,12 +75,17 @@ export function snapshotRegistry(input: RegistryConfig): RegistryConfig {
   } catch { throw new ConfigurationError(); }
 }
 function signinConfig(input: unknown): SigninConfig {
-  const v = auditFields(input, ['accountTable', 'keyFile', 'apiUri', 'connectionName']);
+  const v = auditFields(input, ['accountTable', 'keyFile', 'apiUri', 'connectionName', 'publicOrigin']);
   const accountTable = text(v.accountTable, 63); const apiUri = text(v.apiUri, 512); const connectionName = text(v.connectionName, 128);
   const uri = new URL(apiUri);
   if (!/^[A-Za-z][A-Za-z0-9]{2,62}$/u.test(accountTable) || !/^[A-Za-z0-9._-]+$/u.test(connectionName) ||
       uri.protocol !== 'api:' || !uri.host || uri.username || uri.password || uri.search || uri.hash) throw new ConfigurationError();
-  return { accountTable, apiUri, connectionName, keyFile: absoluteFile(v.keyFile) };
+  let publicOrigin: string | undefined;
+  if (v.publicOrigin !== undefined) {
+    publicOrigin = text(v.publicOrigin, 512); const url = new URL(publicOrigin);
+    if (url.protocol !== 'https:' || !url.hostname || url.username || url.password || url.port || url.origin !== publicOrigin) throw new ConfigurationError();
+  }
+  return { accountTable, apiUri, connectionName, keyFile: absoluteFile(v.keyFile), ...(publicOrigin ? { publicOrigin } : {}) };
 }
 export function readSigninKey(path: string): Buffer {
   const value = readRegistryFile(path, 65).trim();
@@ -102,9 +107,10 @@ export function parseRegistryConfig(env: NodeJS.ProcessEnv): RegistryConfig {
       if (!('storage' in parsed) || parsed.scope.orkaBaseUrl !== raw.orkaBaseUrl) throw new ConfigurationError();
       return { ...targetMetadata(raw, parsed), config: parsed };
     });
-    const keys = ['SSO_ACCOUNT_TABLE', 'SSO_KEY_FILE', 'SSO_API_URI', 'SSO_CONNECTION_NAME'];
+    const keys = ['SSO_ACCOUNT_TABLE', 'SSO_KEY_FILE', 'SSO_API_URI', 'SSO_CONNECTION_NAME', 'SSO_PUBLIC_ORIGIN'];
     const sso = keys.some(k => captured[k] !== undefined) ? { accountTable: captured.SSO_ACCOUNT_TABLE!, keyFile: captured.SSO_KEY_FILE!,
-      apiUri: captured.SSO_API_URI!, connectionName: captured.SSO_CONNECTION_NAME! } : undefined;
+      apiUri: captured.SSO_API_URI!, connectionName: captured.SSO_CONNECTION_NAME!,
+      ...(captured.SSO_PUBLIC_ORIGIN === undefined ? {} : { publicOrigin: captured.SSO_PUBLIC_ORIGIN }) } : undefined;
     return snapshotRegistry({ ...(sso ? { sso } : {}), schemaVersion: root.schemaVersion as 1, directoryTable: text(captured.TABLE_DIRECTORY_TABLE, 63), groupPolicyFile: absoluteFile(captured.ORKA_GROUP_POLICY_FILE), targets });
   } catch { throw new ConfigurationError(); }
 }

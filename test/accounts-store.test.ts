@@ -370,6 +370,190 @@ test('replayed disconnect generation cannot erase a newly linked account', async
   assert.deepEqual(await f.store.inspect(subject, context()), { generation: 2, linked: true });
 });
 
+test('browser preparation is repeatable across restart and exposes secrets only through BrowserAttempt', async t => {
+  const f = await setup(t); const ch = await f.store.challenge(subject, 'chat', 'browser', context());
+  const first = await f.store.prepareBrowser(ch, context()); assert.ok(first);
+  assert.match(first.state, new RegExp('^' + ch.id.replaceAll('.', '\\.') + '\\.[A-Za-z0-9_-]{43}$', 'u'));
+  assert.match(first.nonce, /^[A-Za-z0-9_-]{43}$/u); assert.match(first.verifier, /^[A-Za-z0-9_-]{43}$/u);
+  assert.deepEqual(await f.store.getChallenge(ch.id, context()), ch);
+  await f.store.close(); const next = f.open();
+  assert.deepEqual(await next.prepareBrowser(ch, context()), first);
+  for (const value of [first.state, first.nonce, first.verifier]) {
+    assert.equal(JSON.stringify([...f.rows.values()]).includes(value), false);
+    for (const row of f.rows.values()) assert.equal(Buffer.from(String(row.Payload), 'base64').includes(Buffer.from(value)), false);
+    assert.equal(JSON.stringify(await next.getChallenge(ch.id, context())).includes(value), false);
+  }
+  const [a, b] = await Promise.all([next.claimBrowser(first.state, context()), next.claimBrowser(first.state, context())]);
+  assert.equal([a, b].filter(Boolean).length, 1);
+  const claimed = a ?? b; assert.ok(claimed); assert.equal(claimed.challenge.method, 'browser');
+  assert.equal(await next.claimBrowser(first.state, context()), undefined);
+  assert.equal(await next.prepareBrowser(claimed.challenge, context()), undefined);
+  assert.equal(await next.claim(claimed.challenge, context()), 'unavailable');
+  assert.equal(await next.complete(claimed.challenge, { ...tokens(), refreshToken: 'REFRESH-SENTINEL' }, context()), true);
+});
+
+test('browser takes over in-flight SSO without permitting its captured challenge to publish', async t => {
+  const f = await setup(t); const ch = await f.store.challenge(subject, 'chat', 'takeover', context());
+  assert.equal(await f.store.claim(ch, context()), 'claimed');
+  const prepared = await f.store.prepareBrowser(ch, context()); assert.ok(prepared);
+  const claimed = await f.store.claimBrowser(prepared.state, context()); assert.ok(claimed);
+  assert.equal(await f.store.complete(ch, tokens(), context()), false);
+  assert.equal(await f.store.claim(ch, context()), 'unavailable');
+  assert.deepEqual(await f.store.inspect(subject, context()), { generation: 1, linked: false });
+  assert.equal(await f.store.complete(claimed.challenge, tokens(), context()), true);
+});
+
+test('browser cannot take over after committing begins, even before account publication', async t => {
+  const f = await setup(t); const ch = await f.store.challenge(subject, 'chat', 'committing', context());
+  assert.equal(await f.store.claim(ch, context()), 'claimed');
+  const prepared = await f.store.prepareBrowser(ch, context()); assert.ok(prepared);
+  const entered = deferred(); const release = deferred(); let held = false;
+  f.controls.hook = async r => {
+    if (!held && r.req.method === 'PUT' && String(r.body?.RowKey).startsWith('account_')) {
+      held = true; entered.resolve(); await release.promise;
+    }
+    r.reply();
+  };
+  const completion = f.store.complete(ch, tokens(), context()); await entered.promise;
+  try {
+    assert.equal((await f.store.getChallenge(ch.id, context()))?.state, 'committing');
+    assert.equal(await f.store.claimBrowser(prepared.state, context()), undefined);
+    assert.equal(await f.store.prepareBrowser(ch, context()), undefined);
+  } finally { release.resolve(); await completion; }
+  assert.equal(await completion, true);
+  assert.equal(await f.store.claimBrowser(prepared.state, context()), undefined);
+});
+
+test('browser takeover winning the committing CAS prevents SSO account publication', async t => {
+  const f = await setup(t); const ch = await f.store.challenge(subject, 'chat', 'commit-race', context());
+  assert.equal(await f.store.claim(ch, context()), 'claimed');
+  const prepared = await f.store.prepareBrowser(ch, context()); assert.ok(prepared);
+  const entered = deferred(); const release = deferred(); let held = false;
+  f.controls.hook = async r => {
+    if (!held && r.req.method === 'PUT' && String(r.body?.RowKey).startsWith('challenge_')) {
+      held = true; entered.resolve(); await release.promise;
+    }
+    r.reply();
+  };
+  const completion = f.store.complete(ch, tokens(), context()); await entered.promise;
+  try { assert.ok(await f.store.claimBrowser(prepared.state, context())); }
+  finally { release.resolve(); await completion; }
+  assert.equal(await completion, false);
+  assert.deepEqual(await f.store.inspect(subject, context()), { generation: 1, linked: false });
+});
+
+for (const fence of ['expiry', 'disconnect'] as const) test(`browser reservation rejects ${fence} and forged state`, async t => {
+  const f = await setup(t); const ch = await f.store.challenge(subject, 'chat', fence, context());
+  const prepared = await f.store.prepareBrowser(ch, context()); assert.ok(prepared);
+  assert.equal(await f.store.claimBrowser(prepared.state.slice(0, -1) + (prepared.state.endsWith('A') ? 'B' : 'A'), context()), undefined);
+  assert.equal(await f.store.claimBrowser('malformed', context()), undefined);
+  const requests = f.requests.length;
+  assert.equal(await f.store.claimBrowser('a'.repeat(64) + '.' + '-'.repeat(36) + '.' + 'b'.repeat(43), context()), undefined);
+  assert.equal(f.requests.length, requests);
+  if (fence === 'expiry') f.advance(600_000); else await f.store.disconnect(subject, context());
+  assert.equal(await f.store.claimBrowser(prepared.state, context()), undefined);
+  assert.equal(await f.store.prepareBrowser(ch, context()), undefined);
+});
+
+test('durable browser cache remains linked after restart and rotates or retains refresh credentials', async t => {
+  const f = await setup(t); await f.link('cache', { ...tokens(), refreshToken: 'REFRESH-ONE' });
+  await f.store.close(); f.advance(1001); const next = f.open();
+  assert.deepEqual(await next.inspect(subject, context()), { generation: 1, linked: true });
+  const noSSO = async (): Promise<AccountTokens> => { assert.fail('durable cache must win over SSO assertion'); };
+  const acquire = (refresh: (token: string) => Promise<AccountTokens>) => next.acquire(subject, 1, noSSO, context(), refresh);
+  assert.deepEqual(await acquire(async token => {
+    assert.equal(token === 'REFRESH-ONE', true); return { accessToken: 'ROTATED', expiresAt: epoch + 2000, refreshToken: 'REFRESH-TWO' };
+  }), { kind: 'token', accessToken: 'ROTATED' });
+  f.advance(1000);
+  assert.deepEqual(await acquire(async token => {
+    assert.equal(token === 'REFRESH-TWO', true); return { accessToken: 'RETAINED', expiresAt: epoch + 3000 };
+  }), { kind: 'token', accessToken: 'RETAINED' });
+  f.advance(1000);
+  await acquire(async token => {
+    assert.equal(token === 'REFRESH-TWO', true); throw Object.assign(new Error('private'), { code: 'invalid-grant' });
+  });
+  assert.deepEqual(await next.inspect(subject, context()), { generation: 2, linked: false });
+});
+
+test('same-generation SSO completion and renewal preserve the existing browser refresh cache', async t => {
+  const f = await setup(t); await f.link('browser-cache', { ...tokens(), refreshToken: 'PRESERVED-REFRESH' });
+  await f.link('sso-relink'); f.advance(1001);
+  // Four-argument callers may still renew by SSO; that renewal must not erase the cache.
+  assert.equal((await f.store.acquire(subject, 1, async () => ({ accessToken: 'SSO-RENEWED', expiresAt: epoch + 2000 }), context())).kind, 'token');
+  await f.store.close(); f.advance(1000); const next = f.open();
+  assert.deepEqual(await next.acquire(subject, 1, async () => { assert.fail('no durable assertion'); }, context(), async token => {
+    assert.equal(token === 'PRESERVED-REFRESH', true); return { accessToken: 'CACHE-RENEWED', expiresAt: epoch + 60_000 };
+  }), { kind: 'token', accessToken: 'CACHE-RENEWED' });
+});
+
+for (const invalid of [false, true]) test(`disconnect fences held cache renewal ${invalid ? 'invalid grant' : 'success'}`, async t => {
+  const f = await setup(t); await f.link('cache-race', { ...tokens(), refreshToken: 'HELD-REFRESH' }); f.advance(1001);
+  const entered = deferred(); const release = deferred();
+  const pending = f.store.acquire(subject, 1, async () => { assert.fail('prefer cache'); }, context(), async () => {
+    entered.resolve(); await release.promise;
+    if (invalid) throw Object.assign(new Error('private'), { code: 'invalid-grant' });
+    return { accessToken: 'LATE-CACHE', expiresAt: epoch + 60_000, refreshToken: 'LATE-REFRESH' };
+  });
+  await entered.promise;
+  try { assert.equal(await f.store.disconnect(subject, context()), 2); }
+  finally { release.resolve(); await pending; }
+  assert.deepEqual(await pending, { kind: 'signin-required' });
+  assert.deepEqual(await f.open().inspect(subject, context()), { generation: 2, linked: false });
+});
+
+test('publication proof never mistakes an old linked refresh cache for a fresh challenge', async t => {
+  const f = await setup(t); const old = await f.link('old-cache', { ...tokens(), refreshToken: 'OLD-REFRESH' });
+  const fresh = await f.store.challenge(subject, 'chat', 'fresh-unpublished', context());
+  assert.equal(await f.store.published(old, context()), true);
+  assert.equal(await f.store.published(fresh, context()), false);
+  f.advance(1001);
+  assert.deepEqual(await f.store.inspect(subject, context()), { generation: 1, linked: true });
+  assert.equal(await f.store.published(old, context()), false);
+  assert.equal(await f.store.published(fresh, context()), false);
+});
+
+test('publication proof survives failed challenge finalization but binds exact challenge and generation', async t => {
+  const f = await setup(t); const ch = await f.store.challenge(subject, 'chat', 'partial', context());
+  const other = await f.store.challenge(subject, 'chat', 'unrelated', context());
+  assert.equal(await f.store.claim(ch, context()), 'claimed'); let writes = 0;
+  f.controls.hook = r => {
+    if (r.req.method === 'PUT' && String(r.body?.RowKey).startsWith('challenge_') && ++writes === 2) {
+      r.res.writeHead(204); r.res.end();
+    } else r.reply();
+  };
+  assert.equal(await f.store.complete(ch, tokens(), context()), false);
+  assert.equal((await f.store.getChallenge(ch.id, context()))?.state, 'committing');
+  await f.store.close(); const next = f.open();
+  assert.equal(await next.published(ch, context()), true);
+  assert.equal(await next.published(other, context()), false);
+  assert.equal(await next.published({ ...ch, generation: ch.generation + 1 }, context()), false);
+  await next.disconnect(subject, context());
+  assert.equal(await next.published(ch, context()), false);
+  assert.equal(await next.published({ ...ch, generation: ch.generation + 1 }, context()), false);
+});
+
+test('usage and cache renewal preserve publication proof while expiry and invalid grant invalidate it', async t => {
+  const f = await setup(t); const ch = await f.link('renew-proof', { ...tokens(), refreshToken: 'RENEW-PROOF' });
+  const noSSO = async (): Promise<AccountTokens> => { assert.fail('cached access or refresh must suffice'); };
+  assert.equal((await f.store.acquire(subject, 1, noSSO, context())).kind, 'token');
+  assert.equal(await f.store.published(ch, context()), true);
+  f.advance(1001); assert.equal(await f.store.published(ch, context()), false);
+  assert.equal((await f.store.acquire(subject, 1, noSSO, context(), async () => ({ accessToken: 'RENEWED', expiresAt: epoch + 2000 }))).kind, 'token');
+  await f.store.close(); const next = f.open();
+  assert.equal(await next.published(ch, context()), true);
+  f.advance(1000);
+  await next.acquire(subject, 1, noSSO, context(), async () => { throw Object.assign(new Error('private'), { code: 'invalid-grant' }); });
+  assert.deepEqual(await next.inspect(subject, context()), { generation: 2, linked: false });
+  assert.equal(await next.published(ch, context()), false);
+  assert.equal(await next.published({ ...ch, generation: 2 }, context()), false);
+});
+
+test('publication proof excludes idle accounts even with an unexpired access token', async t => {
+  const f = await setup(t); const ch = await f.link('idle-proof', { accessToken: 'LONG', expiresAt: epoch + 90 * 86_400_000 });
+  f.advance(30 * 86_400_000);
+  assert.equal(await f.store.published(ch, context()), false);
+});
+
 test('brief SSO assertions never survive process lifetime even while encrypted access tokens do', async t => {
   const f = await setup(t); await f.link(); await f.store.close(); f.advance(1001);
   let refreshed = false;

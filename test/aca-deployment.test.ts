@@ -89,7 +89,7 @@ test('ACA proxy renders public-only Secret config for the chosen gateway without
       'proxy_set_header Host $http_host;', 'proxy_set_header Connection $http_connection;', 'access_log off;', 'error_log /dev/null emerg;']) {
       assert.equal(nginx.includes(directive), true);
     }
-    assert.equal(/alias |root |autoindex|candidate|challenge/u.test(nginx), false);
+    assert.equal(/alias |root |autoindex|candidate/u.test(nginx), false);
     const container = app.properties.template.containers[0];
     assert.equal(container.image, 'nginxinc/nginx-unprivileged:stable-alpine@sha256:442753882674b49ae2c1de83ed67896131c0777f56df5005e356e62bc3f7e7ce');
     assert.deepEqual(container.command, ['nginx', '-c', '/etc/nginx/nginx.conf', '-g', 'daemon off;']);

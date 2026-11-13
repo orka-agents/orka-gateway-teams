@@ -483,6 +483,36 @@ async function smoke(): Promise<void> {
     while ((await https(ca, privatePort, '/count')).status !== 200) {
       assert.equal(performance.now() < upstreamDeadline, true); await sleep(100);
     }
+    stage = 'ACA proxy forwards only the fixed browser routes without logging';
+    const acaConfig = join(fixtureDir, 'aca-nginx.conf');
+    writeFileSync(acaConfig, readFileSync(join(root, 'deploy/aca/nginx.conf'), 'utf8')
+      .replaceAll('http://orka-teams-gateway:3978', 'http://127.0.0.1:3978'), { mode: 0o444 });
+    chmodSync(acaConfig, 0o444);
+    const acaProxy = `${owned}-aca-proxy`;
+    await start(acaProxy, [...podNetwork, ...security, ...mount(acaConfig, '/etc/nginx/nginx.conf'),
+      '--entrypoint', 'nginx', nginxImage, '-c', '/etc/nginx/nginx.conf', '-g', 'daemon off;']);
+    const acaDeadline = performance.now() + 10000;
+    while (!await fetch(`http://${smokeHost}:8081/healthz`).then(r => r.text()).catch(() => undefined)) {
+      assert.equal(performance.now() < acaDeadline, true); await sleep(100);
+    }
+    const signin = '/signin?challenge=' + 'a'.repeat(64) + '.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    for (const [path, method, status] of [[signin, 'GET', 200], ['/oauth/callback', 'POST', 200],
+      ['/api/messages', 'POST', 200], ['/oauth/callback?other=1', 'POST', 404], ['/oauth/callback', 'GET', 404],
+      ['/signin?challenge=synthetic', 'POST', 404], ['/api/messages?other=1', 'POST', 404],
+      ['/signin/?challenge=synthetic', 'GET', 404], ['/v1/health', 'GET', 404]] as const) {
+      const response = await fetch(`http://${smokeHost}:8080${path}`, { method,
+        ...(method === 'POST' ? { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'state=synthetic&code=synthetic' } : {}) });
+      assert.equal(response.status, status);
+      if (status === 200) assert.equal((await response.json() as { path: string }).path, path); else await response.text();
+    }
+    stage = 'fixed public browser paths preserve the private challenge and form bytes';
+    const browserPath = '/signin?challenge=' + 'a'.repeat(64) + '.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    for (const [path, method] of [[browserPath, 'GET'], ['/oauth/callback', 'POST']] as const) {
+      const response = await https(ca, publicPort, path, { method, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: method === 'POST' ? 'state=synthetic&code=synthetic' : '' });
+      assert.equal(response.status, 200); assert.equal(JSON.parse(response.body).path, path);
+    }
+    assert.equal((await https(ca, publicPort, '/oauth/callback')).status, 404);
+    assert.equal((await https(ca, publicPort, '/signin?challenge=synthetic', { method: 'POST' })).status, 404);
     stage = 'unchanged private URI/auth and no redirect rewriting';
     const path = `/echo?synthetic=${secrets[3]}`;
     const echoed = await https(ca, privatePort, path, { headers: auth });
