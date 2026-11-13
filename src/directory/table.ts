@@ -13,9 +13,24 @@ const failed = () => new DirectoryError('unavailable');
 const corrupt = () => new DirectoryError('corrupt');
 const unready = () => new DirectoryError('unready');
 export function createDirectoryTable(input: DirectoryBinding, deps: DirectoryDependencies): DirectoryTable {
-  let scope: ReturnType<typeof validateScope>; let base: URL; let table: string;
+  let scope: ReturnType<typeof validateScope>;
+  try { scope = validateScope({ appId: input.appId, tenantId: input.tenantId }); }
+  catch { throw new DirectoryError('invalid-input'); }
+  return createNativeTable<DirectoryKey, DirectoryRecord, DirectoryRow>(input, deps, {
+    partition: directoryKey(scope, { kind: 'conn', conversationId: 'query' }).partition,
+    key: key => directoryKey(scope, key), encode: (key, value) => encodeEntity(scope, key, value),
+    decode: (value, key, tag) => decodeEntity(scope, value, key, tag), row: row => row.row,
+    armed: row => row.value.kind === 'control' && row.value.state === 'armed',
+  });
+}
+/** Internal codec seam: native endpoints, bounds, cancellation and drain stay shared. */
+export function createNativeTable<K extends object, V, R>(input: DirectoryBinding, deps: DirectoryDependencies, codec: {
+  partition: string; key(key: K): { partition: string; row: string }; encode(key: K, value: V): Record<string, unknown>;
+  decode(value: unknown, key?: K, etag?: string): R; row(row: R): string; armed(row: R): boolean;
+}) {
+  let base: URL; let table: string;
   try {
-    object(input, ['account', 'table', 'appId', 'tenantId']); scope = validateScope({ appId: input.appId, tenantId: input.tenantId });
+    object(input, ['account', 'table', 'appId', 'tenantId']); validateScope({ appId: input.appId, tenantId: input.tenantId });
     if (typeof input.account !== 'string' || typeof input.table !== 'string' || !/^[a-z0-9]{3,24}$/u.test(input.account) ||
       !/^[a-zA-Z][a-zA-Z0-9]{2,62}$/u.test(input.table) || typeof deps.token !== 'function') throw failed();
     base = new URL(`https://${input.account}.table.core.windows.net`); table = input.table;
@@ -131,29 +146,28 @@ export function createDirectoryTable(input: DirectoryBinding, deps: DirectoryDep
     }
     return Object.keys(next).length ? next : undefined;
   }
-  function page(response: Response, max: number): DirectoryRow[] {
+  function page(response: Response, max: number): R[] {
     try {
       const p = object(json(response), ['odata.metadata', 'value']); const meta = p['odata.metadata'];
       if (meta !== undefined && (typeof meta !== 'string' || meta.length > 4096 || !/^https?:\/\/[^\s]+$/u.test(meta))) throw corrupt();
       if (!Array.isArray(p.value) || p.value.length > max) throw corrupt();
-      return p.value.map(v => decodeEntity(scope, v));
+      return p.value.map(v => codec.decode(v));
     } catch { throw corrupt(); }
   }
-  function query(key?: DirectoryKey, armedOnly = false, next?: { partition?: string; row?: string }): string {
-    const partition = directoryKey(scope, key ?? { kind: 'conn', conversationId: 'query' }).partition;
-    const filter = `PartitionKey eq '${partition}'${key ? ` and RowKey eq '${directoryKey(scope, key).row}'` : armedOnly ? ' and Armed eq true' : ''}`;
+  function query(key?: K, armedOnly = false, next?: { partition?: string; row?: string }): string {
+    const filter = `PartitionKey eq '${codec.partition}'${key ? ` and RowKey eq '${codec.key(key).row}'` : armedOnly ? ' and Armed eq true' : ''}`;
     // Four maximum payloads plus bounded FULLmetadata fit the 512 KiB response cap.
     const params = new URLSearchParams({ '$filter': filter, '$top': key ? '1' : '4' });
     if (next?.partition !== undefined) params.set('NextPartitionKey', next.partition);
     if (next?.row !== undefined) params.set('NextRowKey', next.row);
     return `/${table}()?${params}`;
   }
-  function path(key: DirectoryKey): string {
-    const k = directoryKey(scope, key); return `/${table}(PartitionKey='${k.partition}',RowKey='${k.row}')`;
+  function path(key: K): string {
+    const k = codec.key(key); return `/${table}(PartitionKey='${k.partition}',RowKey='${k.row}')`;
   }
-  function mutation(key: DirectoryKey, value: DirectoryRecord, context: DirectoryContext, tag?: string): Promise<DirectoryWriteResult> {
+  function mutation(key: K, value: V, context: DirectoryContext, tag?: string): Promise<DirectoryWriteResult> {
     key = { ...key }; let body: Buffer;
-    try { body = Buffer.from(JSON.stringify(encodeEntity(scope, key, value))); if (tag !== undefined) etag(tag); }
+    try { body = Buffer.from(JSON.stringify(codec.encode(key, value))); if (tag !== undefined) etag(tag); }
     catch { return Promise.reject(new DirectoryError('invalid-input')); }
     return run(context, async ctx => {
       usable(ctx, true); let response: Response; let handed = false;
@@ -166,7 +180,7 @@ export function createDirectoryTable(input: DirectoryBinding, deps: DirectoryDep
     });
   }
   return Object.freeze({
-    get(key: DirectoryKey, context: DirectoryContext) {
+    get(key: K, context: DirectoryContext) {
       key = { ...key }; let endpoint: string; try { endpoint = path(key); } catch { return Promise.reject(new DirectoryError('invalid-input')); }
       return run(context, async ctx => {
         const response = await native(endpoint, 'GET', ctx);
@@ -184,22 +198,22 @@ export function createDirectoryTable(input: DirectoryBinding, deps: DirectoryDep
             const exact = await native(query(key), 'GET', ctx);
             if (exact.status !== 200) throw failed();
             const rows = page(exact, 1);
-            if (cursor(exact) || (rows[0] && rows[0].row !== directoryKey(scope, key).row)) throw corrupt();
+            if (cursor(exact) || (rows[0] && codec.row(rows[0]) !== codec.key(key).row)) throw corrupt();
             return rows[0];
           }
         }
         if (response.status !== 200) throw failed();
-        return decodeEntity(scope, json(response), key, typeof response.headers.etag === 'string' ? response.headers.etag : undefined);
+        return codec.decode(json(response), key, typeof response.headers.etag === 'string' ? response.headers.etag : undefined);
       });
     },
-    insert: (key: DirectoryKey, value: DirectoryRecord, context: DirectoryContext) => mutation(key, value, context),
-    replace(key: DirectoryKey, tag: string, value: DirectoryRecord, context: DirectoryContext) {
+    insert: (key: K, value: V, context: DirectoryContext) => mutation(key, value, context),
+    replace(key: K, tag: string, value: V, context: DirectoryContext) {
       try { etag(tag); } catch { return Promise.reject(new DirectoryError('invalid-input')); }
       return mutation(key, value, context, tag);
     },
-    list(context: DirectoryContext, armedOnly = false, visit?: (row: DirectoryRow) => Promise<void>) {
+    list(context: DirectoryContext, armedOnly = false, visit?: (row: R) => Promise<void>) {
       return run(context, async ctx => {
-        const rows: DirectoryRow[] = []; const seenRows = new Set<string>(); const seenCursors = new Set<string>();
+        const rows: R[] = []; const seenRows = new Set<string>(); const seenCursors = new Set<string>();
         let next: ReturnType<typeof cursor>; let size = 0;
         for (let count = 0; count < 1000; count++) {
           const response = await native(query(undefined, armedOnly, next), 'GET', ctx);
@@ -207,8 +221,8 @@ export function createDirectoryTable(input: DirectoryBinding, deps: DirectoryDep
           size += response.body.length;
           if (size > 32 * 1024 * 1024) throw unready();
           for (const row of page(response, 4)) {
-            if (seenRows.has(row.row) || (armedOnly && !(row.value.kind === 'control' && row.value.state === 'armed'))) throw corrupt();
-            seenRows.add(row.row); if (seenRows.size > 100000) throw unready();
+            if (seenRows.has(codec.row(row)) || (armedOnly && !codec.armed(row))) throw corrupt();
+            seenRows.add(codec.row(row)); if (seenRows.size > 100000) throw unready();
             // Recover as we traverse: an exhausted later page must not erase progress.
             if (visit) { await visit(row); usable(ctx); } else rows.push(row);
           }

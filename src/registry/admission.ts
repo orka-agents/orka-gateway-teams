@@ -1,3 +1,8 @@
+import { identity } from '../delivery/identity.js';
+import { AccountError } from '../accounts/store.js';
+import type { AccountStore } from '../accounts/store.js';
+import type { createDelegatedAuth } from '../auth/delegated.js';
+import type { ExchangeContext, ExchangeResponse } from '../ingress/server.js';
 import { bindingName, controlFingerprint, parseUseCommand } from '../directory/codec.js';
 import type { Directory } from '../directory/store.js';
 import { BindingCheckError } from '../directory/provision.js';
@@ -13,12 +18,13 @@ import type { EventEnvelope } from '../protocol/types.js';
 import { subscribeAuditAbort } from '../storage/table/audit.js';
 import type { LeaseAuthority } from '../storage/table/types.js';
 import { TableError } from '../storage/table/types.js';
-import type { OutgoingTeamsMessage } from '../teams/format.js';
+import type { ProviderMessage } from '../outbound/types.js';
 import type { RegistryConfig, RegistryTarget } from './config.js';
 
-type Category = BindingCheckError['category'] | 'graph-unavailable';
+type Category = BindingCheckError['category'] | 'graph-unavailable' | 'signin-required' | 'signin-complete';
+interface DelegatedOptions { accounts: AccountStore; auth: ReturnType<typeof createDelegatedAuth>; apiUri: string; connectionName: string }
 interface Slot { target: RegistryTarget; inbox: Pick<IngressPort, 'admit'>; provisioner: ReturnType<typeof createBindingProvisioner> }
-interface Options { config: RegistryConfig; directory: Directory; slots: readonly Slot[]; authority: LeaseAuthority; active(): boolean;
+interface Options { delegated?: DelegatedOptions; config: RegistryConfig; directory: Directory; slots: readonly Slot[]; authority: LeaseAuthority; active(): boolean;
   authorizer: Pick<ReturnType<typeof createGroupAuthorizer>, 'authorize'>; log(category: Category, targetId?: string): void }
 
 /** Four complete consumers share the directory's four places, including control settlement.
@@ -30,6 +36,8 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
   const { directory, authority, authorizer } = options;
   const scope = { appId: options.config.targets[0]!.config.scope.appId, tenantId: options.config.targets[0]!.config.scope.tenantId };
   const slots = new Map(options.slots.map(slot => [slot.target.id, slot]));
+  const exchanges = new Map<string, Promise<boolean>>();
+  const activities = new Set<string>();
   const paused = new Map<string, { next: number; pending?: Promise<void> }>();
   const logged = new Map<string, Set<Category>>(); let consumers = 0;
   let sender: Pick<ProviderSender, 'send'> | undefined;
@@ -39,7 +47,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     const prior = logged.get(id) ?? new Set<Category>();
     if (!prior.has(category)) { prior.add(category); logged.set(id, prior); options.log(category, id || undefined); }
   };
-  const transient = (error: unknown) => error instanceof BindingCheckError || error instanceof DirectoryError &&
+  const transient = (error: unknown) => error instanceof AccountError && ['busy', 'conflict', 'unavailable', 'unready'].includes(error.code) || error instanceof BindingCheckError || error instanceof DirectoryError &&
     ['busy', 'conflict', 'unavailable'].includes(error.code) || error instanceof TableError && error.code === 'not-submitted';
   function joinRecovery(pending: Promise<void>, ctx: DirectoryContext): Promise<void> {
     // The recoverer retains/drains its own native work. A joiner owns only this
@@ -109,7 +117,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
         route.conversation.tenantId !== scope.tenantId || route.conversation.id !== saved.conversationId) throw new DirectoryError('corrupt');
     const armed = await directory.armControl(keyOf(saved), ctx); assertActive(ctx);
     if (!sender) throw new DirectoryError('unready');
-    const outcome = await sender.send(route, formatControl(saved.reply), { signal: ctx.signal, deadline: ctx.deadline, authority });
+    const outcome = await sender.send(route, formatControl(saved.reply, options.delegated), { signal: ctx.signal, deadline: ctx.deadline, authority });
     assertActive(ctx);
     await directory.settleControl(keyOf(saved), armed.attemptUUID, outcome.kind === 'delivered' ? outcome : { kind: outcome.kind === 'retryable' ? 'no-effect' : 'unknown' }, ctx);
     return outcome.kind === 'retryable' ? { kind: 'full' } : { kind: 'accepted', replyTarget: '' };
@@ -118,7 +126,10 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     if (route.conversation.conversationType === 'channel') return { kind: 'conflict' };
     if (!supplied || consumers >= 4) return { kind: 'full' };
     const context = { ...supplied }; const ctx: DirectoryContext = { signal: context.signal, deadline: context.deadline, authorizeWrite: () => active(ctx) };
-    if (!active(ctx)) return { kind: 'full' }; consumers++;
+    // Do not queue old work across a later sign-in reservation; retry the overlap.
+    const activityKey = options.delegated ? JSON.stringify([event.contextId, context.activityId]) : undefined;
+    if (!active(ctx) || activityKey !== undefined && activities.has(activityKey)) return { kind: 'full' };
+    consumers++; if (activityKey !== undefined) activities.add(activityKey);
     try {
       const command = context.commandText === undefined ? undefined : parseUseCommand(context.commandText);
       const desired = command === undefined ? undefined : slots.get(command);
@@ -142,7 +153,24 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
       let reply: ControlReply;
       if (denied) reply = { kind: 'no-access' };
       else if (previous && (previous.state !== 'ready' || previous.reply.kind !== 'connected')) {
+        if (previous.state === 'ready' && previous.reply.kind === 'disconnected' && options.delegated && context.subject.objectId) {
+          const subject = { objectId: context.subject.objectId };
+          await options.delegated.accounts.disconnect(subject, ctx, previous.reply.generation); assertActive(ctx);
+          if ((await options.delegated.accounts.inspect(subject, ctx, true)).linked) return { kind: 'duplicate', replyTarget: '' };
+        }
         return await control(previous, eligible, false, ctx, connection);
+      }
+      else if (options.delegated && context.commandText?.trim() === 'disconnect') {
+        if (!context.delegatedTenant || !context.subject.objectId || !context.controlRecipient) return { kind: 'conflict' };
+        const subject = { objectId: context.subject.objectId }; const account = await options.delegated.accounts.inspect(subject, ctx, true); assertActive(ctx);
+        const saved = await directory.reserveControl(candidate({ kind: 'disconnected', generation: account.generation,
+          targetId: eligible[0]!.id, recipient: context.controlRecipient }, connection?.identityDigest ?? null), ctx); assertActive(ctx);
+        if (saved.reply.kind !== 'disconnected') return { kind: 'conflict' };
+        if (saved.state === 'ready') {
+          await options.delegated.accounts.disconnect(subject, ctx, saved.reply.generation);
+          if ((await options.delegated.accounts.inspect(subject, ctx, true)).linked) return { kind: 'duplicate', replyTarget: '' };
+        }
+        return await control(saved, eligible, false, ctx, connection);
       }
       else if (!connection && command === undefined) reply = { kind: 'discovery', targets: eligible.map(t => ({ ...t })) };
       else if (command !== undefined) {
@@ -173,7 +201,19 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
         else {
           if (!slot || !validConnection(connection!, slot, event, route.conversation.conversationType)) throw new BindingCheckError('binding-conflict');
           if (connection!.state !== 'provisioned') return { kind: 'full' };
+          if (options.delegated && (!context.delegatedTenant || !context.subject.objectId || !context.controlRecipient)) return { kind: 'conflict' };
           await check(slot, connection!, ctx); assertActive(ctx);
+          if (options.delegated) {
+            const subject = { objectId: context.subject.objectId! }; const accounts = options.delegated.accounts;
+            const account = await accounts.inspect(subject, ctx); assertActive(ctx);
+            const acquired = account.linked ? await accounts.acquire(subject, account.generation, assertion => options.delegated!.auth.exchange(assertion, ctx), ctx) : { kind: 'signin-required' };
+            assertActive(ctx);
+            if (acquired.kind !== 'token') {
+              const challenge = await accounts.challenge(subject, event.contextId, context.activityId, ctx); assertActive(ctx);
+              log('signin-required');
+              return await control(candidate({ kind: 'signin', targetId: slot.target.id, challengeId: challenge.id, recipient: context.controlRecipient! }, connection!.identityDigest), eligible, false, ctx, connection);
+            }
+          }
           return await slot.inbox.admit(event, route);
         }
       }
@@ -184,10 +224,65 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
         return { kind: error instanceof DirectoryError && error.code === 'conflict' ? 'conflict' : 'full' };
       }
       throw error;
-    } finally { consumers--; }
+    } finally { consumers--; if (activityKey !== undefined) activities.delete(activityKey); }
+  }
+  async function exchange(input: unknown, supplied: ExchangeContext): Promise<ExchangeResponse> {
+    const d = options.delegated!; let id = '';
+    const response = (ok: boolean): ExchangeResponse => ({ status: ok ? 200 : 412, body: { id, connectionName: d.connectionName,
+      ...(ok ? {} : { failureDetail: 'signin-required' as const }) } });
+    if (consumers >= 4) return response(false); consumers++;
+    const ctx: DirectoryContext = { signal: supplied.signal, deadline: supplied.deadline, authorizeWrite: () => active(ctx) };
+    try {
+      assertActive(ctx);
+      if (!record(input) || !record(input.value) || !record(input.conversation) || !record(input.from) || !record(input.recipient) ||
+          !record(input.channelData) || !record(input.channelData.tenant) || input.channelData.tenant.id !== scope.tenantId ||
+          input.value.connectionName !== d.connectionName || typeof input.value.id !== 'string' || !/^[A-Za-z0-9._-]{1,256}$/u.test(input.value.id) ||
+          typeof input.value.token !== 'string' || !supplied.subject.objectId || input.from.aadObjectId !== supplied.subject.objectId) return response(false);
+      id = input.value.id; const raw = input.value.token; const objectId = supplied.subject.objectId;
+      const conversationId = identity(input.conversation.id); const recipient = { id: identity(input.from.id),
+        ...(input.conversation.conversationType === 'groupChat' ? { isTargeted: true as const } : {}) };
+      const challenge = await d.accounts.getChallenge(id, ctx); assertActive(ctx);
+      if (!challenge || challenge.objectId !== objectId || challenge.conversationId !== conversationId || challenge.expiresAt <= Date.now()) return response(false);
+      await d.auth.verify(raw, objectId, ctx); assertActive(ctx);
+      const connection = await directory.getConnection(conversationId, ctx); assertActive(ctx);
+      if (!connection || connection.state !== 'provisioned') return response(false);
+      const policy = await authorizer.authorize(supplied.subject, ctx, connection.targetId); assertActive(ctx);
+      if (policy.kind !== 'eligible') return response(false);
+      const slot = slots.get(connection.targetId); if (!slot || connection.identityDigest !== slot.target.identityDigest) return response(false);
+      await check(slot, connection, ctx); assertActive(ctx);
+      let pending = exchanges.get(id);
+      if (!pending) {
+        pending = (async () => {
+          const claimed = await d.accounts.claim(challenge, ctx); assertActive(ctx);
+          if (claimed === 'done') return true;
+          if (claimed !== 'claimed') return false;
+          const tokens = await d.auth.exchange(raw, ctx); assertActive(ctx);
+          return d.accounts.complete(challenge, tokens, ctx);
+        })();
+        exchanges.set(id, pending); const owned = pending;
+        void owned.finally(() => { if (exchanges.get(id) === owned) exchanges.delete(id); }).catch(() => {});
+      }
+      const ok = await pending; if (!ok) return response(false);
+      // Durable sign-in wins even if its bounded notification cannot complete.
+      try {
+        assertActive(ctx); const activityId = `signin:${id}`;
+        const receiver = options.config.targets[0]!.config.receiver;
+        if (typeof input.serviceUrl !== 'string' || !receiver.serviceUrls.includes(input.serviceUrl) ||
+          typeof input.recipient.id !== 'string' || !receiver.recipientIds.includes(input.recipient.id)) return response(true);
+        await control({ schema: 1, kind: 'control', scope, conversationId, chatKind: connection.chatKind, activityId,
+          fingerprint: controlFingerprint(scope, conversationId, activityId, objectId, `signin-complete-v1:${id}`, connection.identityDigest),
+          currentTargetDigest: connection.identityDigest, desiredTargetDigest: connection.identityDigest,
+          route: { serviceUrl: input.serviceUrl, channelId: 'msteams', bot: { id: input.recipient.id, role: 'bot' },
+            conversation: { id: conversationId, tenantId: scope.tenantId, conversationType: connection.chatKind } },
+          reply: { kind: 'signed-in', targetId: connection.targetId, recipient }, state: 'ready' }, policy.targets, false, ctx, connection);
+      } catch { /* Notification uncertainty cannot replay OBO or start old work. */ }
+      log('signin-complete'); return response(true);
+    } catch { log('signin-required'); return response(false); }
+    finally { consumers--; }
   }
   return {
     scope: options.config.targets[0]!.config.scope, admit,
+    ...(options.delegated ? { exchange } : {}),
     bindControlSender(value) { if (sender) throw new Error('Control sender already bound'); sender = value; },
     async preflight(targetId, claim, signal) {
       if (consumers >= 4) return false; consumers++;
@@ -208,11 +303,18 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
   };
 }
 
-function formatControl(reply: ControlReply): OutgoingTeamsMessage {
-  const text = reply.kind === 'no-access' ? NO_ACCESS_TEXT : reply.kind === 'discovery' ?
+function record(v: unknown): v is Record<string, unknown> { return v !== null && typeof v === 'object' && !Array.isArray(v); }
+function formatControl(reply: ControlReply, delegated?: DelegatedOptions): ProviderMessage {
+  if (reply.kind === 'signin') {
+    if (!delegated) throw new DirectoryError('unready');
+    return { type: 'message', recipient: reply.recipient, attachments: [{ contentType: 'application/vnd.microsoft.card.oauth', content: {
+      text: 'Sign in to continue. Send your request again after signing in.', connectionName: delegated.connectionName,
+      tokenExchangeResource: { id: reply.challengeId, uri: delegated.apiUri, providerId: 'Azure Active Directory v2' }, buttons: [] } }] };
+  }
+  const text = reply.kind === 'signed-in' ? 'You are signed in. Send your request again.' : reply.kind === 'disconnected' ? 'Your account is disconnected.' : reply.kind === 'no-access' ? NO_ACCESS_TEXT : reply.kind === 'discovery' ?
     `Connect this chat: ${reply.targets.map(t => t.label).join(' or ')}. Send ${reply.targets.map(t => `“use ${t.id}”`).join(' or ')}.` :
     reply.kind === 'connected' ? `This chat uses ${reply.label}. Send your request again.` :
       'Switching this chat to another Orka is not supported.';
-  return { type: 'message', attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: {
+  return { type: 'message', ...('recipient' in reply ? { recipient: { ...reply.recipient, role: 'user' as const } } : {}), attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: {
     type: 'AdaptiveCard', version: '1.4', fallbackText: reply.kind === 'no-access' ? NO_ACCESS_TEXT : 'Orka chat connection', body: [{ type: 'RichTextBlock', inlines: [{ type: 'TextRun', text }] }] } }] };
 }

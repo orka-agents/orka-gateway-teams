@@ -10,7 +10,7 @@ import { safeSdkLogger } from '../ingress/logger.js';
 import type { ReplyRoute } from '../ingress/types.js';
 import { MAX_ADAPTER_RESPONSE_BYTES } from '../protocol/types.js';
 import { MAX_OUTGOING_MESSAGE_BYTES } from '../teams/format.js';
-import type { OutgoingTeamsMessage } from '../teams/format.js';
+import type { ProviderMessage } from './types.js';
 import type { DeliveryContext, ProviderResult, ProviderSender, ProviderRoute } from './types.js';
 import { decodeMeetingMembers, MAX_ROSTER_BYTES } from './meeting-roster.js';
 import type { MembersResult } from './meeting-roster.js';
@@ -48,7 +48,7 @@ export function createProviderSender(acquireToken: () => Promise<string | undefi
     }
   }
 
-  function send(route: Readonly<ProviderRoute>, message: Readonly<OutgoingTeamsMessage>, context: DeliveryContext = {}): Promise<ProviderResult> {
+  function send(route: Readonly<ProviderRoute>, message: Readonly<ProviderMessage>, context: DeliveryContext = {}): Promise<ProviderResult> {
     const deadline = Math.min(performance.now() + 9000, context.deadline ?? Infinity);
     let url: string; let body: Buffer;
     try {
@@ -56,7 +56,10 @@ export function createProviderSender(acquireToken: () => Promise<string | undefi
       const conversationId = identity(route.conversation.id);
       // URL parsers normalize these even after encodeURIComponent.
       if (conversationId === '.' || conversationId === '..') throw new Error();
-      url = `${base}v3/conversations/${encodeURIComponent(conversationId)}/activities`;
+      const targeted = message.recipient?.isTargeted === true;
+      if (message.recipient) identity(message.recipient.id);
+      if (targeted && route.conversation.conversationType !== 'groupChat') throw new Error();
+      url = `${base}v3/conversations/${encodeURIComponent(conversationId)}/activities${targeted ? '?isTargetedActivity=true' : ''}`;
       body = Buffer.from(JSON.stringify(message), 'utf8');
       if (body.length > MAX_OUTGOING_MESSAGE_BYTES) throw new Error();
     } catch { return Promise.resolve({ kind: 'retryable' }); }

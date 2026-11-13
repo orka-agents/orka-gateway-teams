@@ -115,8 +115,17 @@ function respond(res: ServerResponse, status: number, body?: unknown): void {
   if (res.writableEnded || res.destroyed) return;
   const accepted = status === 200 && body !== null && typeof body === 'object' && 'status' in body &&
     ['accepted', 'duplicate', 'ignored'].includes(String(body.status));
-  // Never serialize SDK bodies/errors; even authenticated caller data stays private.
-  const text = JSON.stringify(accepted ? { status: (body as { status: string }).status } : { error: 'Request rejected' });
+  // Only our explicit invoke wrapper may cross this projection, never SDK bodies/errors.
+  let invoke: { id: string; connectionName: string; failureDetail?: 'signin-required' } | undefined;
+  if ((status === 200 || status === 412) && body !== null && typeof body === 'object' && 'invokeResponse' in body) {
+    const value = body.invokeResponse;
+    if (value !== null && typeof value === 'object' && 'id' in value && 'connectionName' in value &&
+        typeof value.id === 'string' && /^[A-Za-z0-9._-]{0,256}$/u.test(value.id) &&
+        typeof value.connectionName === 'string' && /^[A-Za-z0-9._-]{0,128}$/u.test(value.connectionName)) {
+      invoke = { id: value.id, connectionName: value.connectionName, ...(status === 412 ? { failureDetail: 'signin-required' as const } : {}) };
+    }
+  }
+  const text = JSON.stringify(invoke ?? (accepted ? { status: (body as { status: string }).status } : { error: 'Request rejected' }));
   res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(text), 'Connection': 'close' });
   res.end(text);
 }

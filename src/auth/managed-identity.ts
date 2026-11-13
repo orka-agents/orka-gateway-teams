@@ -44,6 +44,21 @@ export function prepareManagedIdentity(input: ManagedIdentityConfig): PreparedMa
   } catch { throw new Error('Invalid managed identity credentials'); }
 }
 
+/** Purpose-bound federated app assertion for delegated OBO; never a Bot token. */
+export function prepareFederatedAssertion(input: ManagedIdentityConfig, dependencies: ManagedIdentityDependencies = {}) {
+  const config = validateBotCredential(input);
+  if (config.credentialMode !== 'managed-identity-federation') throw tokenFailure();
+  const aca = config.managedIdentityHost === 'azure-container-apps' ? prepareAcaIdentity() : undefined;
+  const { acaRequest, imdsRequest } = dependencies; const tenantId = input.tenantId.toLowerCase();
+  return async () => {
+    assertManagedIdentityEnvironment(process.env, config.managedIdentityHost); aca?.assertUsable();
+    if (!tlsVerificationEnabled()) throw tokenFailure();
+    const response = aca ? await aca.requestBotAssertion(config.managedIdentityClientId, acaRequest) :
+      await requestManagedIdentity(config.managedIdentityClientId, imdsRequest);
+    if (!tlsVerificationEnabled()) throw tokenFailure();
+    return selectedAssertion(response, tenantId, config.managedIdentityPrincipalId);
+  };
+}
 function selectedAssertion(response: unknown, tenantId: string, principalId: string): string {
   if (!response || typeof response !== 'object' || !('access_token' in response) || !validAccessToken(response.access_token)) throw tokenFailure();
   const token = response.access_token;
