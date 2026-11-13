@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { identity } from '../ingress/codec.js';
 import { canonicalJSON, parseCanonicalJSON, validateScope } from '../directory/codec.js';
 import { createNativeTable } from '../directory/table.js';
@@ -7,18 +7,20 @@ import { DirectoryError } from '../directory/types.js';
 import { etag, integer, object, uuid } from '../storage/table/codec.js';
 
 export interface AccountSubject { objectId: string }
-export interface AccountTokens { accessToken: string; expiresAt: number; assertion?: string; assertionExpiresAt?: number }
+export interface AccountTokens { accessToken: string; expiresAt: number; refreshToken?: string; assertion?: string; assertionExpiresAt?: number }
 export interface AccountChallenge {
   id: string; objectId: string; conversationId: string; activityId: string; generation: number; expiresAt: number;
-  state: 'open' | 'exchanging' | 'done' | 'failed';
+  state: 'open' | 'exchanging' | 'committing' | 'done' | 'failed'; method?: 'browser';
 }
+export interface BrowserAttempt { challenge: AccountChallenge; state: string; nonce: string; verifier: string }
 export class AccountError extends Error {
   constructor(readonly code: 'invalid-input' | 'corrupt' | 'unavailable' | 'conflict' | 'unready' | 'busy' | 'closed') {
     super(`Account storage: ${code}`); this.name = 'AccountError';
   }
 }
-type Account = { kind: 'account'; objectId: string; generation: number; lastUsed: number; tokens?: AccountTokens };
-type Challenge = AccountChallenge & { kind: 'challenge'; ownerUUID?: string };
+type Account = { kind: 'account'; objectId: string; generation: number; lastUsed: number; tokens?: AccountTokens; challengeId?: string };
+type Challenge = AccountChallenge & { kind: 'challenge'; ownerUUID?: string;
+  browser?: { state: string; nonce: string; verifier: string; consumed: boolean } };
 type Document = Account | Challenge;
 // The native transport cannot accept a plaintext document or a token-bearing value.
 type Ciphertext = { generation: number; ciphertext: Buffer };
@@ -62,20 +64,30 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
   };
   const docKey = (v: Document) => v.kind === 'account' ? accountKey(v.objectId) : idKey(v.id);
   function validTokens(input: unknown): AccountTokens {
-    const v = object(input, ['accessToken', 'expiresAt', 'assertion', 'assertionExpiresAt']);
+    const v = object(input, ['accessToken', 'expiresAt', 'refreshToken', 'assertion', 'assertionExpiresAt']);
     const token = (s: unknown) => { if (typeof s !== 'string' || !s || Buffer.byteLength(s) > 16 * 1024 || /[\p{Cc}\uD800-\uDFFF]/u.test(s)) bad(); };
     token(v.accessToken); integer(v.expiresAt, 1, Number.MAX_SAFE_INTEGER);
+    if (v.refreshToken !== undefined) token(v.refreshToken);
     if (v.assertion !== undefined || v.assertionExpiresAt !== undefined) { token(v.assertion); integer(v.assertionExpiresAt, 1, Number.MAX_SAFE_INTEGER); }
     return v as unknown as AccountTokens;
   }
   function validate(v: Document): Document {
     identity(v.objectId); integer(v.generation, 1, Number.MAX_SAFE_INTEGER);
     if (v.kind === 'account') {
-      object(v, ['kind', 'objectId', 'generation', 'lastUsed', 'tokens']); integer(v.lastUsed, 0, Number.MAX_SAFE_INTEGER);
+      object(v, ['kind', 'objectId', 'generation', 'lastUsed', 'tokens', 'challengeId']); integer(v.lastUsed, 0, Number.MAX_SAFE_INTEGER);
       if (v.tokens !== undefined) validTokens(v.tokens);
+      if (v.challengeId !== undefined) idKey(v.challengeId);
     } else {
-      object(v, ['kind', 'id', 'objectId', 'conversationId', 'activityId', 'generation', 'expiresAt', 'state', 'ownerUUID']);
-      if (v.kind !== 'challenge' || !['open', 'exchanging', 'done', 'failed'].includes(v.state)) bad();
+      object(v, ['kind', 'id', 'objectId', 'conversationId', 'activityId', 'generation', 'expiresAt', 'state', 'ownerUUID', 'method', 'browser']);
+      if (v.kind !== 'challenge' || !['open', 'exchanging', 'committing', 'done', 'failed'].includes(v.state) ||
+        v.method !== undefined && v.method !== 'browser') bad();
+      if (v.browser !== undefined) {
+        const b = object(v.browser, ['state', 'nonce', 'verifier', 'consumed']);
+        if (typeof b.state !== 'string' || !b.state.startsWith(v.id + '.') || !/^[A-Za-z0-9_-]{43}$/u.test(b.state.slice(v.id.length + 1)) ||
+          typeof b.nonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(b.nonce) ||
+          typeof b.verifier !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(b.verifier) || typeof b.consumed !== 'boolean') bad();
+      }
+      if (v.method === 'browser' && !v.browser?.consumed) bad();
       identity(v.conversationId); identity(v.activityId); integer(v.expiresAt, 1, Number.MAX_SAFE_INTEGER); idKey(v.id);
       if (!v.id.startsWith(challengeHash(v) + '.') || (v.state !== 'open' && v.ownerUUID === undefined)) bad();
       if (v.ownerUUID !== undefined) uuid(v.ownerUUID);
@@ -155,20 +167,30 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     return bad(result.kind === 'conflict' ? 'conflict' : 'unavailable');
   }
   const usable = (v: Account): boolean => !!v.tokens && now() - v.lastUsed < idle;
-  const publicChallenge = ({ kind: _kind, ownerUUID: _owner, ...ch }: Challenge): AccountChallenge => ch;
+  const publicChallenge = ({ kind: _kind, ownerUUID: _owner, browser: _browser, ...ch }: Challenge): AccountChallenge => ch;
+  const attempt = (ch: Challenge): BrowserAttempt => ({ challenge: publicChallenge(ch), state: ch.browser!.state,
+    nonce: ch.browser!.nonce, verifier: ch.browser!.verifier });
+  const browserAvailable = (ch: Challenge) => ['open', 'exchanging', 'failed'].includes(ch.state) && !ch.browser?.consumed && now() < ch.expiresAt;
   const sameChallenge = (a: Document, b: AccountChallenge): a is Challenge => a.kind === 'challenge' &&
     canonicalJSON(publicChallenge({ ...a, state: b.state })) === canonicalJSON(b);
-  async function current(ch: AccountChallenge, ctx: DirectoryContext, done = false) {
+  async function current(ch: AccountChallenge, ctx: DirectoryContext, state: AccountChallenge['state'] = 'exchanging') {
     const row = await read(idKey(ch.id), ctx); const a = await read(accountKey(ch.objectId), ctx);
     if (!row || !sameChallenge(row.value, ch) || row.value.ownerUUID !== ownerUUID ||
-      row.value.state !== (done ? 'done' : 'exchanging') || (!done && now() >= ch.expiresAt) || a?.value.generation !== ch.generation) return undefined;
+      row.value.state !== state || (state !== 'done' && now() >= ch.expiresAt) || a?.value.generation !== ch.generation) return undefined;
     return { row, account: a };
   }
   return {
     inspect(subject: AccountSubject, ctx: DirectoryContext, forDisconnect = false): Promise<{ generation: number; linked: boolean }> {
       return run(ctx, async c => { const r = await read(accountKey(subject.objectId), c); const v = r?.value as Account | undefined;
         return { generation: v?.generation ?? 0, linked: !!v && usable(v) && !!v.tokens &&
-          (v.tokens.expiresAt > now() || (tokensFor(v, r!.etag)?.assertionExpiresAt ?? 0) > now()) }; }, forDisconnect);
+          (v.tokens.expiresAt > now() || !!v.tokens.refreshToken || (tokensFor(v, r!.etag)?.assertionExpiresAt ?? 0) > now()) }; }, forDisconnect);
+    },
+    published(ch: AccountChallenge, ctx: DirectoryContext): Promise<boolean> {
+      return run(ctx, async c => {
+        idKey(ch.id); const row = await read(accountKey(ch.objectId), c); const a = row?.value;
+        return a?.kind === 'account' && a.challengeId === ch.id && a.generation === ch.generation &&
+          usable(a) && (a.tokens?.expiresAt ?? 0) > now();
+      });
     },
     challenge(subject: AccountSubject, conversationId: string, activityId: string, ctx: DirectoryContext): Promise<AccountChallenge> {
       return run(ctx, async c => {
@@ -190,10 +212,39 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
       return run(ctx, async c => { const r = await read(idKey(id), c);
         return r?.value.kind === 'challenge' && r.value.id === id ? publicChallenge(r.value) : undefined; });
     },
+    prepareBrowser(ch: AccountChallenge, ctx: DirectoryContext): Promise<BrowserAttempt | undefined> {
+      return run(ctx, async c => {
+        const row = await read(idKey(ch.id), c); const a = await read(accountKey(ch.objectId), c);
+        if (!row || !sameChallenge(row.value, ch) || !browserAvailable(row.value) || a?.value.generation !== ch.generation) return undefined;
+        let saved = row;
+        if (!row.value.browser) {
+          const random = () => randomBytes(32).toString('base64url');
+          saved = await persist(row, { ...row.value, browser: { state: `${ch.id}.${random()}`, nonce: random(), verifier: random(), consumed: false } }, c,
+            v => sameChallenge(v, ch) && browserAvailable(v) && !!v.browser);
+        }
+        if (saved.value.kind !== 'challenge' || !browserAvailable(saved.value) ||
+          (await read(accountKey(ch.objectId), c))?.value.generation !== ch.generation) return undefined;
+        return attempt(saved.value);
+      });
+    },
+    claimBrowser(state: string, ctx: DirectoryContext): Promise<BrowserAttempt | undefined> {
+      return run(ctx, async c => {
+        if (typeof state !== 'string' || !/^[a-f0-9]{64}\.[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\.[A-Za-z0-9_-]{43}$/u.test(state)) return undefined;
+        const row = await read(idKey(state.slice(0, 101)), c);
+        if (row?.value.kind !== 'challenge' || !browserAvailable(row.value) || !row.value.browser ||
+          !timingSafeEqual(Buffer.from(state), Buffer.from(row.value.browser.state))) return undefined;
+        const ch = row.value; const a = await read(accountKey(ch.objectId), c);
+        if (a?.value.generation !== ch.generation) return undefined;
+        const claimed: Challenge = { ...ch, method: 'browser', state: 'exchanging', ownerUUID, browser: { ...ch.browser!, consumed: true } };
+        try { await persist(row, claimed, c); }
+        catch (e) { if (e instanceof AccountError && ['conflict', 'unavailable'].includes(e.code)) return undefined; throw e; }
+        return await current(publicChallenge(claimed), c) ? attempt(claimed) : undefined;
+      });
+    },
     claim(ch: AccountChallenge, ctx: DirectoryContext): Promise<'claimed' | 'done' | 'unavailable'> {
       return run(ctx, async c => {
         const row = await read(idKey(ch.id), c); const a = await read(accountKey(ch.objectId), c);
-        if (!row || !sameChallenge(row.value, ch) || a?.value.generation !== ch.generation) return 'unavailable';
+        if (!row || !sameChallenge(row.value, ch) || row.value.method === 'browser' || a?.value.generation !== ch.generation) return 'unavailable';
         if (row.value.state === 'done') return 'done';
         if (row.value.state !== 'open' || now() >= ch.expiresAt) return 'unavailable';
         try { await persist(row, { ...row.value, state: 'exchanging', ownerUUID }, c); }
@@ -208,17 +259,24 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
           const value = { ...validTokens(tokens) };
           if (value.expiresAt <= now()) return false;
           if (value.assertionExpiresAt !== undefined) value.assertionExpiresAt = Math.min(value.assertionExpiresAt, now() + 10 * minute);
-          const published = await persist(owned.account, { kind: 'account', objectId: ch.objectId, generation: ch.generation, lastUsed: now(), tokens: durable(value) }, c);
-          const after = await current(ch, c); if (!after || after.account.etag !== published.etag) return false;
+          const previous = (owned.account.value as Account).tokens?.refreshToken;
+          if (!value.refreshToken && previous) value.refreshToken = previous;
+          // Serialize takeover against publication, not just against its final acknowledgement.
+          await persist(owned.row, { ...owned.row.value as Challenge, state: 'committing' }, c);
+          if (!await current(ch, c, 'committing')) return false;
+          const published = await persist(owned.account, { kind: 'account', objectId: ch.objectId, generation: ch.generation,
+            lastUsed: now(), tokens: durable(value), challengeId: ch.id }, c);
+          const after = await current(ch, c, 'committing'); if (!after || after.account.etag !== published.etag) return false;
           await persist(after.row, { ...after.row.value as Challenge, state: 'done' }, c);
-          const saved = await current(ch, c, true);
+          const saved = await current(ch, c, 'done');
           if (!saved || saved.account.etag !== published.etag) return false;
           remember(accountKey(ch.objectId).row, ch.generation, published.etag, value);
           return true;
         } catch (e) { if (e instanceof AccountError && ['conflict', 'unavailable'].includes(e.code)) return false; throw e; }
       });
     },
-    acquire(subject: AccountSubject, generation: number, refresh: (assertion: string) => Promise<AccountTokens>, ctx: DirectoryContext): Promise<{ kind: 'token'; accessToken: string } | { kind: 'signin-required' }> {
+    acquire(subject: AccountSubject, generation: number, refresh: (assertion: string) => Promise<AccountTokens>, ctx: DirectoryContext,
+      refreshCache?: (refreshToken: string) => Promise<AccountTokens>): Promise<{ kind: 'token'; accessToken: string } | { kind: 'signin-required' }> {
       return run(ctx, async c => {
         const k = accountKey(subject.objectId); integer(generation, 0, Number.MAX_SAFE_INTEGER);
         const flightKey = `${k.row}:${generation}`; let flight = flights.get(flightKey);
@@ -228,9 +286,11 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
             if (!row || !a || a.generation !== generation || !usable(a) || !a.tokens) return undefined;
             let tokens = tokensFor(a, row.etag)!;
             if (tokens.expiresAt <= now()) {
-              if (!tokens.assertion || (tokens.assertionExpiresAt ?? 0) <= now()) return undefined;
-              try { const renewed = validTokens(await refresh(tokens.assertion)); check(c);
-                tokens = { ...renewed, ...(tokens.assertion ? { assertion: tokens.assertion, assertionExpiresAt: tokens.assertionExpiresAt! } : {}) };
+              const cachedRefresh = tokens.refreshToken && refreshCache;
+              if (!cachedRefresh && (!tokens.assertion || (tokens.assertionExpiresAt ?? 0) <= now())) return undefined;
+              try { const renewed = validTokens(await (cachedRefresh ? refreshCache!(tokens.refreshToken!) : refresh(tokens.assertion!))); check(c);
+                tokens = { ...renewed, ...(tokens.refreshToken && !renewed.refreshToken ? { refreshToken: tokens.refreshToken } : {}),
+                  ...(tokens.assertion ? { assertion: tokens.assertion, assertionExpiresAt: tokens.assertionExpiresAt! } : {}) };
                 if (tokens.expiresAt <= now()) return undefined;
               } catch (error) {
                 check(c);

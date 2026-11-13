@@ -40,6 +40,27 @@ test('request context keeps delegated tenant evidence and Teams recipient separa
   assert.equal(context?.delegatedTenant, true); assert.deepEqual(context?.controlRecipient, { id: input.from.id, isTargeted: true });
 });
 
+test('real receiver routes browser sign-in separately from authenticated activities and fails closed on storage poison', async t => {
+  const auth = await authFixture(t); let events = 0; let callbacks = 0; let begins = 0;
+  const receiver = await startReceiver(receiverConfig, { scope,
+    admit() { events++; throw new Error('Synthetic storage failure'); },
+    browser: { origin: 'https://signin.example.invalid', begin: async () => { begins++; return 'https://login.microsoftonline.com/tenant/oauth2/v2.0/authorize'; },
+      callback: async () => { callbacks++; return true; } },
+  }, auth.dependencies);
+  t.after(() => receiver.stop());
+  const root = `http://127.0.0.1:${receiver.port}`; const challenge = 'a'.repeat(64) + '.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const started = await fetch(root + '/signin?challenge=' + challenge, { redirect: 'manual' });
+  assert.equal(started.status, 302); await started.text();
+  const complete = await fetch(root + '/oauth/callback', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: 'code=synthetic-private-code&state=synthetic-private-state' });
+  assert.equal(complete.status, 200); assert.doesNotMatch(await complete.text(), /synthetic-private/);
+  assert.equal(events, 0); assert.equal(callbacks, 1); assert.equal(begins, 1);
+  assert.equal((await post(receiver.port, auth.token(), activity())).status, 503);
+  await assert.rejects(receiver.failed); assert.equal(events, 1);
+  const refused = await fetch(root + '/signin?challenge=' + challenge, { redirect: 'manual' });
+  assert.equal(refused.status, 400); await refused.text(); assert.equal(begins, 1);
+});
+
 test('sender-targeted group card uses SDK documented targeted endpoint and exact recipient; never room fallback', async () => {
   let url = ''; let body: Record<string, unknown> | undefined;
   const sender = createProviderSender(async () => 'synthetic-bot-token', { post: async (target, bytes) => {

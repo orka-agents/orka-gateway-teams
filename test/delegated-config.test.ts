@@ -27,6 +27,16 @@ test('delegated registry config is atomic, opt-in, MI-only and account table is 
     assert.throws(() => parseRegistryConfig({ ...f.env, [key]: 'partial' }));
   }
 });
+test('browser origin is opt-in and permits only a canonical configured HTTPS destination', () => {
+  const publicOrigin = 'https://signin.example.invalid';
+  assert.equal(snapshotRegistry({ ...input(), sso: { ...sso, publicOrigin } }).sso?.publicOrigin, publicOrigin);
+  for (const bad of ['http://signin.example.invalid', publicOrigin + '/', publicOrigin + '/other', publicOrigin + '?redirect=x',
+    publicOrigin + '#fragment', 'https://user@signin.example.invalid', 'https://signin.example.invalid:444', 'https://SIGNIN.example.invalid',
+    'https://signin.example.invalid:443', 'https://signin.example.invalid\\\\evil']) {
+    assert.throws(() => snapshotRegistry({ ...input(), sso: { ...sso, publicOrigin: bad } }));
+  }
+});
+
 test('private operator key is read/validated before any store ownership or network', async t => {
   const f = registryFixture(t); const path = join(f.directory, 'account-key'); let calls = 0;
   const config = { ...input(), sso: { ...sso, keyFile: path } };

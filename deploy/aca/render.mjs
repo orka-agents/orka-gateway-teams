@@ -100,7 +100,7 @@ export function render(stage, input) {
     contentVersion: '1.0.0.0', resources: [app] };
   if (stage === 'proxy') {
     const nginx = readFileSync(new URL('./nginx.conf', import.meta.url), 'utf8')
-      .replace('proxy_pass http://orka-teams-gateway:3978;', `proxy_pass http://${gatewayName}:3978;`);
+      .replaceAll('proxy_pass http://orka-teams-gateway:3978;', `proxy_pass http://${gatewayName}:3978;`);
     configuration.secrets = [{ name: 'nginx-config', value: nginx }];
     configuration.ingress = { external: true, targetPort: 8080, transport: 'http', allowInsecure: false };
     template.containers = [{ name: 'proxy', image: nginxImage,

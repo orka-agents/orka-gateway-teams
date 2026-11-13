@@ -21,6 +21,7 @@ import type { PolicySubject } from '../policy/admission.js';
 import { convertActivity, stripBotMentions } from '../teams/convert.js';
 import { createStrictAuth } from './auth.js';
 import { NativeAdapter } from './http-adapter.js';
+import type { BrowserSignin } from './http-adapter.js';
 import { safeSdkLogger } from './logger.js';
 import { ConfigurationError, tlsVerificationEnabled, validateReceiverConfig } from './config.js';
 import type { ReceiverConfig } from './config.js';
@@ -33,7 +34,7 @@ export interface AdmissionContext { readonly signal: AbortSignal; readonly deadl
   readonly activityId: string; readonly commandText?: string; readonly delegatedTenant?: boolean; readonly controlRecipient?: ControlRecipient }
 export interface ExchangeContext { readonly signal: AbortSignal; readonly deadline: number; readonly subject: PolicySubject }
 export interface ExchangeResponse { status: 200 | 412; body: { id: string; connectionName: string; failureDetail?: 'signin-required' } }
-export interface AdmissionSink { readonly scope: IngressStore['scope'];
+export interface AdmissionSink { readonly scope: IngressStore['scope']; readonly browser?: BrowserSignin;
   bindControlSender?(sender: Pick<ProviderSender, 'send'>): void;
   exchange?(activity: unknown, context: ExchangeContext): Promise<ExchangeResponse>;
   admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>, context?: AdmissionContext): AdmissionResult | Promise<AdmissionResult> }
@@ -77,8 +78,13 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
   if (signal?.aborted) throw new Error('Ingress startup failed');
   if (sink.scope.appId !== config.appId || sink.scope.tenantId !== config.tenantId) throw new Error('Invalid receiver configuration');
   const recipients = new Set(config.recipientIds); const services = new Set(config.serviceUrls);
-  const adapter = new NativeAdapter(createStrictAuth(config.appId, dependencies.fetchKeys));
   let storageFailed = false; let fail!: (error: Error) => void;
+  const healthy = () => !storageFailed && !signal?.aborted && tlsVerificationEnabled();
+  const adapter = new NativeAdapter(createStrictAuth(config.appId, dependencies.fetchKeys), sink.browser ? {
+    origin: sink.browser.origin,
+    begin: (id, ctx) => healthy() ? sink.browser!.begin(id, ctx) : Promise.resolve(undefined),
+    callback: (form, ctx) => healthy() ? sink.browser!.callback(form, ctx) : Promise.resolve(false),
+  } : undefined);
   const failed = new Promise<never>((_resolve, reject) => { fail = reject; });
   // Consumers can await failure; a receiver used without a relay still fails closed.
   void failed.catch(() => {});

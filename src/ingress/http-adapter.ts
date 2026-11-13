@@ -8,13 +8,21 @@ const DEADLINE_MS = 10000;
 const MAX_PENDING_HANDLERS = 32;
 class HttpFailure extends Error { constructor(readonly status: number) { super('Request rejected'); } }
 
-/** Only the SDK-registered handler is callable; there is no alternate ingress route. */
+export interface BrowserSignin {
+  readonly origin: string;
+  begin(challengeId: string, context: { signal: AbortSignal; deadline: number }): Promise<string | undefined>;
+  callback(form: URLSearchParams, context: { signal: AbortSignal; deadline: number }): Promise<boolean>;
+}
+const CHALLENGE = /^[a-f0-9]{64}\.[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
+
+/** SDK message ingress and explicitly configured, isolated browser sign-in routes. */
 export class NativeAdapter implements IHttpServerAdapter {
   private handler: HttpRouteHandler | undefined;
   private readonly context = new AsyncLocalStorage<{ signal: AbortSignal; deadline: number; finished: Promise<void> }>();
   private readonly work = new Set<Promise<void>>();
   private readonly controllers = new Set<AbortController>();
   private stopping = false;
+  private browsers = 0;
   private stopPromise: Promise<void> | undefined;
   private readonly server = createServer({ maxHeaderSize: 16 * 1024, headersTimeout: DEADLINE_MS,
     requestTimeout: DEADLINE_MS, connectionsCheckingInterval: 1000 }, (req, res) => {
@@ -27,7 +35,7 @@ export class NativeAdapter implements IHttpServerAdapter {
     void operation.then(release, release);
   });
 
-  constructor(private readonly verify: (authorization: unknown, body: unknown) => Promise<boolean>) {
+  constructor(private readonly verify: (authorization: unknown, body: unknown) => Promise<boolean>, private readonly browser?: BrowserSignin) {
     this.server.maxRequestsPerSocket = 1;
     this.server.on('connection', (socket) => {
       // Absolute header deadline, not a sliding inactivity timeout.
@@ -88,8 +96,17 @@ export class NativeAdapter implements IHttpServerAdapter {
     const timer = setTimeout(() => { controller.abort(); respond(res, 408); }, DEADLINE_MS); timer.unref();
     const disconnected = () => { if (!res.writableFinished) controller.abort(); };
     res.once('close', disconnected);
+    let browser = false;
     try {
       if (this.stopping) throw new HttpFailure(503);
+      if (this.browser && (req.url?.startsWith('/signin?') && req.method === 'GET' || req.url === '/oauth/callback' && req.method === 'POST')) {
+        browser = true;
+        if (this.browsers >= 2) throw new HttpFailure(503);
+        this.browsers++;
+        try { await this.handleBrowser(req, res, { signal: controller.signal, deadline }); }
+        finally { this.browsers--; }
+        return;
+      }
       if (req.method !== 'POST' || req.url !== '/api/messages' || !this.handler) throw new HttpFailure(404);
       const headers: Record<string, string | string[]> = {};
       for (const [name, values] of Object.entries(req.headersDistinct)) {
@@ -104,11 +121,51 @@ export class NativeAdapter implements IHttpServerAdapter {
       if (controller.signal.aborted || this.stopping) throw new HttpFailure(503);
       const result = await this.context.run({ signal: controller.signal, deadline, finished }, () => this.handler!({ body, headers }));
       respond(res, result.status, result.body);
-    } catch (error) { respond(res, error instanceof HttpFailure ? error.status : 503); }
+    } catch (error) {
+      const status = error instanceof HttpFailure ? error.status : 503;
+      if (browser) browserResponse(res, status); else respond(res, status);
+    }
     finally {
       clearTimeout(timer); this.controllers.delete(controller); res.off('close', disconnected);
     }
   }
+
+  private async handleBrowser(req: IncomingMessage, res: ServerResponse, ctx: { signal: AbortSignal; deadline: number }): Promise<void> {
+    if (req.method === 'GET') {
+      const query = new URLSearchParams(req.url!.slice('/signin?'.length));
+      const id = query.get('challenge');
+      if ([...query.keys()].length !== 1 || !id || !CHALLENGE.test(id)) throw new HttpFailure(400);
+      const redirect = await this.browser!.begin(id, ctx);
+      if (ctx.signal.aborted || this.stopping) throw new HttpFailure(503);
+      if (!redirect) throw new HttpFailure(400);
+      // A sign-in handler can redirect only to Entra, never a request-supplied return URL.
+      const url = new URL(redirect);
+      if (url.protocol !== 'https:' || url.hostname !== 'login.microsoftonline.com' || url.port || url.username || url.password || url.hash) throw new HttpFailure(503);
+      browserResponse(res, 302, redirect); return;
+    }
+    if (req.headersDistinct['content-type']?.length !== 1 ||
+      !/^application\/x-www-form-urlencoded(?:\s*;\s*charset=utf-8)?$/iu.test(req.headers['content-type'] ?? '') ||
+      req.headers['content-encoding'] !== undefined && req.headers['content-encoding'] !== 'identity') throw new HttpFailure(415);
+    if (Number(req.headers['content-length'] ?? 0) > 16384) throw new HttpFailure(413);
+    const form = await readBody(req, ctx.signal, true) as URLSearchParams;
+    const allowed = new Set(['code', 'state', 'session_state', 'error', 'error_description', 'error_uri']);
+    const keys = [...form.keys()];
+    if (keys.some(key => !allowed.has(key)) || new Set(keys).size !== keys.length || !form.get('state') ||
+      !!form.get('code') === !!form.get('error')) throw new HttpFailure(400);
+    const ok = await this.browser!.callback(form, ctx);
+    if (ctx.signal.aborted || this.stopping) throw new HttpFailure(503);
+    browserResponse(res, ok ? 200 : 400);
+  }
+}
+
+function browserResponse(res: ServerResponse, status: number, location?: string): void {
+  if (res.writableEnded || res.destroyed) return;
+  const text = status === 200 ? 'You are signed in. Send your request again.' : status === 302 ? 'Continue in your browser.' :
+    'Sign-in could not be completed. Send your request again to start a new sign-in.';
+  res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': Buffer.byteLength(text),
+    'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'", 'Connection': 'close', ...(location ? { Location: location } : {}) });
+  res.end(text);
 }
 
 function respond(res: ServerResponse, status: number, body?: unknown): void {
@@ -130,7 +187,7 @@ function respond(res: ServerResponse, status: number, body?: unknown): void {
   res.end(text);
 }
 
-function readBody(req: IncomingMessage, signal: AbortSignal): Promise<unknown> {
+function readBody(req: IncomingMessage, signal: AbortSignal, form = false): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let size = 0; const chunks: Buffer[] = [];
     const cleanup = () => { req.off('data', data); req.off('end', end); req.off('error', failed); signal.removeEventListener('abort', abort); };
@@ -138,12 +195,15 @@ function readBody(req: IncomingMessage, signal: AbortSignal): Promise<unknown> {
     const abort = () => { cleanup(); reject(new HttpFailure(408)); };
     const data = (chunk: Buffer) => {
       size += chunk.length;
-      if (size > BODY_BYTES) { cleanup(); req.pause(); reject(new HttpFailure(413)); }
+      if (size > (form ? 16384 : BODY_BYTES)) { cleanup(); req.pause(); reject(new HttpFailure(413)); }
       else chunks.push(chunk);
     };
     const end = () => {
       cleanup();
-      try { resolve(JSON.parse(new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks)))); }
+      try {
+        const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(Buffer.concat(chunks));
+        resolve(form ? new URLSearchParams(text) : JSON.parse(text));
+      }
       catch { reject(new HttpFailure(400)); }
     };
     req.on('data', data); req.once('end', end); req.once('error', failed); signal.addEventListener('abort', abort, { once: true });
