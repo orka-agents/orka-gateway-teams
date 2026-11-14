@@ -6,6 +6,7 @@ export async function relayOne(store: IngressStore | IngressPort, client: OrkaCl
   const active = () => !signal?.aborted && isReady();
   if (!active()) return false;
   const isPort = 'claimForForwarding' in store;
+  if (!isPort && client.prepare) throw new Error('Async ingress requires forwarding permission');
   let claim: Readonly<IngressClaim>; let preflightFailed = false; let preparation: OrkaPostPreparation | undefined;
   const prepare = async (): Promise<OrkaPostPreparation> => {
     try { return await client.prepare!(claim.event, signal); }
@@ -32,7 +33,6 @@ export async function relayOne(store: IngressStore | IngressPort, client: OrkaCl
     if (!legacy) return false;
     if ('then' in legacy) throw new Error('Async ingress requires forwarding permission');
     claim = legacy;
-    if (client.prepare) preparation = await prepare();
     if (!active()) return false;
   }
   let result: OrkaPostResult;

@@ -89,6 +89,16 @@ for (const loss of ['deadline', 'quarantine', 'cancel', 'readiness', 'authority'
   });
 }
 
+test('delegated clients require a forwarding port before legacy claim or lookup', async t => {
+  const f = await fixture(t, 10000); let lookups = 0;
+  const client = createOrkaClient(f.target, { ca: f.ca, bearerToken: 'ingress', delegatedGrant: async () => {
+    lookups++; return 'a'.repeat(64);
+  } });
+  await assert.rejects(relayOne(f.store, client), /Async ingress requires forwarding permission/u);
+  assert.equal(lookups, 0); assert.equal(f.posts(), 0);
+  assert.equal(f.store.claim()?.attempt, 1, 'refusal must not consume the legacy claim');
+});
+
 for (const outcome of ['ready', 'missing', 'invalid', 'unavailable'] as const) {
   test(`delegated ${outcome} preparation preserves native send and settlement outcomes`, async t => {
     const f = await fixture(t, 10000);
