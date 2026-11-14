@@ -591,3 +591,78 @@ test('native registry SSO stores only ciphertext, authenticates invokes, survive
   for (const row of f.accounts.rows.values()) { const payload = Buffer.from(String(row.Payload), 'base64').toString();
     assert.equal(payload.includes('synthetic-private-workiq'), false); assert.equal(payload.includes(invoke.value.token), false); }
 });
+
+test('native registry wires optional GitHub custody and checks its secret before ownership', async t => {
+  const f = await fixture(t, true, 1); const graph = await policyFixture(t, f);
+  const { githubFixture } = await import('./support/github.js'); const remote = await githubFixture(t);
+  const { toolsFixture } = await import('./support/github-tools.js'); const api = await toolsFixture(t);
+  const keyFile = join(f.files, 'account-key'); const clientSecretFile = join(f.files, 'github-secret');
+  writeFileSync(keyFile, 'ab'.repeat(32), { mode: 0o600 });
+  for (const target of f.config.targets) { target.config.receiver = { ...miConfig, managedIdentityHost: 'azure-container-apps' }; Object.assign(target, { taskPassToken: `controller-${target.id}` }); }
+  const origin = 'https://signin.example.invalid';
+  const config = { ...f.config, sso: { accountTable: 'Accounts', keyFile, apiUri: 'api://gateway', connectionName: 'workiq', publicOrigin: origin },
+    github: { clientId: 'Iv1.synthetic', clientSecretFile } };
+  const { botToken: _notUsed, ...base } = graph.deps; let tableCalls = 0;
+  const refusedDeps = { ...base, tableRequest: (() => { tableCalls++; throw new Error('must not own storage'); }) as typeof https.request };
+  for (const secret of ['', 'bad\nsecret', 'ingress-primary', 'callback-primary', 'controller-primary', 'ab'.repeat(32)]) {
+    writeFileSync(clientSecretFile, secret, { mode: 0o600 }); await assert.rejects(startRegistryRuntime(config, refusedDeps));
+  }
+  assert.equal(tableCalls, 0); writeFileSync(clientSecretFile, 'CLIENT_PRIVATE');
+  const signing = generateKeyPairSync('rsa', { modulusLength: 2048 }); let nonce = ''; const oid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const microsoft = await httpsFixture(t, async (req, res) => {
+    let body = ''; for await (const chunk of req) body += chunk; const form = new URLSearchParams(body);
+    assert.equal(form.get('grant_type'), 'authorization_code'); assert.equal(form.get('redirect_uri'), origin + '/oauth/callback');
+    const id_token = jwt.sign({ tid: miConfig.tenantId, oid, aud: miConfig.appId, nonce, exp: Math.floor(Date.now() / 1000) + 3600,
+      iss: `https://login.microsoftonline.com/${miConfig.tenantId}/v2.0` }, signing.privateKey, { algorithm: 'RS256', keyid: 'github-runtime' });
+    res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ access_token: 'MS_ACCESS_PRIVATE', refresh_token: 'MS_REFRESH_PRIVATE', token_type: 'Bearer', expires_in: 3600, scope: WORK_IQ_SCOPE, id_token }));
+  });
+  const sent: string[] = []; const native = https.request;
+  const deps: RegistryRuntimeDependencies = { ...base, githubRequest: ((url: URL, options: https.RequestOptions, cb: Parameters<typeof https.request>[2]) =>
+    url.pathname.startsWith('/repos/') ? api.request(url, options, cb!) : remote.request(url, options, cb!)) as typeof https.request,
+    managedIdentity: { acaRequest: f.identity.request, entraNetwork: entraNetwork() },
+    delegatedKeys: async () => new Response(JSON.stringify({ keys: [{ ...signing.publicKey.export({ format: 'jwk' }), kid: 'github-runtime', alg: 'RS256', use: 'sig' }] })),
+    delegatedRequest: ((url: URL, options: https.RequestOptions, cb: Parameters<typeof https.request>[2]) => {
+      assert.equal(url.href, `https://login.microsoftonline.com/${miConfig.tenantId}/oauth2/v2.0/token`);
+      return native(new URL(url.pathname, microsoft.baseUrl), { ...options, ca: microsoft.ca, servername: 'localhost' }, cb!);
+    }) as typeof https.request,
+    providerPost: async (_url, bytes) => { sent.push(bytes.toString()); return { status: 201, data: Buffer.from('{"id":"receipt"}') }; } };
+  let runtime = await startRegistryRuntime(config, deps); t.after(() => runtime.stop().catch(() => {}));
+  const message = activity(); message.from.aadObjectId = oid; message.id = 'connect-github'; message.text = 'use primary';
+  assert.equal((await post(runtime.port, f.auth.token(), message)).status, 200);
+  message.id = 'link-github'; message.text = 'link github'; assert.equal((await post(runtime.port, f.auth.token(), message)).status, 200);
+  const root = `http://127.0.0.1:${runtime.port}`; const button = new URL(JSON.parse(sent.at(-1)!).attachments[0].content.buttons[0].value);
+  const start = await fetch(root + button.pathname + button.search, { redirect: 'manual' }); await start.text(); assert.equal(start.status, 302);
+  const ms = new URL(start.headers.get('location')!); nonce = ms.searchParams.get('nonce')!;
+  const proof = await fetch(root + '/oauth/callback', { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: start.headers.get('set-cookie')!.split(';')[0]! },
+    body: new URLSearchParams({ state: ms.searchParams.get('state')!, code: 'MS_CODE_PRIVATE' }).toString() }); await proof.text(); assert.equal(proof.status, 302);
+  const github = new URL(proof.headers.get('location')!); const cookie = proof.headers.get('set-cookie')!.split(';')[0]!;
+  const complete = await fetch(root + '/github/callback?' + new URLSearchParams({ state: github.searchParams.get('state')!, code: 'GH_CODE_PRIVATE' }), { headers: { cookie } });
+  assert.equal(complete.status, 200); await complete.text(); assert.equal(remote.requests.length, 2);
+  await runtime.stop(); await runtime.done;
+  // Seed the controller fixture's admitted authority through public APIs only, with all owners stopped.
+  const target = snapshotRegistry(config).targets[0]!; const seed = createAccountStore({ account: target.config.storage.account, table: 'Accounts',
+    appId: miConfig.appId, tenantId: miConfig.tenantId }, Buffer.from('ab'.repeat(32), 'hex'), f.accounts.dependencies, { allowed: () => true });
+  const ch = await seed.challenge({ objectId: oid }, 'chat-private', 'workiq', accountContext()); await seed.claim(ch, accountContext());
+  await seed.complete(ch, { accessToken: 'MS_ACCESS_PRIVATE', refreshToken: 'MS_REFRESH_PRIVATE', expiresAt: Date.now() + 600000 }, accountContext());
+  const tools = ['workiq', 'github-read-file', 'github-list-issues', 'github-create-issue', 'github-create-pull-request'];
+  const ref = grantReference(target.config.scope, target, 'event-github-tools', 'reply-github-tools');
+  await seed.reserveGrant({ ref, objectId: oid, provider: 'workiq', generation: 1, githubGeneration: 2, targetId: target.id,
+    targetDigest: target.identityDigest!, eventId: 'event-github-tools', tools }, accountContext()); await seed.close();
+  const passBody = { protocolVersion: 'orka.gateway.v1', grantRef: ref, namespaceUID: 'namespace', gatewayUID: target.gatewayUid, taskUID: 'task', tools,
+    deadline: new Date(Date.now() + 60000).toISOString() };
+  const execute = async () => {
+    const issued = await fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/task-passes`, { method: 'POST', headers: {
+      authorization: 'Bearer controller-primary', 'content-type': 'application/json' }, body: JSON.stringify(passBody) });
+    assert.equal(issued.status, 200); const pass = await issued.json() as { pass: string };
+    const result = await fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/task-tools/github-create-issue`, { method: 'POST', headers: {
+      authorization: 'Bearer ' + pass.pass, 'content-type': 'application/json', 'Idempotency-Key': 'runtime-operation' },
+    body: JSON.stringify({ owner: 'acme', repo: 'repo', title: 'Reviewed issue' }) });
+    assert.equal(result.status, 200); assert.deepEqual(await result.json(), { text: '{"number":8,"url":"https://github.com/acme/repo/issues/8"}' });
+  };
+  runtime = await startRegistryRuntime(config, deps); await execute(); assert.equal(api.requests.length, 1);
+  await runtime.stop(); await runtime.done; runtime = await startRegistryRuntime(config, deps); await execute(); assert.equal(api.requests.length, 1);
+  message.id = 'disconnect-github'; message.text = 'disconnect github'; assert.equal((await post(runtime.port, f.auth.token(), message)).status, 200);
+  assert.match(sent.at(-1)!, /GitHub account is disconnected/);
+  await runtime.stop(); await runtime.done; assert.equal(remote.sockets(), 0);
+  assert.doesNotMatch(JSON.stringify({ sent, directory: [...f.directory.rows.values()], accounts: [...f.accounts.rows.values()] }), /PRIVATE/);
+});

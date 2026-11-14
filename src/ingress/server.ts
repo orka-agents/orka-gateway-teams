@@ -82,8 +82,10 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
   const healthy = () => !storageFailed && !signal?.aborted && tlsVerificationEnabled();
   const adapter = new NativeAdapter(createStrictAuth(config.appId, dependencies.fetchKeys), sink.browser ? {
     origin: sink.browser.origin,
-    begin: (id, ctx) => healthy() ? sink.browser!.begin(id, ctx) : Promise.resolve(undefined),
-    callback: (form, ctx) => healthy() ? sink.browser!.callback(form, ctx) : Promise.resolve(false),
+    begin: (id, ctx, cookie) => healthy() ? sink.browser!.begin(id, ctx, cookie) : Promise.resolve(undefined),
+    callback: (form, ctx, cookie) => healthy() ? sink.browser!.callback(form, ctx, cookie) : Promise.resolve(false),
+    ...(sink.browser.githubCallback ? { githubCallback: (form: URLSearchParams, cookie: string, ctx: Parameters<NonNullable<BrowserSignin['githubCallback']>>[2]) =>
+      healthy() ? sink.browser!.githubCallback!(form, cookie, ctx) : Promise.resolve(false) } : {}),
   } : undefined);
   const failed = new Promise<never>((_resolve, reject) => { fail = reject; });
   // Consumers can await failure; a receiver used without a relay still fails closed.

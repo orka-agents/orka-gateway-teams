@@ -34,6 +34,7 @@ test('only configured fixed browser routes bypass Bot authentication; redirect n
   assert.match(String(result.headers['content-security-policy']), /frame-ancestors 'none'/); assert.equal(f.verifications(), 0);
   assert.equal((await call(f.port, '/api/messages', 'POST', '{}', { 'content-type': 'application/json' })).status, 401);
   assert.equal(f.verifications(), 1);
+  assert.equal((await call(f.port, '/github/callback?code=c&state=s')).status, 404);
   const disabled = await fixture(t, false);
   assert.equal((await call(disabled.port, '/signin?challenge=' + challenge)).status, 404);
   assert.equal((await call(disabled.port, '/oauth/callback', 'POST', 'state=x&code=y', { 'content-type': 'application/x-www-form-urlencoded' })).status, 404);

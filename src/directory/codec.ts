@@ -112,18 +112,20 @@ function validate(input: unknown): DirectoryRecord {
     const c = object(r.conversation, ['id', 'tenantId', 'conversationType']);
     if (c.id !== conversationId || c.tenantId !== s.tenantId || c.conversationType !== v.chatKind) bad();
     const reply = object(v.reply); const kind = reply.kind;
-    const delegated = kind === 'signin' || kind === 'signed-in' || kind === 'disconnected';
+    const signin = kind === 'signin' || kind === 'github-signin';
+    const disconnected = kind === 'disconnected' || kind === 'github-disconnected';
+    const delegated = signin || disconnected || kind === 'signed-in' || kind === 'github-signed-in';
     object(reply, kind === 'no-access' ? ['kind'] : kind === 'discovery' ? ['kind', 'targets'] : delegated ?
-      ['kind', 'targetId', 'recipient', ...(kind === 'signin' ? ['challengeId'] : kind === 'disconnected' ? ['generation'] : [])] : ['kind', 'targetId', 'label']);
+      ['kind', 'targetId', 'recipient', ...(signin ? ['challengeId'] : disconnected ? ['generation'] : [])] : ['kind', 'targetId', 'label']);
     if (kind === 'discovery') {
       if (!Array.isArray(reply.targets) || !reply.targets.length || reply.targets.length > 32) bad(); const ids = new Set<string>();
       for (const item of reply.targets) { const t = object(item, ['id', 'label']); const id = target(t.id); text(t.label, 256); if (ids.has(id)) bad(); ids.add(id); }
     } else if (kind === 'connected' || kind === 'switching') { target(reply.targetId); text(reply.label, 256); }
     else if (delegated) {
-      target(reply.targetId); if (kind === 'disconnected') integer(reply.generation, 0, Number.MAX_SAFE_INTEGER);
+      target(reply.targetId); if (disconnected) integer(reply.generation, 0, Number.MAX_SAFE_INTEGER);
       const recipient = object(reply.recipient, ['id', ...(v.chatKind === 'groupChat' ? ['isTargeted'] : [])]); identity(recipient.id);
       if (v.chatKind === 'groupChat' && recipient.isTargeted !== true) bad();
-      if (kind === 'signin' && !/^[A-Za-z0-9._-]{1,256}$/u.test(text(reply.challengeId, 256))) bad();
+      if (signin && !/^[A-Za-z0-9._-]{1,256}$/u.test(text(reply.challengeId, 256))) bad();
     } else if (kind !== 'no-access') bad();
   } else bad();
   return v as unknown as DirectoryRecord;

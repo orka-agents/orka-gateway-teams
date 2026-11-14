@@ -65,6 +65,14 @@ test('lost grant publication response reconciles exact ciphertext once; absent u
   assert.equal(writes, 2);
 });
 
+test('mixed provider generation is immutable while old Work IQ-only grants retain their exact shape', async t => {
+  const f = await grantsFixture(t); const mixed = { ...f.input, githubGeneration: 0,
+    tools: ['workiq', 'github-read-file', 'github-list-issues', 'github-create-issue', 'github-create-pull-request'] };
+  const saved = await f.store.reserveGrant(mixed, context()); assert.equal(saved.githubGeneration, 0); assert.equal(saved.tools.length, 5);
+  await assert.rejects(f.store.reserveGrant({ ...mixed, githubGeneration: 2 }, context()), /conflict/);
+  await f.store.close(); assert.deepEqual(await f.open().getGrant(f.input.ref, context()), saved);
+});
+
 test('authority loss and expired binding forbid further grant use', async t => {
   const f = await grantsFixture(t); await f.store.reserveGrant(f.input, context());
   await assert.rejects(f.store.bindGrant(f.input.ref, target.id, { ...frozen, deadline: epoch }, context()), /invalid-input/);
