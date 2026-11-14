@@ -248,8 +248,10 @@ function delegatedFixture() {
   const accounts = {
     reserveGrant: async (input: TaskGrant) => input,
     getGrant: async (_ref: string) => undefined as TaskGrant | undefined,
-    safeGrantOutput: async () => true,
+    safeGrantOutput: async () => true, safeOutput: async () => true, invalidate: async () => {},
+    reserveWrite: async () => { throw new Error('not a write'); }, completeWrite: async () => {},
     bindGrant: async () => { throw new Error('not issuance'); },
+    prepareGitHub: async () => undefined, claimGitHub: async () => undefined,
     prepareBrowser: async (_ch: AccountChallenge) => consumed || done ? undefined : attempt,
     claimBrowser: async (state: string) => {
       if (consumed || state !== attempt.state) return undefined;

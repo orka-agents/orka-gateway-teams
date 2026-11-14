@@ -95,7 +95,7 @@ async function fixture(mode: string): Promise<void> {
         if (req.url === '/stream-request') { req.once('data', () => res.end('{"streamed":true}')); return; }
         req.resume(); req.once('end', () => res.end(JSON.stringify({ path: req.url,
           authorizationMatches: req.headersDistinct.authorization?.length === 1 && req.headersDistinct.authorization[0] === `Bearer ${settings.env.ORKA_OUTBOUND_BEARER_TOKEN}`,
-          connection: req.headers.connection, version: req.httpVersion })));
+          connection: req.headers.connection, version: req.httpVersion, cookie: req.headers.cookie })));
       });
       await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
     }
@@ -496,21 +496,31 @@ async function smoke(): Promise<void> {
       assert.equal(performance.now() < acaDeadline, true); await sleep(100);
     }
     const signin = '/signin?challenge=' + 'a'.repeat(64) + '.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const githubSuccess = '/github/callback?code=synthetic-code&state=synthetic-state';
+    const githubDenial = '/github/callback?error=access_denied&error_description=The+user+denied+access.&state=synthetic-state';
+    const cookie = '__Host-github-link=' + 'a'.repeat(43);
     for (const [path, method, status] of [[signin, 'GET', 200], ['/oauth/callback', 'POST', 200],
+      [githubSuccess, 'GET', 200], [githubDenial, 'GET', 200], [githubSuccess, 'POST', 404],
+      ['/github/callback', 'GET', 404], ['/github/callback/?code=c&state=s', 'GET', 404],
+      ['//github/callback?code=c&state=s', 'GET', 404], ['/github/%63allback?code=c&state=s', 'GET', 404],
       ['/api/messages', 'POST', 200], ['/oauth/callback?other=1', 'POST', 404], ['/oauth/callback', 'GET', 404],
       ['/signin?challenge=synthetic', 'POST', 404], ['/api/messages?other=1', 'POST', 404],
       ['/signin/?challenge=synthetic', 'GET', 404], ['/v1/health', 'GET', 404]] as const) {
-      const response = await fetch(`http://${smokeHost}:8080${path}`, { method,
-        ...(method === 'POST' ? { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'state=synthetic&code=synthetic' } : {}) });
+      const response = await fetch(`http://${smokeHost}:8080${path}`, { method, headers: { Cookie: cookie, 'Content-Type': 'application/x-www-form-urlencoded' },
+        ...(method === 'POST' ? { body: 'state=synthetic&code=synthetic' } : {}) });
       assert.equal(response.status, status);
-      if (status === 200) assert.equal((await response.json() as { path: string }).path, path); else await response.text();
+      if (status === 200) { const result = await response.json() as { path: string; cookie: string };
+        assert.equal(result.path, path); assert.equal(result.cookie, cookie); } else await response.text();
     }
     stage = 'fixed public browser paths preserve the private challenge and form bytes';
     const browserPath = '/signin?challenge=' + 'a'.repeat(64) + '.aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-    for (const [path, method] of [[browserPath, 'GET'], ['/oauth/callback', 'POST']] as const) {
-      const response = await https(ca, publicPort, path, { method, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: method === 'POST' ? 'state=synthetic&code=synthetic' : '' });
-      assert.equal(response.status, 200); assert.equal(JSON.parse(response.body).path, path);
+    for (const [path, method] of [[browserPath, 'GET'], ['/oauth/callback', 'POST'], [githubSuccess, 'GET'], [githubDenial, 'GET']] as const) {
+      const response = await https(ca, publicPort, path, { method, headers: { Cookie: cookie, 'Content-Type': 'application/x-www-form-urlencoded' }, body: method === 'POST' ? 'state=synthetic&code=synthetic' : '' });
+      assert.equal(response.status, 200); const result = JSON.parse(response.body); assert.equal(result.path, path); assert.equal(result.cookie, cookie);
     }
+    for (const path of ['/github/callback', '/github/callback/?code=c&state=s', '//github/callback?code=c&state=s', '/github/%63allback?code=c&state=s'])
+      assert.equal((await https(ca, publicPort, path)).status, 404);
+    assert.equal((await https(ca, publicPort, githubSuccess, { method: 'POST' })).status, 404);
     assert.equal((await https(ca, publicPort, '/oauth/callback')).status, 404);
     assert.equal((await https(ca, publicPort, '/signin?challenge=synthetic', { method: 'POST' })).status, 404);
     stage = 'unchanged private URI/auth and no redirect rewriting';

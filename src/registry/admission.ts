@@ -1,8 +1,9 @@
 import { identity } from '../delivery/identity.js';
 import { AccountError } from '../accounts/store.js';
-import { grantReference } from '../accounts/grants.js';
+import { grantReference, githubTools } from '../accounts/grants.js';
 import type { AccountStore, AccountChallenge, AccountTokens } from '../accounts/store.js';
 import { uuid } from '../policy/config.js';
+import type { createGitHub } from '../accounts/github.js';
 import type { createDelegatedAuth } from '../auth/delegated.js';
 import type { ExchangeContext, ExchangeResponse } from '../ingress/server.js';
 import { bindingName, controlFingerprint, parseUseCommand } from '../directory/codec.js';
@@ -26,7 +27,7 @@ import type { RegistryConfig, RegistryTarget } from './config.js';
 type Category = BindingCheckError['category'] | 'graph-unavailable' | 'signin-required' | 'signin-complete';
 interface DelegatedOptions { accounts: AccountStore; auth: ReturnType<typeof createDelegatedAuth>; apiUri: string; connectionName: string; publicOrigin?: string }
 interface Slot { target: RegistryTarget; inbox: Pick<IngressPort, 'admit'>; provisioner: ReturnType<typeof createBindingProvisioner> }
-interface Options { delegated?: DelegatedOptions; config: RegistryConfig; directory: Directory; slots: readonly Slot[]; authority: LeaseAuthority; active(): boolean;
+interface Options { github?: { accounts: AccountStore; auth: ReturnType<typeof createGitHub> }; delegated?: DelegatedOptions; config: RegistryConfig; directory: Directory; slots: readonly Slot[]; authority: LeaseAuthority; active(): boolean;
   authorizer: Pick<ReturnType<typeof createGroupAuthorizer>, 'authorize'>; log(category: Category, targetId?: string): void }
 
 /** Four complete consumers share the directory's four places, including control settlement.
@@ -156,22 +157,26 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
       let reply: ControlReply;
       if (denied) reply = { kind: 'no-access' };
       else if (previous && (previous.state !== 'ready' || previous.reply.kind !== 'connected')) {
-        if (previous.state === 'ready' && previous.reply.kind === 'disconnected' && options.delegated && context.subject.objectId) {
+        if (previous.state === 'ready' && (previous.reply.kind === 'disconnected' || previous.reply.kind === 'github-disconnected') && options.delegated && context.subject.objectId) {
           const subject = { objectId: context.subject.objectId };
-          await options.delegated.accounts.disconnect(subject, ctx, previous.reply.generation); assertActive(ctx);
-          if ((await options.delegated.accounts.inspect(subject, ctx, true)).linked) return { kind: 'duplicate', replyTarget: '' };
+          const accounts = previous.reply.kind === 'github-disconnected' ? options.github?.accounts : options.delegated.accounts;
+          if (!accounts) return { kind: 'conflict' };
+          await accounts.disconnect(subject, ctx, previous.reply.generation); assertActive(ctx);
+          if ((await accounts.inspect(subject, ctx, true)).linked) return { kind: 'duplicate', replyTarget: '' };
         }
         return await control(previous, eligible, false, ctx, connection);
       }
-      else if (options.delegated && context.commandText?.trim() === 'disconnect') {
+      else if (options.delegated && (context.commandText?.trim() === 'disconnect' || options.github && context.commandText?.trim() === 'disconnect github')) {
         if (!context.delegatedTenant || !context.subject.objectId || !context.controlRecipient) return { kind: 'conflict' };
-        const subject = { objectId: context.subject.objectId }; const account = await options.delegated.accounts.inspect(subject, ctx, true); assertActive(ctx);
-        const saved = await directory.reserveControl(candidate({ kind: 'disconnected', generation: account.generation,
+        const accounts = context.commandText?.trim() === 'disconnect github' ? options.github!.accounts : options.delegated.accounts;
+        const kind = context.commandText?.trim() === 'disconnect github' ? 'github-disconnected' : 'disconnected';
+        const subject = { objectId: context.subject.objectId }; const account = await accounts.inspect(subject, ctx, true); assertActive(ctx);
+        const saved = await directory.reserveControl(candidate({ kind, generation: account.generation,
           targetId: eligible[0]!.id, recipient: context.controlRecipient }, connection?.identityDigest ?? null), ctx); assertActive(ctx);
-        if (saved.reply.kind !== 'disconnected') return { kind: 'conflict' };
+        if (saved.reply.kind !== kind || !('generation' in saved.reply)) return { kind: 'conflict' };
         if (saved.state === 'ready') {
-          await options.delegated.accounts.disconnect(subject, ctx, saved.reply.generation);
-          if ((await options.delegated.accounts.inspect(subject, ctx, true)).linked) return { kind: 'duplicate', replyTarget: '' };
+          await accounts.disconnect(subject, ctx, saved.reply.generation);
+          if ((await accounts.inspect(subject, ctx, true)).linked) return { kind: 'duplicate', replyTarget: '' };
         }
         return await control(saved, eligible, false, ctx, connection);
       }
@@ -206,6 +211,11 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
           if (connection!.state !== 'provisioned') return { kind: 'full' };
           if (options.delegated && (!context.delegatedTenant || !context.subject.objectId || !context.controlRecipient)) return { kind: 'conflict' };
           await check(slot, connection!, ctx); assertActive(ctx);
+          if (options.github && context.commandText?.trim() === 'link github') {
+            const challenge = await options.github.accounts.challenge({ objectId: context.subject.objectId! }, event.contextId, context.activityId, ctx); assertActive(ctx);
+            return await control(candidate({ kind: 'github-signin', targetId: slot.target.id, challengeId: challenge.id, recipient: context.controlRecipient! },
+              connection!.identityDigest), eligible, false, ctx, connection);
+          }
           if (options.delegated) {
             const subject = { objectId: context.subject.objectId! }; const accounts = options.delegated.accounts;
             const account = await accounts.inspect(subject, ctx); assertActive(ctx);
@@ -217,10 +227,12 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
               log('signin-required');
               return await control(candidate({ kind: 'signin', targetId: slot.target.id, challengeId: challenge.id, recipient: context.controlRecipient! }, connection!.identityDigest), eligible, false, ctx, connection);
             }
+            const github = options.github ? await options.github.accounts.inspect(subject, ctx) : undefined; assertActive(ctx);
             try {
               await accounts.reserveGrant({ ref: grantReference(scope, slot.target, event.externalEventId, event.replyTarget!), objectId: subject.objectId,
                 generation: account.generation, provider: 'workiq', targetId: slot.target.id, targetDigest: slot.target.identityDigest!,
-                eventId: event.externalEventId, tools: ['workiq'] }, ctx); assertActive(ctx);
+                eventId: event.externalEventId, tools: ['workiq', ...(options.github ? githubTools : [])],
+                ...(options.github ? { githubGeneration: github?.linked ? github.generation : 0 } : {}) }, ctx); assertActive(ctx);
             } catch (error) { if (error instanceof AccountError && error.code === 'conflict') return { kind: 'conflict' }; throw error; }
           }
           return await slot.inbox.admit(event, route);
@@ -289,9 +301,9 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     } catch { log('signin-required'); return response(false); }
     finally { consumers--; }
   }
-  async function completeLinked(ch: AccountChallenge, tokens: AccountTokens, ctx: DirectoryContext): Promise<boolean> {
-    try { if (await options.delegated!.accounts.complete(ch, tokens, ctx)) return true; } catch { /* Reconcile a possible account publication below. */ }
-    return options.delegated!.accounts.published(ch, ctx);
+  async function completeLinked(ch: AccountChallenge, tokens: AccountTokens, ctx: DirectoryContext, accounts = options.delegated!.accounts): Promise<boolean> {
+    try { if (await accounts.complete(ch, tokens, ctx)) return true; } catch { /* Reconcile a possible account publication below. */ }
+    return accounts.published(ch, ctx);
   }
   async function browserOperation<T>(supplied: DirectoryContext, failed: T, action: (ctx: DirectoryContext) => Promise<T>): Promise<T> {
     // Public browser work may borrow only one of the four admission places.
@@ -302,9 +314,9 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     catch { log('signin-required'); return failed; }
     finally { browserBusy = false; consumers--; }
   }
-  async function browserControl(ch: AccountChallenge, ctx: DirectoryContext) {
+  async function browserControl(ch: AccountChallenge, ctx: DirectoryContext, github = false) {
     const saved = await directory.getControl({ kind: 'control', conversationId: ch.conversationId, activityId: ch.activityId }, ctx); assertActive(ctx);
-    if (!saved || saved.reply.kind !== 'signin' || saved.reply.challengeId !== ch.id || ch.expiresAt <= Date.now()) return undefined;
+    if (!saved || saved.reply.kind !== (github ? 'github-signin' : 'signin') || !('challengeId' in saved.reply) || saved.reply.challengeId !== ch.id || ch.expiresAt <= Date.now()) return undefined;
     const connection = await directory.getConnection(ch.conversationId, ctx); assertActive(ctx);
     if (!connection || connection.state !== 'provisioned' || connection.targetId !== saved.reply.targetId ||
       connection.identityDigest !== saved.currentTargetDigest || connection.chatKind !== saved.chatKind) return undefined;
@@ -318,17 +330,25 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
   const browser = d && origin ? {
     origin,
     begin: (id: string, supplied: DirectoryContext) => browserOperation<string | undefined>(supplied, undefined, async ctx => {
-      const ch = await d.accounts.getChallenge(id, ctx); assertActive(ctx);
-      if (!ch || !await browserControl(ch, ctx)) return undefined;
-      const attempt = await d.accounts.prepareBrowser(ch, ctx); assertActive(ctx);
+      const workiq = await d.accounts.getChallenge(id, ctx); assertActive(ctx);
+      const ch = workiq ?? await options.github?.accounts.getChallenge(id, ctx); assertActive(ctx);
+      if (!ch || !await browserControl(ch, ctx, !workiq)) return undefined;
+      const attempt = await (workiq ? d.accounts : options.github!.accounts).prepareBrowser(ch, ctx); assertActive(ctx);
       return attempt ? d.auth.authorizeUrl(attempt, `${origin}/oauth/callback`) : undefined;
     }),
-    callback: (form: URLSearchParams, supplied: DirectoryContext & { committed?(): void }) => browserOperation(supplied, false, async ctx => {
-      const attempt = await d.accounts.claimBrowser(form.get('state') ?? '', ctx); assertActive(ctx);
+    callback: (form: URLSearchParams, supplied: DirectoryContext & { committed?(): void }) => browserOperation<boolean | { redirect: string; cookie: { value: string; maxAge: number } }>(supplied, false, async ctx => {
+      const workiq = await d.accounts.claimBrowser(form.get('state') ?? '', ctx); assertActive(ctx);
+      const attempt = workiq ?? await options.github?.accounts.claimBrowser(form.get('state') ?? '', ctx); assertActive(ctx);
       // Even consent refusal burns its state; retry starts with a new chat request.
       if (!attempt || form.has('error') || !form.get('code')) return false;
-      const ch = attempt.challenge; const bound = await browserControl(ch, ctx); if (!bound) return false;
+      const ch = attempt.challenge; const bound = await browserControl(ch, ctx, !workiq); if (!bound) return false;
       const tokens = await d.auth.redeemCode(form.get('code')!, attempt, `${origin}/oauth/callback`, ctx); assertActive(ctx);
+      if (!workiq) {
+        if (!await browserControl(ch, ctx, true)) return false;
+        const continuation = await options.github!.accounts.prepareGitHub(attempt, ctx); assertActive(ctx);
+        return continuation ? { redirect: options.github!.auth.authorizeUrl(continuation), cookie: { value: continuation.cookie,
+          maxAge: Math.max(1, Math.min(600, Math.floor((ch.expiresAt - Date.now()) / 1000))) } } : false;
+      }
       if (!await completeLinked(ch, tokens, ctx)) return false;
       supplied.committed?.();
       try {
@@ -340,6 +360,22 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
       } catch { /* Saved sign-in wins; uncertain notification never starts old work. */ }
       log('signin-complete'); return true;
     }),
+    ...(options.github ? { githubCallback: (form: URLSearchParams, cookie: string, supplied: DirectoryContext & { committed?(): void }) => browserOperation(supplied, false, async ctx => {
+      const g = options.github!; const attempt = await g.accounts.claimGitHub(form.get('state') ?? '', cookie, ctx); assertActive(ctx);
+      if (!attempt || form.has('error') || !form.get('code')) return false;
+      const ch = attempt.challenge; const bound = await browserControl(ch, ctx, true); if (!bound) return false;
+      const tokens = await g.auth.redeemCode(form.get('code')!, attempt, ctx); assertActive(ctx);
+      if (!await browserControl(ch, ctx, true) || !await completeLinked(ch, tokens, ctx, g.accounts)) return false;
+      supplied.committed?.();
+      try {
+        const activityId = `github-signin:${ch.id}`; const connection = bound.connection;
+        await control({ schema: 1, kind: 'control', scope, conversationId: ch.conversationId, chatKind: connection.chatKind, activityId,
+          fingerprint: controlFingerprint(scope, ch.conversationId, activityId, ch.objectId, `github-signin-complete-v1:${ch.id}`, connection.identityDigest),
+          currentTargetDigest: connection.identityDigest, desiredTargetDigest: connection.identityDigest, route: bound.saved.route,
+          reply: { kind: 'github-signed-in', targetId: connection.targetId, recipient: bound.recipient }, state: 'ready' }, bound.targets, false, ctx, connection);
+      } catch { /* Durable linking wins; never replay the old request or an uncertain notification. */ }
+      log('signin-complete'); return true;
+    }) } : {}),
   } : undefined;
   return {
     scope: options.config.targets[0]!.config.scope, admit,
@@ -367,18 +403,18 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
 
 function record(v: unknown): v is Record<string, unknown> { return v !== null && typeof v === 'object' && !Array.isArray(v); }
 function formatControl(reply: ControlReply, delegated?: DelegatedOptions, chatKind?: string): ProviderMessage {
-  if (reply.kind === 'signin') {
+  if (reply.kind === 'signin' || reply.kind === 'github-signin') {
     if (!delegated) throw new DirectoryError('unready');
-    const text = 'Sign in to continue. Send your request again after signing in.';
+    const text = reply.kind === 'github-signin' ? 'Sign in with Microsoft, then link your GitHub account.' : 'Sign in to continue. Send your request again after signing in.';
     const button = delegated.publicOrigin ? { type: 'signin' as const, title: 'Sign in',
       value: `${delegated.publicOrigin}/signin?challenge=${encodeURIComponent(reply.challengeId)}` } : undefined;
-    if (button && chatKind === 'personal') return { type: 'message', recipient: reply.recipient,
+    if (button && (chatKind === 'personal' || reply.kind === 'github-signin')) return { type: 'message', recipient: reply.recipient,
       attachments: [{ contentType: 'application/vnd.microsoft.card.signin', content: { text, buttons: [button] } }] };
     return { type: 'message', recipient: reply.recipient, attachments: [{ contentType: 'application/vnd.microsoft.card.oauth', content: {
       text, connectionName: delegated.connectionName,
       tokenExchangeResource: { id: reply.challengeId, uri: delegated.apiUri, providerId: 'Azure Active Directory v2' }, buttons: button ? [button] : [] } }] };
   }
-  const text = reply.kind === 'signed-in' ? 'You are signed in. Send your request again.' : reply.kind === 'disconnected' ? 'Your account is disconnected.' : reply.kind === 'no-access' ? NO_ACCESS_TEXT : reply.kind === 'discovery' ?
+  const text = reply.kind === 'github-signed-in' ? 'Your GitHub account is linked. Send your request again.' : reply.kind === 'github-disconnected' ? 'Your GitHub account is disconnected.' : reply.kind === 'signed-in' ? 'You are signed in. Send your request again.' : reply.kind === 'disconnected' ? 'Your account is disconnected.' : reply.kind === 'no-access' ? NO_ACCESS_TEXT : reply.kind === 'discovery' ?
     `Connect this chat: ${reply.targets.map(t => t.label).join(' or ')}. Send ${reply.targets.map(t => `“use ${t.id}”`).join(' or ')}.` :
     reply.kind === 'connected' ? `This chat uses ${reply.label}. Send your request again.` :
       'Switching this chat to another Orka is not supported.';

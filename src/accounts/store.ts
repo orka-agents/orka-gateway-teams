@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { identity } from '../ingress/codec.js';
-import { grantRef, taskGrant, grantBinding } from './grants.js';
+import { grantRef, taskGrant, grantBinding, operationKey, writeTool } from './grants.js';
 import type { TaskGrant, GrantBinding } from './grants.js';
 import { canonicalJSON, parseCanonicalJSON, validateScope } from '../directory/codec.js';
 import { createNativeTable } from '../directory/table.js';
@@ -9,22 +9,27 @@ import { DirectoryError } from '../directory/types.js';
 import { etag, integer, object, uuid } from '../storage/table/codec.js';
 
 export interface AccountSubject { objectId: string }
-export interface AccountTokens { accessToken: string; expiresAt: number; refreshToken?: string; assertion?: string; assertionExpiresAt?: number }
+export interface AccountTokens { accessToken: string; expiresAt: number; refreshToken?: string; assertion?: string; assertionExpiresAt?: number;
+  providerUserId?: string; refreshExpiresAt?: number }
+export interface GitHubAttempt extends BrowserAttempt { cookie: string }
 export interface AccountChallenge {
   id: string; objectId: string; conversationId: string; activityId: string; generation: number; expiresAt: number;
   state: 'open' | 'exchanging' | 'committing' | 'done' | 'failed'; method?: 'browser';
 }
 export interface BrowserAttempt { challenge: AccountChallenge; state: string; nonce: string; verifier: string }
 export class AccountError extends Error {
-  constructor(readonly code: 'invalid-input' | 'corrupt' | 'unavailable' | 'conflict' | 'unready' | 'busy' | 'closed') {
+  constructor(readonly code: 'invalid-input' | 'corrupt' | 'unavailable' | 'conflict' | 'unready' | 'busy' | 'closed' | 'operation-conflict') {
     super(`Account storage: ${code}`); this.name = 'AccountError';
   }
 }
-type Account = { kind: 'account'; objectId: string; generation: number; lastUsed: number; tokens?: AccountTokens; challengeId?: string };
+type Account = { kind: 'account'; objectId: string; generation: number; lastUsed: number; tokens?: AccountTokens; challengeId?: string; renewing?: true };
 type Challenge = AccountChallenge & { kind: 'challenge'; ownerUUID?: string;
-  browser?: { state: string; nonce: string; verifier: string; consumed: boolean } };
+  browser?: { state: string; nonce: string; verifier: string; consumed: boolean };
+  github?: { state: string; verifier: string; cookieDigest: string; consumed: boolean } };
 type Grant = TaskGrant & { kind: 'grant' };
-type Document = Account | Challenge | Grant;
+type Write = { kind: 'write'; id: string; ref: string; tool: string; objectId: string; generation: number; githubGeneration: number;
+  argsDigest: string; ownerUUID: string; state: 'reserved' | 'done'; text?: string };
+type Document = Account | Challenge | Grant | Write;
 // The native transport cannot accept a plaintext document or a token-bearing value.
 type Ciphertext = { generation: number; ciphertext: Buffer };
 type CipherRow = { row: string; etag: string; value: Ciphertext };
@@ -34,7 +39,7 @@ const minute = 60_000; const idle = 30 * 86_400_000;
 
 /** Borrows registry authority; it never creates a table, acquires a lease or retries a write. */
 export function createAccountStore(binding: DirectoryBinding, key: Buffer, dependencies: DirectoryDependencies,
-  authority: { allowed(): boolean }, now: () => number = Date.now) {
+  authority: { allowed(): boolean }, now: () => number = Date.now, provider: 'workiq' | 'github' = 'workiq') {
   try { validateScope({ appId: binding.appId, tenantId: binding.tenantId });
     if (!Buffer.isBuffer(key) || key.length !== 32) bad('invalid-input');
   } catch { bad('invalid-input'); }
@@ -58,33 +63,45 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
       { assertion: live.assertion, assertionExpiresAt: live.assertionExpiresAt } : {}) };
   }
   const partition = `accounts_${hash(['teams-accounts-v1', binding.appId, binding.tenantId])}`;
-  const accountKey = (objectId: string) => ({ row: `account_${hash([identity(objectId), 'workiq'])}` });
+  const accountKey = (objectId: string) => ({ row: `account_${hash([identity(objectId), provider])}` });
   const challengeHash = (ch: Omit<AccountChallenge, 'id' | 'expiresAt' | 'state'>) =>
-    hash([binding.appId, binding.tenantId, ch.objectId, ch.conversationId, ch.activityId, ch.generation]);
+    hash([binding.appId, binding.tenantId, ch.objectId, ch.conversationId, ch.activityId, ch.generation, ...(provider === 'github' ? ['github'] : [])]);
+  const challengeKey = (digest: string) => ({ row: `challenge_${provider === 'github' ? hash(['github', digest]) : digest}` });
   const idKey = (id: string) => {
     if (typeof id !== 'string' || !/^[a-f0-9]{64}\.[a-f0-9-]{36}$/u.test(id)) bad('invalid-input');
-    uuid(id.slice(65)); return { row: `challenge_${id.slice(0, 64)}` };
+    uuid(id.slice(65)); return challengeKey(id.slice(0, 64));
   };
   const grantKey = (ref: string) => ({ row: `grant_${grantRef(ref)}` });
-  const docKey = (v: Document) => v.kind === 'account' ? accountKey(v.objectId) : v.kind === 'grant' ? grantKey(v.ref) : idKey(v.id);
+  const writeKey = (id: string) => ({ row: `write_${grantRef(id)}` });
+  const docKey = (v: Document) => v.kind === 'account' ? accountKey(v.objectId) : v.kind === 'grant' ? grantKey(v.ref) : v.kind === 'write' ? writeKey(v.id) : idKey(v.id);
   function validTokens(input: unknown): AccountTokens {
-    const v = object(input, ['accessToken', 'expiresAt', 'refreshToken', 'assertion', 'assertionExpiresAt']);
+    const v = object(input, ['accessToken', 'expiresAt', 'refreshToken', 'assertion', 'assertionExpiresAt',
+      ...(provider === 'github' ? ['providerUserId', 'refreshExpiresAt'] : [])]);
     const token = (s: unknown) => { if (typeof s !== 'string' || !s || Buffer.byteLength(s) > 16 * 1024 || /[\p{Cc}\uD800-\uDFFF]/u.test(s)) bad(); };
     token(v.accessToken); integer(v.expiresAt, 1, Number.MAX_SAFE_INTEGER);
     if (v.refreshToken !== undefined) token(v.refreshToken);
+    if (provider === 'github') {
+      token(v.refreshToken); integer(v.refreshExpiresAt, 1, Number.MAX_SAFE_INTEGER);
+      if (typeof v.providerUserId !== 'string' || !/^[1-9][0-9]{0,19}$/u.test(v.providerUserId) || v.assertion !== undefined || v.assertionExpiresAt !== undefined) bad();
+    }
     if (v.assertion !== undefined || v.assertionExpiresAt !== undefined) { token(v.assertion); integer(v.assertionExpiresAt, 1, Number.MAX_SAFE_INTEGER); }
     return v as unknown as AccountTokens;
   }
   function validate(v: Document): Document {
     identity(v.objectId); integer(v.generation, 1, Number.MAX_SAFE_INTEGER);
     if (v.kind === 'account') {
-      object(v, ['kind', 'objectId', 'generation', 'lastUsed', 'tokens', 'challengeId']); integer(v.lastUsed, 0, Number.MAX_SAFE_INTEGER);
+      object(v, ['kind', 'objectId', 'generation', 'lastUsed', 'tokens', 'challengeId', ...(provider === 'github' ? ['renewing'] : [])]); integer(v.lastUsed, 0, Number.MAX_SAFE_INTEGER);
+      if (v.renewing !== undefined && v.renewing !== true) bad();
       if (v.tokens !== undefined) validTokens(v.tokens);
       if (v.challengeId !== undefined) idKey(v.challengeId);
     } else if (v.kind === 'grant') {
       const { kind: _kind, ...grant } = v; taskGrant(grant);
+    } else if (v.kind === 'write') {
+      object(v, ['kind', 'id', 'ref', 'tool', 'objectId', 'generation', 'githubGeneration', 'argsDigest', 'ownerUUID', 'state', 'text']);
+      grantRef(v.id); grantRef(v.ref); grantRef(v.argsDigest); uuid(v.ownerUUID); integer(v.githubGeneration, 1, Number.MAX_SAFE_INTEGER);
+      if (!writeTool(v.tool) || !['reserved', 'done'].includes(v.state) || (v.state === 'done' ? typeof v.text !== 'string' || Buffer.byteLength(v.text) > 32768 : v.text !== undefined)) bad();
     } else {
-      object(v, ['kind', 'id', 'objectId', 'conversationId', 'activityId', 'generation', 'expiresAt', 'state', 'ownerUUID', 'method', 'browser']);
+      object(v, ['kind', 'id', 'objectId', 'conversationId', 'activityId', 'generation', 'expiresAt', 'state', 'ownerUUID', 'method', 'browser', ...(provider === 'github' ? ['github'] : [])]);
       if (v.kind !== 'challenge' || !['open', 'exchanging', 'committing', 'done', 'failed'].includes(v.state) ||
         v.method !== undefined && v.method !== 'browser') bad();
       if (v.browser !== undefined) {
@@ -92,6 +109,12 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         if (typeof b.state !== 'string' || !b.state.startsWith(v.id + '.') || !/^[A-Za-z0-9_-]{43}$/u.test(b.state.slice(v.id.length + 1)) ||
           typeof b.nonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(b.nonce) ||
           typeof b.verifier !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(b.verifier) || typeof b.consumed !== 'boolean') bad();
+      }
+      if (v.github !== undefined) {
+        const g = object(v.github, ['state', 'verifier', 'cookieDigest', 'consumed']);
+        if (v.method !== 'browser' || typeof g.state !== 'string' || !g.state.startsWith(v.id + '.') ||
+          !/^[A-Za-z0-9_-]{43}$/u.test(g.state.slice(v.id.length + 1)) || typeof g.verifier !== 'string' ||
+          !/^[A-Za-z0-9_-]{43}$/u.test(g.verifier) || typeof g.cookieDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(g.cookieDigest) || typeof g.consumed !== 'boolean') bad();
       }
       if (v.method === 'browser' && !v.browser?.consumed) bad();
       identity(v.conversationId); identity(v.activityId); integer(v.expiresAt, 1, Number.MAX_SAFE_INTEGER); idKey(v.id);
@@ -131,7 +154,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         const v = object(input, [...Object.keys(types), ...Object.keys(types).map(k => `${k}@odata.type`),
           'odata.etag', 'odata.metadata', 'odata.id', 'odata.editLink', 'odata.editlink', 'odata.type']);
         for (const [k, type] of Object.entries(types)) if (v[`${k}@odata.type`] !== undefined && v[`${k}@odata.type`] !== type) bad();
-        if (v.PartitionKey !== partition || typeof v.RowKey !== 'string' || !/^(?:account|challenge|grant)_[a-f0-9]{64}$/u.test(v.RowKey) ||
+        if (v.PartitionKey !== partition || typeof v.RowKey !== 'string' || !/^(?:account|challenge|grant|write)_[a-f0-9]{64}$/u.test(v.RowKey) ||
           (expected && v.RowKey !== expected.row) || v.V !== 1 || v.Armed !== false || v['Payload@odata.type'] !== 'Edm.Binary' ||
           typeof v.Payload !== 'string' || v.Payload.length > 66_000) bad();
         const data = Buffer.from(v.Payload, 'base64');
@@ -172,8 +195,9 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     if (saved && ((saved.encrypted.generation === encrypted.generation && saved.encrypted.ciphertext.equals(encrypted.ciphertext)) || winner?.(saved.value))) return saved;
     return bad(result.kind === 'conflict' ? 'conflict' : 'unavailable');
   }
-  const usable = (v: Account): boolean => !!v.tokens && now() - v.lastUsed < idle;
-  const publicChallenge = ({ kind: _kind, ownerUUID: _owner, browser: _browser, ...ch }: Challenge): AccountChallenge => ch;
+  const usable = (v: Account): boolean => !!v.tokens && !v.renewing && now() - v.lastUsed < idle &&
+    (provider === 'workiq' || v.tokens.refreshExpiresAt! > now());
+  const publicChallenge = ({ kind: _kind, ownerUUID: _owner, browser: _browser, github: _github, ...ch }: Challenge): AccountChallenge => ch;
   const attempt = (ch: Challenge): BrowserAttempt => ({ challenge: publicChallenge(ch), state: ch.browser!.state,
     nonce: ch.browser!.nonce, verifier: ch.browser!.verifier });
   const browserAvailable = (ch: Challenge) => ['open', 'exchanging', 'failed'].includes(ch.state) && !ch.browser?.consumed && now() < ch.expiresAt;
@@ -182,7 +206,9 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
   async function current(ch: AccountChallenge, ctx: DirectoryContext, state: AccountChallenge['state'] = 'exchanging') {
     const row = await read(idKey(ch.id), ctx); const a = await read(accountKey(ch.objectId), ctx);
     if (!row || !sameChallenge(row.value, ch) || row.value.ownerUUID !== ownerUUID ||
-      row.value.state !== state || (state !== 'done' && now() >= ch.expiresAt) || a?.value.generation !== ch.generation) return undefined;
+      row.value.state !== state || (state !== 'done' && now() >= ch.expiresAt) ||
+      !(a?.value.generation === ch.generation || provider === 'github' && (state === 'committing' || state === 'done') &&
+        a?.value.kind === 'account' && a.value.generation === ch.generation + 1 && a.value.challengeId === ch.id)) return undefined;
     return { row, account: a };
   }
   const publicGrant = ({ kind: _kind, ...grant }: Grant): TaskGrant => grant;
@@ -219,6 +245,42 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         return !!tokens && ![tokens.accessToken, tokens.refreshToken, tokens.assertion].some(secret => secret && text.includes(secret));
       });
     },
+    safeOutput(subject: AccountSubject, generation: number, text: string, ctx: DirectoryContext): Promise<boolean> {
+      return run(ctx, async c => { const row = await read(accountKey(subject.objectId), c); const a = row?.value;
+        if (!row) return generation === 0;
+        if (a?.kind !== 'account' || a.generation !== generation) return false;
+        const tokens = tokensFor(a, row.etag); return !tokens || ![tokens.accessToken, tokens.refreshToken, tokens.assertion].some(s => s && text.includes(s)); });
+    },
+    invalidate(subject: AccountSubject, generation: number, rejectedToken: string, ctx: DirectoryContext): Promise<void> {
+      return run(ctx, async c => { const row = await read(accountKey(subject.objectId), c); const a = row?.value;
+        if (!row || a?.kind !== 'account' || a.generation !== generation || a.tokens?.accessToken !== rejectedToken) return;
+        try { await persist(row, { kind: 'account', objectId: subject.objectId, generation: generation + 1, lastUsed: now() }, c); }
+        catch (e) { if (!(e instanceof AccountError && e.code === 'conflict')) throw e; } });
+    },
+    reserveWrite(grant: TaskGrant, tool: string, operation: string, args: unknown, ctx: DirectoryContext): Promise<
+      { kind: 'send'; id: string } | { kind: 'done'; text: string } | { kind: 'uncertain' }> {
+      return run(ctx, async c => {
+        if (provider !== 'workiq' || !writeTool(tool) || !grant.githubGeneration || !grant.binding?.tools.includes(tool)) bad('invalid-input');
+        const live = await liveGrant(grant.ref, c);
+        if (live?.value.kind !== 'grant' || canonicalJSON(publicGrant(live.value)) !== canonicalJSON(grant)) bad('conflict');
+        const id = hash(['teams-task-write-v1', grant.ref, tool, operationKey(operation)]); const argsDigest = hash(canonicalJSON(args));
+        const previous = await read(writeKey(id), c);
+        if (previous) { const v = previous.value;
+          if (v.kind !== 'write' || v.ref !== grant.ref || v.tool !== tool || v.argsDigest !== argsDigest || v.objectId !== grant.objectId ||
+            v.generation !== grant.generation || v.githubGeneration !== grant.githubGeneration) bad('operation-conflict');
+          return v.state === 'done' ? { kind: 'done', text: v.text! } : { kind: 'uncertain' };
+        }
+        // CREATE-only send permission; an existing reservation is uncertain forever.
+        await persist(undefined, { kind: 'write', id, ref: grant.ref, tool, objectId: grant.objectId, generation: grant.generation,
+          githubGeneration: grant.githubGeneration, argsDigest, ownerUUID, state: 'reserved' }, c);
+        return { kind: 'send', id };
+      });
+    },
+    completeWrite(id: string, text: string, ctx: DirectoryContext): Promise<void> {
+      return run(ctx, async c => { const row = await read(writeKey(id), c); const v = row?.value;
+        if (!row || v?.kind !== 'write' || v.ownerUUID !== ownerUUID || v.state !== 'reserved' || !await liveGrant(v.ref, c)) bad('conflict');
+        await persist(row, { ...v, state: 'done', text }, c); });
+    },
     bindGrant(ref: string, targetId: string, input: GrantBinding, ctx: DirectoryContext): Promise<TaskGrant> {
       return run(ctx, async c => {
         let binding: GrantBinding; try { binding = grantBinding(input); } catch { return bad('invalid-input'); }
@@ -239,7 +301,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     published(ch: AccountChallenge, ctx: DirectoryContext): Promise<boolean> {
       return run(ctx, async c => {
         idKey(ch.id); const row = await read(accountKey(ch.objectId), c); const a = row?.value;
-        return a?.kind === 'account' && a.challengeId === ch.id && a.generation === ch.generation &&
+        return a?.kind === 'account' && a.challengeId === ch.id && a.generation === ch.generation + (provider === 'github' ? 1 : 0) &&
           usable(a) && (a.tokens?.expiresAt ?? 0) > now();
       });
     },
@@ -250,7 +312,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         if (!a) a = await persist(undefined, { kind: 'account', objectId, generation: 1, lastUsed: now() }, c,
           v => v.kind === 'account' && v.objectId === objectId && v.generation === 1);
         const base = { objectId, conversationId, activityId, generation: a.value.generation };
-        const row = { row: `challenge_${challengeHash(base)}` }; const existing = await read(row, c);
+        const row = challengeKey(challengeHash(base)); const existing = await read(row, c);
         const value: Challenge = { ...base, kind: 'challenge', id: `${challengeHash(base)}.${randomUUID()}`, expiresAt: now() + 10 * minute, state: 'open' };
         const matches = (v: Document) => v.kind === 'challenge' && challengeHash(v) === challengeHash(base);
         const saved = existing ?? await persist(undefined, value, c, matches);
@@ -292,6 +354,30 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         return await current(publicChallenge(claimed), c) ? attempt(claimed) : undefined;
       });
     },
+    prepareGitHub(input: BrowserAttempt, ctx: DirectoryContext): Promise<GitHubAttempt | undefined> {
+      return run(ctx, async c => {
+        if (provider !== 'github') return undefined;
+        const owned = await current(input.challenge, c); const ch = owned?.row.value;
+        if (!owned || ch?.kind !== 'challenge' || ch.method !== 'browser' || ch.github || ch.browser?.state !== input.state) return undefined;
+        const random = () => randomBytes(32).toString('base64url'); const cookie = random();
+        const github = { state: `${ch.id}.${random()}`, verifier: random(), cookieDigest: hash(cookie), consumed: false };
+        await persist(owned.row, { ...ch, github }, c);
+        return await current(input.challenge, c) ? { challenge: publicChallenge(ch), nonce: input.nonce, state: github.state, verifier: github.verifier, cookie } : undefined;
+      });
+    },
+    claimGitHub(state: string, cookie: string, ctx: DirectoryContext): Promise<BrowserAttempt | undefined> {
+      return run(ctx, async c => {
+        if (provider !== 'github' || typeof state !== 'string' || state.length !== 145 || !/^[A-Za-z0-9_-]{43}$/u.test(cookie)) return undefined;
+        let row: Row | undefined; try { row = await read(idKey(state.slice(0, 101)), c); } catch (e) { if (e instanceof AccountError && e.code === 'invalid-input') return undefined; throw e; }
+        const ch = row?.value;
+        if (!row || ch?.kind !== 'challenge' || ch.state !== 'exchanging' || !ch.github || ch.github.consumed || now() >= ch.expiresAt ||
+          ch.github.state !== state || !timingSafeEqual(Buffer.from(hash(cookie)), Buffer.from(ch.github.cookieDigest)) ||
+          (await read(accountKey(ch.objectId), c))?.value.generation !== ch.generation) return undefined;
+        const claimed = { ...ch, ownerUUID, github: { ...ch.github, consumed: true } };
+        try { await persist(row, claimed, c); } catch (e) { if (e instanceof AccountError && ['conflict', 'unavailable'].includes(e.code)) return undefined; throw e; }
+        return await current(publicChallenge(claimed), c) ? { challenge: publicChallenge(claimed), state, nonce: ch.browser!.nonce, verifier: ch.github.verifier } : undefined;
+      });
+    },
     claim(ch: AccountChallenge, ctx: DirectoryContext): Promise<'claimed' | 'done' | 'unavailable'> {
       return run(ctx, async c => {
         const row = await read(idKey(ch.id), c); const a = await read(accountKey(ch.objectId), c);
@@ -308,14 +394,15 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         try {
           const owned = await current(ch, c); if (!owned) return false;
           const value = { ...validTokens(tokens) };
-          if (value.expiresAt <= now()) return false;
+          if (value.expiresAt <= now() || provider === 'github' && (value.refreshExpiresAt! <= now() ||
+            (owned.row.value as Challenge).method === 'browser' && !(owned.row.value as Challenge).github?.consumed)) return false;
           if (value.assertionExpiresAt !== undefined) value.assertionExpiresAt = Math.min(value.assertionExpiresAt, now() + 10 * minute);
           const previous = (owned.account.value as Account).tokens?.refreshToken;
-          if (!value.refreshToken && previous) value.refreshToken = previous;
+          if (provider === 'workiq' && !value.refreshToken && previous) value.refreshToken = previous;
           // Serialize takeover against publication, not just against its final acknowledgement.
           await persist(owned.row, { ...owned.row.value as Challenge, state: 'committing' }, c);
           if (!await current(ch, c, 'committing')) return false;
-          const published = await persist(owned.account, { kind: 'account', objectId: ch.objectId, generation: ch.generation,
+          const published = await persist(owned.account, { kind: 'account', objectId: ch.objectId, generation: ch.generation + (provider === 'github' ? 1 : 0),
             lastUsed: now(), tokens: durable(value), challengeId: ch.id }, c);
           const after = await current(ch, c, 'committing'); if (!after || after.account.etag !== published.etag) return false;
           await persist(after.row, { ...after.row.value as Challenge, state: 'done' }, c);
@@ -333,9 +420,22 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         const flightKey = `${k.row}:${generation}`; let flight = flights.get(flightKey);
         if (!flight) {
           flight = (async () => {
-            const row = await read(k, c); const a = row?.value as Account | undefined;
-            if (!row || !a || a.generation !== generation || !usable(a) || !a.tokens) return undefined;
+            let row = await read(k, c); const a = row?.value as Account | undefined;
+            if (!row || !a || a.generation !== generation) return undefined;
+            const invalidate = async () => { await persist(row, { kind: 'account', objectId: a.objectId, generation: generation + 1, lastUsed: now() }, c); };
+            if (provider === 'github' && (a.renewing || a.tokens && a.tokens.refreshExpiresAt! <= now())) { await invalidate(); return undefined; }
+            if (!usable(a) || !a.tokens) return undefined;
             let tokens = tokensFor(a, row.etag)!;
+            if (provider === 'github' && tokens.expiresAt <= now()) {
+              if (!refreshCache) return undefined;
+              // A crash after this CAS must never reuse a possibly spent refresh token.
+              try { row = await persist(row, { ...a, renewing: true }, c); } catch { check(c); return undefined; }
+              try {
+                const renewed = validTokens(await refreshCache(tokens.refreshToken!)); check(c);
+                if (renewed.providerUserId !== tokens.providerUserId || renewed.expiresAt <= now() || renewed.refreshExpiresAt! <= now()) bad();
+                tokens = renewed;
+              } catch { check(c); try { await invalidate(); } catch { check(c); } return undefined; }
+            }
             if (tokens.expiresAt <= now()) {
               const cachedRefresh = tokens.refreshToken && refreshCache;
               if (!cachedRefresh && (!tokens.assertion || (tokens.assertionExpiresAt ?? 0) <= now())) return undefined;

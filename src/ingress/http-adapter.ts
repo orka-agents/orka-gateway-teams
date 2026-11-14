@@ -11,7 +11,8 @@ class HttpFailure extends Error { constructor(readonly status: number) { super('
 export interface BrowserSignin {
   readonly origin: string;
   begin(challengeId: string, context: { signal: AbortSignal; deadline: number }): Promise<string | undefined>;
-  callback(form: URLSearchParams, context: { signal: AbortSignal; deadline: number; committed?(): void }): Promise<boolean>;
+  callback(form: URLSearchParams, context: { signal: AbortSignal; deadline: number; committed?(): void }): Promise<boolean | { redirect: string; cookie: { value: string; maxAge: number } }>;
+  githubCallback?(form: URLSearchParams, cookie: string, context: { signal: AbortSignal; deadline: number; committed?(): void }): Promise<boolean>;
 }
 const CHALLENGE = /^[a-f0-9]{64}\.[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
 
@@ -99,7 +100,8 @@ export class NativeAdapter implements IHttpServerAdapter {
     let browser = false;
     try {
       if (this.stopping) throw new HttpFailure(503);
-      if (this.browser && (req.url?.startsWith('/signin?') && req.method === 'GET' || req.url === '/oauth/callback' && req.method === 'POST')) {
+      if (this.browser && (req.url?.startsWith('/signin?') && req.method === 'GET' || req.url === '/oauth/callback' && req.method === 'POST' ||
+        this.browser.githubCallback && req.url?.startsWith('/github/callback?') && req.method === 'GET')) {
         browser = true;
         if (this.browsers >= 2) throw new HttpFailure(503);
         this.browsers++;
@@ -131,6 +133,20 @@ export class NativeAdapter implements IHttpServerAdapter {
   }
 
   private async handleBrowser(req: IncomingMessage, res: ServerResponse, ctx: { signal: AbortSignal; deadline: number }): Promise<void> {
+    if (req.method === 'GET' && req.url!.startsWith('/github/callback?')) {
+      if (req.url!.length > 8192) throw new HttpFailure(413);
+      const form = new URLSearchParams(req.url!.slice('/github/callback?'.length)); const keys = [...form.keys()];
+      if (keys.some(k => !['code', 'state', 'error', 'error_description', 'error_uri'].includes(k)) || new Set(keys).size !== keys.length ||
+        !form.get('state') || !!form.get('code') === !!form.get('error') || req.headersDistinct.cookie?.length !== 1) throw new HttpFailure(400);
+      const cookies = req.headers.cookie!.split(';').map(v => v.trim()).filter(v => v.startsWith('__Host-github-link='));
+      const cookie = cookies[0]?.slice('__Host-github-link='.length);
+      if (cookies.length !== 1 || !cookie || !/^[A-Za-z0-9_-]{43}$/u.test(cookie)) throw new HttpFailure(400);
+      const clear = '__Host-github-link=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0';
+      const ok = await this.browser!.githubCallback!(form, cookie, { ...ctx,
+        committed: () => { if (!ctx.signal.aborted && !this.stopping) browserResponse(res, 200, undefined, clear); } });
+      if (ctx.signal.aborted || this.stopping) throw new HttpFailure(503);
+      browserResponse(res, ok ? 200 : 400, undefined, clear); return;
+    }
     if (req.method === 'GET') {
       const query = new URLSearchParams(req.url!.slice('/signin?'.length));
       const id = query.get('challenge');
@@ -156,17 +172,23 @@ export class NativeAdapter implements IHttpServerAdapter {
     // Keep awaiting the callback: response completion is not actual-work completion.
     const ok = await this.browser!.callback(form, { ...ctx, committed: () => { if (!ctx.signal.aborted && !this.stopping) browserResponse(res, 200); } });
     if (ctx.signal.aborted || this.stopping) throw new HttpFailure(503);
+    if (typeof ok === 'object') {
+      const url = new URL(ok.redirect); const cookie = ok.cookie;
+      if (url.origin !== 'https://github.com' || url.pathname !== '/login/oauth/authorize' || url.username || url.password || url.port || url.hash ||
+        !/^[A-Za-z0-9_-]{43}$/u.test(cookie.value) || !Number.isInteger(cookie.maxAge) || cookie.maxAge < 1 || cookie.maxAge > 600) throw new HttpFailure(503);
+      browserResponse(res, 302, ok.redirect, `__Host-github-link=${cookie.value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${cookie.maxAge}`); return;
+    }
     browserResponse(res, ok ? 200 : 400);
   }
 }
 
-function browserResponse(res: ServerResponse, status: number, location?: string): void {
+function browserResponse(res: ServerResponse, status: number, location?: string, cookie?: string): void {
   if (res.writableEnded || res.destroyed) return;
   const text = status === 200 ? 'You are signed in. Send your request again.' : status === 302 ? 'Continue in your browser.' :
     'Sign-in could not be completed. Send your request again to start a new sign-in.';
   res.writeHead(status, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Length': Buffer.byteLength(text),
     'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff',
-    'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'", 'Connection': 'close', ...(location ? { Location: location } : {}) });
+    'Content-Security-Policy': "default-src 'none'; frame-ancestors 'none'", 'Connection': 'close', ...(location ? { Location: location } : {}), ...(cookie ? { 'Set-Cookie': cookie } : {}) });
   res.end(text);
 }
 

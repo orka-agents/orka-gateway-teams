@@ -17,9 +17,9 @@ export interface ControlRoute {
 }
 export type ControlReply = { kind: 'no-access' } | { kind: 'discovery'; targets: { id: string; label: string }[] } |
   { kind: 'connected' | 'switching'; targetId: string; label: string } |
-  { kind: 'signin'; targetId: string; challengeId: string; recipient: import('../outbound/types.js').ControlRecipient } |
-  { kind: 'signed-in'; targetId: string; recipient: import('../outbound/types.js').ControlRecipient } |
-  { kind: 'disconnected'; targetId: string; generation: number; recipient: import('../outbound/types.js').ControlRecipient };
+  { kind: 'signin' | 'github-signin'; targetId: string; challengeId: string; recipient: import('../outbound/types.js').ControlRecipient } |
+  { kind: 'signed-in' | 'github-signed-in'; targetId: string; recipient: import('../outbound/types.js').ControlRecipient } |
+  { kind: 'disconnected' | 'github-disconnected'; targetId: string; generation: number; recipient: import('../outbound/types.js').ControlRecipient };
 export type ControlRecord = RecordBase & {
   kind: 'control'; activityId: string; fingerprint: string;
   currentTargetDigest: string | null; desiredTargetDigest: string | null;

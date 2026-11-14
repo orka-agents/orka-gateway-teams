@@ -84,6 +84,8 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
     origin: sink.browser.origin,
     begin: (id, ctx) => healthy() ? sink.browser!.begin(id, ctx) : Promise.resolve(undefined),
     callback: (form, ctx) => healthy() ? sink.browser!.callback(form, ctx) : Promise.resolve(false),
+    ...(sink.browser.githubCallback ? { githubCallback: (form: URLSearchParams, cookie: string, ctx: Parameters<NonNullable<BrowserSignin['githubCallback']>>[2]) =>
+      healthy() ? sink.browser!.githubCallback!(form, cookie, ctx) : Promise.resolve(false) } : {}),
   } : undefined);
   const failed = new Promise<never>((_resolve, reject) => { fail = reject; });
   // Consumers can await failure; a receiver used without a relay still fails closed.

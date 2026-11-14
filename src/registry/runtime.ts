@@ -1,3 +1,5 @@
+import { createGitHub } from '../accounts/github.js';
+import { readRegistryFile } from './files.js';
 import { createAccountStore } from '../accounts/store.js';
 import { createTaskService } from '../accounts/task-service.js';
 import type { TaskService } from '../accounts/task-service.js';
@@ -37,13 +39,21 @@ import { readSigninKey, snapshotRegistry } from './config.js';
 
 export interface RegistryRuntimeDependencies extends IngressRuntimeDependencies {
   graphIdentityRequest?: ImdsRequest; graphRequest?: typeof https.request; kubernetesRequest?: typeof https.request;
-  delegatedRequest?: typeof https.request; delegatedKeys?: FetchKeys; workiqRequest?: typeof https.request;
+  delegatedRequest?: typeof https.request; delegatedKeys?: FetchKeys; workiqRequest?: typeof https.request; githubRequest?: typeof https.request;
 }
 export async function startRegistryRuntime(input: RegistryConfig, dependencies: RegistryRuntimeDependencies = {}, signal?: AbortSignal): Promise<IngressRuntime> {
   const config = snapshotRegistry(input); const deps = { ...dependencies };
   if (!config.directoryTable || !config.groupPolicyFile || !tlsVerificationEnabled() || deps.openIngressStore !== undefined || deps.openDeliveryJournal !== undefined) throw new ConfigurationError();
   if (signal?.aborted) throw new Error('Registry startup cancelled');
   const shared = config.targets[0]!; const key = config.sso ? readSigninKey(config.sso.keyFile) : undefined;
+  let github: ReturnType<typeof createGitHub> | undefined;
+  if (config.github) {
+    const clientSecret = readRegistryFile(config.github.clientSecretFile, 16385).trim();
+    if (!clientSecret || !/^[A-Za-z0-9._~+/-]+=*$/u.test(clientSecret) || clientSecret.length > 16384 || clientSecret === key?.toString('hex') ||
+      config.targets.some(t => [t.config.bearerToken, t.config.outbound!.bearerToken, t.taskPassToken].includes(clientSecret))) throw new ConfigurationError();
+    github = createGitHub({ clientId: config.github.clientId, clientSecret, publicOrigin: config.sso!.publicOrigin! },
+      deps.githubRequest ? { request: deps.githubRequest } : {});
+  }
   const policy = readGroupPolicy(config.groupPolicyFile, config);
   const delegatedAuth = config.sso ? createDelegatedAuth(shared.config.receiver, {
     ...(deps.managedIdentity ? { managedIdentity: deps.managedIdentity } : {}), ...(deps.delegatedRequest ? { request: deps.delegatedRequest } : {}),
@@ -57,6 +67,7 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   let ready = false; let fatal = false; let opening = true; let receiver: Receiver | undefined; let api: OutboundServer | undefined;
   let stopRuntime: (() => Promise<void>) | undefined; let closing: Promise<void> | undefined;
   let directory: Directory | undefined; let directoryTable: DirectoryTable | undefined; let accounts: AccountStore | undefined;
+  let githubAccounts: AccountStore | undefined;
   let admission: ReturnType<typeof createRegistryAdmission> | undefined; let tasks: TaskService | undefined;
   const authority: LeaseAuthority = {
     allowed: () => !loss.signal.aborted && !abort.signal.aborted && authorities.every(a => a.allowed()),
@@ -70,14 +81,14 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
     } } : {}),
     ...(t.config.caFile === undefined ? {} : { ca: readCaBundle(t.config.caFile) }) }));
   // Each ciphertext transport has its own four native slots; all borrow this identity.
-  const provider = prepareStorageIdentity(shared.config.storage.identity).createProvider(deps.storageIdentity, Math.max(32, config.targets.length * 2 + (config.sso ? 8 : 4)));
+  const provider = prepareStorageIdentity(shared.config.storage.identity).createProvider(deps.storageIdentity, Math.max(32, config.targets.length * 2 + (config.github ? 12 : config.sso ? 8 : 4)));
   const unsubscribe = () => { for (const remove of subscriptions.splice(0)) remove(); };
   const closeStores = async () => {
     // Handler/relay work drains first, then all native policy/provisioner work,
     // then directory requests, while every V3 lease and token source remain owned.
     const results: PromiseSettledResult<unknown>[] = await Promise.allSettled([authorizer.close(), ...readers.map(r => r.close())]);
     results.push(...await Promise.allSettled([tasks?.close()]));
-    results.push(...await Promise.allSettled([delegatedAuth?.close(), accounts?.close()])); key?.fill(0);
+    results.push(...await Promise.allSettled([delegatedAuth?.close(), github?.close(), accounts?.close(), githubAccounts?.close()])); key?.fill(0);
     results.push(...await Promise.allSettled([Promise.resolve().then(() => directory?.close() ?? directoryTable?.close())]));
     unsubscribe(); results.push(...await Promise.allSettled(handles.map(h => Promise.resolve().then(() => h.close()))));
     results.push(...await Promise.allSettled([Promise.resolve().then(() => provider.close())])); return results;
@@ -124,16 +135,21 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
       deadline: performance.now() + shared.config.storage.audit.maxDurationMs }, authority);
     assertStarting();
     if (config.sso) {
+      if (github) githubAccounts = createAccountStore({ account: shared.config.storage.account, table: config.sso.accountTable,
+        appId: shared.config.scope.appId, tenantId: shared.config.scope.tenantId }, key!,
+      { token: provider.token, ...(deps.tableRequest ? { request: deps.tableRequest } : {}) }, authority, Date.now, 'github');
       accounts = createAccountStore({ account: shared.config.storage.account, table: config.sso.accountTable,
         appId: shared.config.scope.appId, tenantId: shared.config.scope.tenantId }, key!,
       { token: provider.token, ...(deps.tableRequest ? { request: deps.tableRequest } : {}) }, authority); key!.fill(0);
       tasks = createTaskService({ accounts, auth: delegatedAuth!, authority,
+        ...(github && githubAccounts ? { github: { accounts: githubAccounts, auth: github } } : {}),
         targets: config.targets.map(t => ({ id: t.id, gatewayUid: t.gatewayUid, identityDigest: t.identityDigest!, taskPassToken: t.taskPassToken! })),
         privateCredentials: config.targets.flatMap(t => [t.config.bearerToken, t.config.outbound!.bearerToken]),
         ...(deps.workiqRequest ? { workiq: { request: deps.workiqRequest } } : {}),
         log: category => { process.stderr.write(`teams-ingress: ${category}\n`); } });
     }
     admission = createRegistryAdmission({ config, directory, authority, active, authorizer,
+      ...(github && githubAccounts ? { github: { accounts: githubAccounts, auth: github } } : {}),
       ...(accounts && delegatedAuth && config.sso ? { delegated: { accounts, auth: delegatedAuth, apiUri: config.sso.apiUri, connectionName: config.sso.connectionName,
         ...(config.sso.publicOrigin ? { publicOrigin: config.sso.publicOrigin } : {}) } } : {}),
       slots: slots.map((s, i) => ({ ...s, provisioner: createBindingProvisioner(s.target, readers[i]!) })),

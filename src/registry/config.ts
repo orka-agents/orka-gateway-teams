@@ -11,7 +11,8 @@ export interface RegistryTarget {
   config: TableServeConfig; readonly identityDigest?: string; taskPassToken?: string;
 }
 export interface SigninConfig { accountTable: string; keyFile: string; apiUri: string; connectionName: string; publicOrigin?: string }
-export interface RegistryConfig { sso?: Readonly<SigninConfig>; schemaVersion: 1; directoryTable?: string; groupPolicyFile?: string; targets: readonly RegistryTarget[] }
+export interface GitHubConfig { clientId: string; clientSecretFile: string }
+export interface RegistryConfig { github?: Readonly<GitHubConfig>; sso?: Readonly<SigninConfig>; schemaVersion: 1; directoryTable?: string; groupPolicyFile?: string; targets: readonly RegistryTarget[] }
 const perTarget = ['ORKA_BASE_URL', 'ORKA_GATEWAY_NAMESPACE', 'ORKA_GATEWAY_NAME', 'ORKA_BEARER_TOKEN', 'ORKA_OUTBOUND_BEARER_TOKEN', 'ORKA_CA_FILE', 'TABLE_INGRESS_STORE_ID', 'TABLE_DELIVERY_STORE_ID'];
 const metadataKeys = ['id', 'label', 'gatewayUid', 'frontAgent', 'kubernetesBaseUrl', 'kubernetesTokenFile', 'kubernetesCaFile'];
 
@@ -43,8 +44,15 @@ function targetMetadata(input: Record<string, unknown>, config: TableServeConfig
 /** Public library boundary: callers cannot combine different shared identities or listeners. */
 export function snapshotRegistry(input: RegistryConfig): RegistryConfig {
   try {
-    const root = auditFields(input, ['schemaVersion', 'directoryTable', 'groupPolicyFile', 'targets', 'sso']);
+    const root = auditFields(input, ['schemaVersion', 'directoryTable', 'groupPolicyFile', 'targets', 'sso', 'github']);
     const sso = root.sso === undefined ? undefined : signinConfig(root.sso);
+    let github: GitHubConfig | undefined;
+    if (root.github !== undefined) {
+      const g = auditFields(root.github, ['clientId', 'clientSecretFile']); const clientId = text(g.clientId, 256);
+      if (!sso?.publicOrigin || !/^[A-Za-z0-9._-]+$/u.test(clientId)) throw new ConfigurationError();
+      github = { clientId, clientSecretFile: absoluteFile(g.clientSecretFile) };
+      if (github.clientSecretFile === sso.keyFile) throw new ConfigurationError();
+    }
     const groupPolicyFile = root.groupPolicyFile === undefined ? undefined : absoluteFile(root.groupPolicyFile);
     const directoryTable = root.directoryTable === undefined ? undefined : text(root.directoryTable, 63);
     if (directoryTable !== undefined && !/^[A-Za-z][A-Za-z0-9]{2,62}$/u.test(directoryTable)) throw new ConfigurationError();
@@ -76,7 +84,7 @@ export function snapshotRegistry(input: RegistryConfig): RegistryConfig {
     for (const target of targets) if (target.taskPassToken !== undefined) {
       if (tokens.has(target.taskPassToken)) throw new ConfigurationError(); tokens.add(target.taskPassToken);
     }
-    return Object.freeze({ schemaVersion: 1, ...(sso ? { sso: Object.freeze(sso) } : {}), ...(directoryTable === undefined ? {} : { directoryTable }), ...(groupPolicyFile === undefined ? {} : { groupPolicyFile }), targets: Object.freeze(targets) });
+    return Object.freeze({ schemaVersion: 1, ...(github ? { github: Object.freeze(github) } : {}), ...(sso ? { sso: Object.freeze(sso) } : {}), ...(directoryTable === undefined ? {} : { directoryTable }), ...(groupPolicyFile === undefined ? {} : { groupPolicyFile }), targets: Object.freeze(targets) });
   } catch { throw new ConfigurationError(); }
 }
 function signinConfig(input: unknown): SigninConfig {
@@ -117,6 +125,9 @@ export function parseRegistryConfig(env: NodeJS.ProcessEnv): RegistryConfig {
     const sso = keys.some(k => captured[k] !== undefined) ? { accountTable: captured.SSO_ACCOUNT_TABLE!, keyFile: captured.SSO_KEY_FILE!,
       apiUri: captured.SSO_API_URI!, connectionName: captured.SSO_CONNECTION_NAME!,
       ...(captured.SSO_PUBLIC_ORIGIN === undefined ? {} : { publicOrigin: captured.SSO_PUBLIC_ORIGIN }) } : undefined;
-    return snapshotRegistry({ ...(sso ? { sso } : {}), schemaVersion: root.schemaVersion as 1, directoryTable: text(captured.TABLE_DIRECTORY_TABLE, 63), groupPolicyFile: absoluteFile(captured.ORKA_GROUP_POLICY_FILE), targets });
+    if (captured.GITHUB_CLIENT_SECRET !== undefined) throw new ConfigurationError();
+    const github = captured.GITHUB_CLIENT_ID !== undefined || captured.GITHUB_CLIENT_SECRET_FILE !== undefined ?
+      { clientId: captured.GITHUB_CLIENT_ID!, clientSecretFile: captured.GITHUB_CLIENT_SECRET_FILE! } : undefined;
+    return snapshotRegistry({ ...(github ? { github } : {}), ...(sso ? { sso } : {}), schemaVersion: root.schemaVersion as 1, directoryTable: text(captured.TABLE_DIRECTORY_TABLE, 63), groupPolicyFile: absoluteFile(captured.ORKA_GROUP_POLICY_FILE), targets });
   } catch { throw new ConfigurationError(); }
 }
