@@ -7,9 +7,10 @@ export interface TaskGrant {
   ref: string; objectId: string; generation: number; provider: 'workiq'; targetId: string; targetDigest: string; eventId: string;
   tools: string[]; binding?: GrantBinding;
 }
-export function grantReference(scope: { appId: string; tenantId: string }, target: { id: string; identityDigest?: string }, eventId: string): string {
+export function grantReference(scope: { appId: string; tenantId: string }, target: { id: string; identityDigest?: string }, eventId: string, replyTarget: string): string {
+  // Only the winning inbox candidate can use its grant; a redelivery has a fresh reply target.
   return createHash('sha256').update(JSON.stringify(['teams-task-grant-v1', identity(scope.appId), identity(scope.tenantId),
-    identity(target.id), identity(target.identityDigest!), identity(eventId)])).digest('hex');
+    identity(target.id), identity(target.identityDigest!), identity(eventId), identity(replyTarget)])).digest('hex');
 }
 export function grantRef(ref: unknown): string {
   if (typeof ref !== 'string' || !/^[a-f0-9]{64}$/u.test(ref)) throw new Error('Invalid grant'); return ref;

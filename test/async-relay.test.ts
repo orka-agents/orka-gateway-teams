@@ -16,7 +16,7 @@ import { httpsFixture } from './support/ingress-https.js';
 const route: ReplyRoute = { serviceUrl: 'https://teams-service.example.invalid/', channelId: 'msteams',
   bot: { id: '28:fixture-app', role: 'bot' }, conversation: { id: expectedEvent.contextId, conversationType: 'personal', tenantId: scope.tenantId } };
 
-async function fixture(t: test.TestContext) {
+async function fixture(t: test.TestContext, replayWindowMs = 100) {
   let posts = 0;
   const tls = await httpsFixture(t, (req, res) => { req.resume(); req.on('end', () => {
     posts++; res.writeHead(202); res.end('{"status":"accepted","eventId":"orka-async","state":"Queued"}');
@@ -24,11 +24,11 @@ async function fixture(t: test.TestContext) {
   const directory = mkdtempSync(join(tmpdir(), 'teams-async-relay-')); const path = join(directory, 'inbox.sqlite');
   const target = { ...scope, orkaBaseUrl: tls.baseUrl }; let now = 1000;
   stores.initializeIngressStore(path, target);
-  const store = stores.openIngressStore(path, target, { now: () => now, policy: { maxPending: 10, maxRecords: 100, replayWindowMs: 100 } });
+  const store = stores.openIngressStore(path, target, { now: () => now, policy: { maxPending: 10, maxRecords: 100, replayWindowMs } });
   const port = stores.createIngressPort(store);
   store.admit(expectedEvent, route);
   t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
-  return { store, port, path, target, now(value: number) { now = value; }, posts: () => posts,
+  return { store, port, path, target, ca: tls.ca, now(value: number) { now = value; }, posts: () => posts,
     client: createOrkaClient(target, { ca: tls.ca, bearerToken: randomUUID() }) };
 }
 
@@ -62,6 +62,46 @@ for (const boundary of ['claim', 'revalidation'] as const) for (const loss of ['
       assert.equal(current!.take(), false, 'invalidated grant cannot be reused');
       if (loss === 'deadline' || loss === 'regression') { f.now(1200); assert.equal(f.store.claim(), undefined); }
     } finally { gate.resolve(); await pending.catch(() => {}); }
+  });
+}
+
+for (const loss of ['deadline', 'quarantine', 'cancel', 'readiness', 'authority'] as const) {
+  test(`${loss} during held delegated lookup prevents native Orka POST`, async t => {
+    const f = await fixture(t); const entered = deferred<void>(); const gate = deferred<void>();
+    const abort = new AbortController(); let ready = true; let allowed = true;
+    let claim: IngressForwardingGrant['claim'] | undefined;
+    const port: IngressPort = { ...f.port, claimForForwarding: async () => {
+      const grant = await f.port.claimForForwarding(); claim = grant?.claim; return grant;
+    } };
+    const client = createOrkaClient(f.target, { ca: f.ca, bearerToken: 'ingress',
+      authority: { allowed: () => allowed, revalidate: async () => allowed, lost: new AbortController().signal },
+      delegatedGrant: async () => { entered.resolve(); await gate.promise; return 'a'.repeat(64); } });
+    const pending = relayOne(port, client, abort.signal, () => ready);
+    try {
+      await entered.promise; assert.equal(f.posts(), 0);
+      if (loss === 'deadline') f.now(1100);
+      if (loss === 'quarantine') { assert.ok(claim); f.store.block(claim, 'conflict'); }
+      if (loss === 'cancel') abort.abort();
+      if (loss === 'readiness') ready = false;
+      if (loss === 'authority') allowed = false;
+      gate.resolve(); await pending; assert.equal(f.posts(), 0);
+    } finally { gate.resolve(); await pending; }
+  });
+}
+
+for (const outcome of ['ready', 'missing', 'invalid', 'unavailable'] as const) {
+  test(`delegated ${outcome} preparation preserves native send and settlement outcomes`, async t => {
+    const f = await fixture(t, 10000);
+    const client = createOrkaClient(f.target, { ca: f.ca, bearerToken: 'ingress', delegatedGrant: async () => {
+      if (outcome === 'unavailable') throw new Error('synthetic lookup failure');
+      return outcome === 'missing' ? undefined : outcome === 'invalid' ? 'invalid' : 'a'.repeat(64);
+    } });
+    assert.equal(await relayOne(f.port, client), true);
+    assert.equal(f.posts(), outcome === 'ready' ? 1 : 0);
+    f.now(2000);
+    const next = f.store.claim();
+    if (outcome === 'unavailable') { assert.ok(next); assert.equal(next.attempt, 2); }
+    else assert.equal(next, undefined);
   });
 }
 

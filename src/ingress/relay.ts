@@ -1,4 +1,4 @@
-import type { IngressClaim, IngressPort, IngressStore, OrkaClient, OrkaPostResult } from './types.js';
+import type { IngressClaim, IngressPort, IngressStore, OrkaClient, OrkaPostPreparation, OrkaPostResult } from './types.js';
 
 /** One persisted attempt, one POST, one fenced settlement. Composition owns serialization and shutdown/drain. */
 export async function relayOne(store: IngressStore | IngressPort, client: OrkaClient, signal?: AbortSignal,
@@ -6,14 +6,19 @@ export async function relayOne(store: IngressStore | IngressPort, client: OrkaCl
   const active = () => !signal?.aborted && isReady();
   if (!active()) return false;
   const isPort = 'claimForForwarding' in store;
-  let claim: Readonly<IngressClaim>; let preflightFailed = false;
+  let claim: Readonly<IngressClaim>; let preflightFailed = false; let preparation: OrkaPostPreparation | undefined;
+  const prepare = async (): Promise<OrkaPostPreparation> => {
+    try { return await client.prepare!(claim.event, signal); }
+    catch { return { kind: 'retry' }; }
+  };
   if (isPort) {
     const grant = await store.claimForForwarding();
     if (!grant) return false;
     try {
       claim = structuredClone(grant.claim);
       if (preflight && !await preflight(claim, signal)) preflightFailed = true;
-      if (!preflightFailed) {
+      if (!preflightFailed && client.prepare) preparation = await prepare();
+      if (!preflightFailed && (!preparation || preparation.kind === 'ready')) {
         if (!active() || !await grant.revalidate()) return false;
         // Reconciliation may have outlived cancellation, expiry or quarantine.
         // No await is allowed between the owner's final take and client handoff.
@@ -27,12 +32,14 @@ export async function relayOne(store: IngressStore | IngressPort, client: OrkaCl
     if (!legacy) return false;
     if ('then' in legacy) throw new Error('Async ingress requires forwarding permission');
     claim = legacy;
+    if (client.prepare) preparation = await prepare();
     if (!active()) return false;
   }
   let result: OrkaPostResult;
   if (preflightFailed) result = { kind: 'retry' };
+  else if (preparation && preparation.kind !== 'ready') result = preparation;
   else {
-    try { result = await client.post(claim.event, signal); }
+    try { result = await client.post(claim.event, signal, preparation); }
     catch { result = { kind: 'retry' }; }
   }
   if (signal?.aborted && result.kind !== 'retry') result = { kind: 'retry' };

@@ -1,7 +1,7 @@
 import { request } from 'node:https';
 import { MAX_ADAPTER_RESPONSE_BYTES } from '../protocol/types.js';
 import { decode, encode, integer, invalid, validateEvent, validateReceipt, validateScope } from './codec.js';
-import type { IngressScope, OrkaClient, OrkaPostResult } from './types.js';
+import type { IngressScope, OrkaClient, OrkaPostPreparation, OrkaPostResult } from './types.js';
 import type { EventEnvelope } from '../protocol/types.js';
 import { grantRef } from '../accounts/grants.js';
 
@@ -13,16 +13,25 @@ export function createOrkaClient(inputScope: Readonly<IngressScope>, options: { 
   const ca = Buffer.isBuffer(options.ca) ? Buffer.from(options.ca) : options.ca;
   if (scope.gatewayNamespace === '.' || scope.gatewayNamespace === '..' || scope.gatewayName === '.' || scope.gatewayName === '..') invalid();
   const url = new URL(`api/v1/gateways/${encodeURIComponent(scope.gatewayNamespace)}/${encodeURIComponent(scope.gatewayName)}/events`, scope.orkaBaseUrl);
+  const prepare = async (input: Readonly<EventEnvelope>, signal?: AbortSignal): Promise<OrkaPostPreparation> => {
+    let event: EventEnvelope;
+    try { event = validateEvent(input); } catch { return { kind: 'blocked', reason: 'invalid-event' }; }
+    let ref: string | undefined;
+    try { ref = await options.delegatedGrant!(event, signal); } catch { return { kind: 'retry' }; }
+    // Missing historical grants are permanent invalid events, not endlessly retried preflights.
+    try { return { kind: 'ready', gatewayGrantRef: grantRef(ref) }; }
+    catch { return { kind: 'blocked', reason: 'invalid-event' }; }
+  };
   return {
-    async post(input, signal) {
+    ...(options.delegatedGrant ? { prepare } : {}),
+    async post(input, signal, preparation) {
       let body: Buffer;
       let event: EventEnvelope;
       try { event = validateEvent(input); } catch { return { kind: 'blocked', reason: 'invalid-event' }; }
       if (options.delegatedGrant) {
-        let ref: string | undefined;
-        try { ref = await options.delegatedGrant(event, signal); } catch { return { kind: 'retry' }; }
-        // Missing historical grants are permanent invalid events, not endlessly retried preflights.
-        try { body = encode({ ...event, eventType: 'delegatedText', metadata: { ...event.metadata, gatewayGrantRef: grantRef(ref) } }); }
+        const prepared = preparation ?? await prepare(event, signal);
+        if (prepared.kind !== 'ready') return prepared;
+        try { body = encode({ ...event, eventType: 'delegatedText', metadata: { ...event.metadata, gatewayGrantRef: grantRef(prepared.gatewayGrantRef) } }); }
         catch { return { kind: 'blocked', reason: 'invalid-event' }; }
       } else body = encode(event);
       if (signal?.aborted) return { kind: 'retry' };

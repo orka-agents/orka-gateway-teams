@@ -281,7 +281,7 @@ test('delegated admission reserves sender generation before inbox and refuses im
   const reserved: TaskGrant[] = [];
   d.delegated.accounts.reserveGrant = async input => { assert.equal(f.admitted.length, 0); reserved.push(input); return input; };
   assert.equal((await f.run('work')).kind, 'accepted'); assert.equal(reserved.length, 1);
-  assert.deepEqual(reserved[0], { ref: grantReference(f.scope, f.config.targets[0]!, f.event.externalEventId), objectId: d.ch.objectId,
+  assert.deepEqual(reserved[0], { ref: grantReference(f.scope, f.config.targets[0]!, f.event.externalEventId, f.event.replyTarget!), objectId: d.ch.objectId,
     generation: 1, provider: 'workiq', targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest, eventId: f.event.externalEventId, tools: ['workiq'] });
   d.delegated.accounts.reserveGrant = async () => { throw new AccountError('conflict'); };
   assert.equal((await f.run('retry')).kind, 'conflict'); assert.equal(f.admitted.length, 1);

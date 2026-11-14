@@ -107,6 +107,11 @@ Rotation requires a drained restart at both ends.
 
 Admission saves an encrypted grant before admitting work. It binds the sender,
 Work IQ account generation, target routing identity, event and `workiq` tool.
+The reference also includes the winning inbox candidate's opaque reply target.
+Redelivery gets a fresh candidate and cannot give an older stored event new
+authority; the relay always uses the preserved original candidate. Grant lookup
+finishes before the inbox's final forwarding eligibility check and synchronous
+native handoff.
 Only the Orka wire request becomes `eventType: delegatedText` with nonsecret
 `metadata.gatewayGrantRef`; the V3 inbox format stays unchanged. Allow that key
 in the GatewayClass. Old queued events without grants are permanently blocked,

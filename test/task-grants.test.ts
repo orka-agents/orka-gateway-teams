@@ -25,6 +25,21 @@ test('grant reservation is encrypted, durable, immutable by sender/generation/ro
   await assert.rejects(reopened.reserveGrant({ ...f.input, generation: 2 }, context()), /conflict/);
 });
 
+test('redelivery candidates cannot replace the original grant or relink it after an account generation change', async t => {
+  const f = await grantsFixture(t);
+  const originalRef = grantReference(binding, target, f.input.eventId, 'original-reply-target');
+  const candidateRef = grantReference(binding, target, f.input.eventId, 'redelivery-candidate');
+  const original = { ...f.input, ref: originalRef };
+  await f.store.reserveGrant(original, context());
+  assert.deepEqual(await f.store.getGrant(originalRef, context()), original);
+  await f.store.disconnect(f.subject, context()); await f.link('reconnect');
+  const account = await f.store.inspect(f.subject, context()); assert.equal(account.generation, 2);
+  await f.store.reserveGrant({ ...f.input, ref: candidateRef, generation: 2 }, context());
+  assert.equal(await f.store.getGrant(originalRef, context()), undefined);
+  assert.equal((await f.store.getGrant(candidateRef, context()))?.generation, 2);
+  await assert.rejects(f.store.reserveGrant({ ...original, generation: 2 }, context()), /conflict/);
+});
+
 test('first binding freezes every UID, canonical tools and absolute deadline across restart', async t => {
   const f = await grantsFixture(t); await f.store.reserveGrant(f.input, context());
   const bound = await f.store.bindGrant(f.input.ref, target.id, frozen, context());
@@ -46,7 +61,7 @@ test('lost grant publication response reconciles exact ciphertext once; absent u
   f.controls.hook = ({ req, body, res, reply }) => {
     if (req.method === 'POST' && String(body?.RowKey).startsWith('grant_')) { writes++; res.destroy(); } else reply();
   };
-  await assert.rejects(f.store.reserveGrant({ ...f.input, ref: grantReference(binding, target, 'new'), eventId: 'new' }, context()), /unavailable/);
+  await assert.rejects(f.store.reserveGrant({ ...f.input, ref: grantReference(binding, target, 'new', 'new-reply'), eventId: 'new' }, context()), /unavailable/);
   assert.equal(writes, 2);
 });
 

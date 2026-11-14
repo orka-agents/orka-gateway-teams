@@ -64,7 +64,7 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   };
   const clients = config.targets.map(t => createOrkaClient(t.config.scope, { bearerToken: t.config.bearerToken, authority,
     ...(config.sso ? { delegatedGrant: async (event, signal) => {
-      const ref = grantReference(t.config.scope, t, event.externalEventId);
+      const ref = grantReference(t.config.scope, t, event.externalEventId, event.replyTarget!);
       const grant = await accounts!.getGrant(ref, { signal: signal ?? abort.signal, deadline: performance.now() + 2000 });
       return grant?.targetId === t.id && grant.targetDigest === t.identityDigest ? ref : undefined;
     } } : {}),

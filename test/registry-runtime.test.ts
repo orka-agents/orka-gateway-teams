@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import type { Activity } from '@microsoft/teams.api';
+import type { EventEnvelope } from '../src/protocol/types.js';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,6 +32,10 @@ import { WORK_IQ_SCOPE } from '../src/auth/delegated.js';
 import type { ControlRecord } from '../src/directory/types.js';
 import { TestClock } from './support/table-v3.js';
 import { payload } from './support/table-ingress-store.js';
+import { convertActivity } from '../src/teams/convert.js';
+import { createAccountStore } from '../src/accounts/store.js';
+import { grantReference } from '../src/accounts/grants.js';
+import { context as accountContext } from './support/directory-table.js';
 
 async function fixture(t: test.TestContext, initialize = true, count = 2, expirySeconds = 3600) {
   const config = { ...registryInput(count), groupPolicyFile: '' }; const identity = await runtimeIdentity(t, expirySeconds);
@@ -365,14 +371,14 @@ test('missing later domain unwinds acquired earlier domains and never listens', 
   assert.ok(f.domains.every(d => !d.service.rows.get('M')?.Owner));
 });
 
-async function seed(f: Awaited<ReturnType<typeof fixture>>) {
+async function seed(f: Awaited<ReturnType<typeof fixture>>, inputEvent: EventEnvelope = expectedEvent) {
   const provider = prepareStorageIdentity(f.config.targets[0]!.config.storage.identity).createProvider(f.deps.storageIdentity);
   try { for (const target of f.config.targets) {
     const c = target.config; const inbox = createTableIngressStoreV3({ kind: 'ingress', account: c.storage.account, table: c.storage.table,
       storeId: c.storage.ingressStoreId, scope: c.scope }, { token: provider.token, request: f.deps.tableRequest },
     { audit: c.storage.audit, maxIndexBytes: c.storage.maxIndexBytes, policy: c.policy });
     await inbox.open();
-    const event = { ...expectedEvent, contextId: target.id === 'primary' ? expectedEvent.contextId : `${expectedEvent.contextId}-${target.id}` };
+    const event = { ...inputEvent, contextId: target.id === 'primary' ? inputEvent.contextId : `${inputEvent.contextId}-${target.id}` };
     const registered = snapshotRegistry(f.config).targets.find(t => t.id === target.id)!; const digest = registered.identityDigest!;
     const scope = { appId: c.scope.appId, tenantId: c.scope.tenantId }; const name = bindingName(scope, event.contextId, digest);
     const spec = { gatewayRef: { name: c.scope.gatewayName }, agentRef: { name: 'front' }, match: { accountId: c.scope.tenantId, contextId: event.contextId },
@@ -441,6 +447,64 @@ test('all-target shutdown retains every lease until held shared bot-token work a
   assert.equal(stopped, false); assert.deepEqual(f.domains.map(d => d.service.rows.get('M')!.Owner), owners);
   token.resolve(); await sending; await stopping; await runtime.done; assert.equal(posts, 0);
   assert.ok(f.domains.every(d => d.service.rows.get('M')!.Owner === ''));
+});
+
+test('SSO redelivery cannot grant authority to a retained pre-SSO event with its original reply target', { timeout: 20000 }, async t => {
+  const f = await fixture(t, true, 1); const graph = await policyFixture(t, f);
+  const oid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'; const message = activity();
+  message.from.aadObjectId = oid; message.id = 'historical-work'; message.text = 'do work';
+  const converted = convertActivity(message as unknown as Activity, { tenantId: miConfig.tenantId, replyTarget: 'original-pre-sso-reply-target' });
+  assert.equal(converted.kind, 'accepted'); if (converted.kind !== 'accepted') throw new Error('Expected normalized event');
+  await seed(f, converted.event);
+  const target = f.config.targets[0]!; target.config.receiver = { ...miConfig, managedIdentityHost: 'azure-container-apps' };
+  Object.assign(target, { taskPassToken: 'controller-primary' });
+  const keyFile = join(f.files, 'account-key'); writeFileSync(keyFile, 'ab'.repeat(32), { mode: 0o600 });
+  const config = { ...f.config, sso: { accountTable: 'Accounts', keyFile, apiUri: 'api://gateway', connectionName: 'workiq' } };
+  const accountBinding = { account: 'example123', table: 'Accounts', appId: target.config.scope.appId, tenantId: target.config.scope.tenantId };
+  const authority = { allowed: () => true, revalidate: async () => true, lost: new AbortController().signal };
+  const openAccounts = () => createAccountStore(accountBinding, Buffer.from('ab'.repeat(32), 'hex'), f.accounts.dependencies, authority);
+  const accounts = openAccounts();
+  try {
+    const challenge = await accounts.challenge({ objectId: oid }, converted.event.contextId, 'signin', accountContext());
+    assert.equal(await accounts.claim(challenge, accountContext()), 'claimed');
+    assert.equal(await accounts.complete(challenge, { accessToken: 'synthetic-private-workiq', expiresAt: Date.now() + 3600000 }, accountContext()), true);
+  } finally { await accounts.close(); }
+  let posts = 0;
+  const upstream = await httpsFixture(t, (req, res) => {
+    posts++; req.resume(); res.writeHead(202); res.end(JSON.stringify({ status: 'accepted', eventId: converted.event.externalEventId, state: 'Queued' }));
+  });
+  const native = https.request;
+  t.mock.method(https, 'request', (url: URL, options: https.RequestOptions, callback: any) => url.hostname === 'orka.example.invalid' ?
+    native(new URL(url.pathname, upstream.baseUrl), { ...options, ca: upstream.ca, servername: 'localhost' }, callback) : native(url, options, callback));
+  syncBuiltinESMExports(); t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const held = deferred(); const entered = deferred(); let waiting = false;
+  f.accounts.controls.hook = async ({ req, url, reply }) => {
+    if (!waiting && req.method === 'GET' && decodeURIComponent(url.href).includes('grant_')) {
+      waiting = true; entered.resolve(); await held.promise;
+    }
+    reply();
+  };
+  const { botToken: _notUsed, ...base } = graph.deps;
+  const runtime = await startRegistryRuntime(config, { ...base,
+    managedIdentity: { acaRequest: f.identity.request, entraNetwork: entraNetwork() } });
+  t.after(async () => { held.resolve(); await runtime.stop().catch(() => {}); });
+  await entered.promise;
+  // The SDK path gives this duplicate a fresh opaque candidate, never the stored reply target.
+  const response = await post(runtime.port, f.auth.token(), message);
+  assert.equal(response.status, 200); assert.deepEqual(await response.json(), { status: 'duplicate' });
+  assert.equal([...f.accounts.rows.values()].filter(r => String(r.RowKey).startsWith('grant_')).length, 1);
+  held.resolve();
+  const stored = () => [...f.domains[0]!.service.rows.values()].filter(r => r.T === 'event').map(payload)[0]!;
+  await eventually(() => ['blocked', 'terminal'].includes(stored().state));
+  assert.equal(stored().replyTarget, 'original-pre-sso-reply-target');
+  assert.equal(stored().state, 'blocked'); assert.equal(stored().reason, 'invalid-event'); assert.equal(posts, 0);
+  await runtime.stop(); await runtime.done;
+  const reopened = openAccounts();
+  try {
+    const registered = snapshotRegistry(config).targets[0]!;
+    const originalRef = grantReference(target.config.scope, registered, converted.event.externalEventId, converted.event.replyTarget!);
+    assert.equal(await reopened.getGrant(originalRef, accountContext()), undefined);
+  } finally { await reopened.close(); }
 });
 
 test('native registry SSO stores only ciphertext, authenticates invokes, survives restart and disconnects without replaying old work', async t => {

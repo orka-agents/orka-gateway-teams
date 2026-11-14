@@ -15,7 +15,7 @@ export async function grantsFixture(t: Parameters<typeof directoryFixture>[0]) {
     assert.equal(await store.complete(ch, { accessToken: 'ACCESS-PRIVATE', expiresAt: clock + 100_000, refreshToken: 'REFRESH-PRIVATE' }, context()), true);
   };
   await link();
-  const input = { ref: grantReference(binding, target, 'event-private'), ...subject, generation: 1, provider: 'workiq' as const,
+  const input = { ref: grantReference(binding, target, 'event-private', 'reply-private'), ...subject, generation: 1, provider: 'workiq' as const,
     targetId: target.id, targetDigest: target.identityDigest, eventId: 'event-private', tools: ['workiq'] };
   return { ...f, store, open, subject, input, link, authority, now: () => clock, advance: (n: number) => { clock += n; }, revoke: () => { allowed = false; } };
 }

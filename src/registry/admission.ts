@@ -218,7 +218,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
               return await control(candidate({ kind: 'signin', targetId: slot.target.id, challengeId: challenge.id, recipient: context.controlRecipient! }, connection!.identityDigest), eligible, false, ctx, connection);
             }
             try {
-              await accounts.reserveGrant({ ref: grantReference(scope, slot.target, event.externalEventId), objectId: subject.objectId,
+              await accounts.reserveGrant({ ref: grantReference(scope, slot.target, event.externalEventId, event.replyTarget!), objectId: subject.objectId,
                 generation: account.generation, provider: 'workiq', targetId: slot.target.id, targetDigest: slot.target.identityDigest!,
                 eventId: event.externalEventId, tools: ['workiq'] }, ctx); assertActive(ctx);
             } catch (error) { if (error instanceof AccountError && error.code === 'conflict') return { kind: 'conflict' }; throw error; }

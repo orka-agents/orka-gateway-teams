@@ -50,7 +50,12 @@ export interface IngressPort {
 }
 export interface StoreOptions { policy?: IngressPolicy; now?: () => number }
 export type OrkaPostResult = { kind: 'receipt'; receipt: IngressReceipt } | { kind: 'retry'; retryAfterMs?: number } | { kind: 'blocked'; reason: 'conflict' | 'invalid-event' | 'redirect' };
-export interface OrkaClient { post(event: Readonly<EventEnvelope>, signal?: AbortSignal): Promise<OrkaPostResult> }
+export type OrkaPostPreparation = { kind: 'ready'; gatewayGrantRef: string } | Exclude<OrkaPostResult, { kind: 'receipt' }>;
+export interface OrkaClient {
+  /** Resolve asynchronous delegated authority before the inbox's final forwarding check. */
+  prepare?(event: Readonly<EventEnvelope>, signal?: AbortSignal): Promise<OrkaPostPreparation>;
+  post(event: Readonly<EventEnvelope>, signal?: AbortSignal, preparation?: Extract<OrkaPostPreparation, { kind: 'ready' }>): Promise<OrkaPostResult>;
+}
 
 const messages = {
   'invalid-input': 'Invalid ingress input.', missing: 'Ingress storage is missing.',
