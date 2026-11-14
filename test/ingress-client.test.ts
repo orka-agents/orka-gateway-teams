@@ -29,6 +29,24 @@ test('native HTTPS posts exact event bytes to encoded gateway path with separate
   assert.deepEqual(requests[0]?.body, Buffer.from(JSON.stringify(expectedEvent)));
 });
 
+test('delegated wire projection requires durable grant; missing-grant old text permanently blocks without native send', async t => {
+  const events: any[] = []; let grant: string | undefined = 'a'.repeat(64);
+  const { ca, baseUrl } = await httpsFixture(t, async (req, res) => {
+    const chunks: Buffer[] = []; for await (const b of req) chunks.push(Buffer.from(b)); events.push(JSON.parse(Buffer.concat(chunks).toString()));
+    res.writeHead(202); res.end(JSON.stringify(receipt));
+  });
+  const original = JSON.stringify(expectedEvent);
+  const client = createOrkaClient({ ...scope, orkaBaseUrl: baseUrl }, { bearerToken: 'ingress', ca, delegatedGrant: async () => grant });
+  assert.equal((await client.post(expectedEvent)).kind, 'receipt');
+  assert.deepEqual(events[0], { ...expectedEvent, eventType: 'delegatedText', metadata: { gatewayGrantRef: 'a'.repeat(64) } });
+  assert.equal(JSON.stringify(expectedEvent), original);
+  grant = undefined;
+  for (let n = 0; n < 2; n++) assert.deepEqual(await client.post(expectedEvent), { kind: 'blocked', reason: 'invalid-event' });
+  assert.equal(events.length, 1);
+  const ordinary = createOrkaClient({ ...scope, orkaBaseUrl: baseUrl }, { bearerToken: 'ingress', ca });
+  await ordinary.post(expectedEvent); assert.deepEqual(events[1], expectedEvent);
+});
+
 test('only a valid 202 is durable proof; conflicts, invalid events and redirects block without following', async (t) => {
   let status = 202; let body: string | Buffer = JSON.stringify(receipt); let hits = 0;
   const { ca, baseUrl } = await httpsFixture(t, (_request, response) => {

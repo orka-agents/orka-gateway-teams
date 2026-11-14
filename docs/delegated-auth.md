@@ -22,10 +22,11 @@ send reservations; uncertain sends are not automatically repeated.
 With a configured browser origin, personal chat offers a private sign-in card.
 Group chat first attempts sender SSO on its targeted OAuth card, with a private
 sign-in button when SSO or consent fails. Without that origin, the SSO-only card
-is unchanged. This provides sign-in and custody, **not delegated tool execution
-in Orka**. Task grants and GitHub linking are not implemented. Group targeting,
-silent-card behavior and the browser flow still need live validation with the
-installed Teams client; offline checks are not a live qualification.
+is unchanged. Root Tasks can query Work IQ through the gateway with an Orka
+controller that supports [gateway task passes](https://github.com/orka-agents/orka/blob/a48944de19c91b4c36dbaa0b04aab12fc9117eab/docs/gateway-task-passes.md).
+Child Tasks, native workers and GitHub linking are not supported. Group targeting,
+silent-card behavior, browser sign-in and Work IQ still need live validation;
+offline fixtures do not establish that the installed Teams client or provider works.
 
 ## Operator configuration
 
@@ -88,7 +89,93 @@ sign-in results use fixed text, no-store/no-referrer headers and no credentials.
 Early global overload/timeout refusals use the receiver's generic JSON response.
 Public browser handlers borrow only a small bounded share of receiver capacity.
 Partial completion counts as success only with an unexpired credential saved by
-that exact challenge, not merely an older renewable account.
+that exact challenge, not merely an older renewable account. Once publication is
+confirmed, a slow or uncertain notification cannot turn browser success into a
+408. The notification remains bounded and drains before receiver shutdown.
+
+## Root Task tools
+
+Every SSO-enabled registry target requires `taskPassTokenFile`, a separate private
+controller credential file with the same ownership checks as ingress/callback
+files. Its bearer must be 1–4096 ASCII characters from letters, digits,
+`._~+/-` and optional trailing `=`. All controller, ingress and callback bearers
+must differ across all targets. Non-SSO registries do not accept this field.
+Configure Orka's controller-only credential file with the target Gateway UID,
+this bearer and the operator-pinned gateway HTTPS origin. It is not the delivery
+bearer and must not be backed by storage worker service accounts can read.
+Rotation requires a drained restart at both ends.
+
+Admission saves an encrypted grant before admitting work. It binds the sender,
+Work IQ account generation, target routing identity, event and `workiq` tool.
+The reference also includes the winning inbox candidate's opaque reply target.
+Redelivery gets a fresh candidate and cannot give an older stored event new
+authority; the relay always uses the preserved original candidate. Grant lookup
+finishes before the inbox's final forwarding eligibility check and synchronous
+native handoff. Library callers must use an `IngressPort` for delegated clients;
+`createIngressPort` adapts an already-owned SQLite store. The legacy synchronous
+claim interface is refused before claiming or looking up delegated authority.
+Only the Orka wire request becomes `eventType: delegatedText` with nonsecret
+`metadata.gatewayGrantRef`; the V3 inbox format stays unchanged. Allow that key
+in the GatewayClass. Old queued events without grants are permanently blocked,
+not adopted into delegated authority. Drain or reconcile pending work before
+enabling this mode, disabling SSO, or changing the target routing identity.
+An older controller rejects delegated events; there is no plain-text fallback.
+
+On the shared outbound listener, `POST /v1/task-passes` authenticates only the
+particular target's controller bearer. The body is exactly:
+
+```json
+{"protocolVersion":"orka.gateway.v1","grantRef":"<event-reference>","namespaceUID":"<namespace-uid>","gatewayUID":"<gateway-uid>","taskUID":"<task-uid>","tools":["workiq"],"deadline":"2026-01-01T12:00:00Z"}
+```
+
+The controller's first binding is trusted without independent Kubernetes reads.
+Namespace, Gateway and Task UIDs, tool set and deadline freeze durably; a changed
+binding is refused with `grant-binding-conflict`. Restart permits only the same
+binding and generation. Pass replies contain only `pass` and `expiresAt`; random
+passes live in process memory, last at most five minutes or the earlier deadline,
+and can be used once. Restart discards every pass.
+
+`POST /v1/task-tools/workiq` accepts only that pass as bearer, never a controller
+or callback credential. Name the Orka Tool `workiq`, set
+`http.gatewayTaskPass: true` and its fixed HTTPS URL to
+`<gateway-origin>/v1/task-tools/workiq`; do not configure other auth or headers.
+Arguments are closed JSON:
+
+```json
+{"question":"What meetings do I have today?","location":{"timeZoneOffset":-480,"timeZone":"America/Los_Angeles"}}
+```
+
+`question` is nonempty and at most 32768 UTF-8 bytes. `location` is optional;
+include it for time-sensitive questions, with an IANA time zone and integer
+UTC offset in minutes from -840 through 840. Arguments cannot choose a sender,
+credential, destination, headers or provider conversation. Successful output is
+`{"text":"..."}` from completed Work IQ text artifacts only. Other states,
+unsupported responses and transport failures return fixed `tool-unavailable`;
+unusable account generations return `signin-required`.
+
+Each call checks the frozen grant and current account generation, renews only
+that account when possible, and revalidates owner authority before native send.
+Tokens stay inside the gateway. The destination is fixed to
+`https://workiq.svc.cloud.microsoft/a2a/`, using A2A 1.0 `SendMessage` and the
+sender's delegated token ([Work IQ API](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/work-iq/api-overview)).
+There are no automatic provider retries, redirects or shared provider contexts;
+uncertain responses are not resent. These query tools do not add a write/replay
+ledger or bypass Orka's approvals. Future write tools need durable reservation
+before the provider effect and must never replay uncertain writes.
+
+Task calls share the outbound listener's 32-handler limit and ten-second absolute
+budget, including account reads, lease checks and refresh. Work IQ may exceed that
+budget in practice; no live latency result is established. Internal account and
+tool concurrency limits may return a fixed refusal rather than queue work.
+
+Orka checks that the root Task is still Running with the same UID and gateway
+origin before requesting and sending a pass. Completion and cancellation prevent
+new calls through those controller gates, not an independent gateway revocation
+channel. Already-started calls may finish. The gateway independently enforces
+expiry, frozen deadline, generation, single use and process restart. A compromised
+controller can exercise its target's grants; child attenuation is not available.
+Accounts and grants borrow the same combined registry V3 owner authority, not a
+new failover lease. Shutdown drains tool/provider work before closing that store.
 
 ## Lifetime, restart and disconnect
 
@@ -106,7 +193,7 @@ There is no unattended-renewal promise for an SSO-only OBO account.
 
 Caches become unusable after thirty idle days. Access updates idle time;
 expiry is logical, not physical erasure of old Table versions/backups. Operators
-own backup retention and secure storage disposal. Challenges and generation
+own backup retention and secure storage disposal. Challenges, frozen Task grants and generation
 tombstones are retained; there is no pruning/reset command.
 
 Send `disconnect` from an authorized personal/group chat to erase the current

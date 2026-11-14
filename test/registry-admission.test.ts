@@ -9,6 +9,8 @@ import { bindingName } from '../src/directory/codec.js';
 import { openDirectory } from '../src/directory/store.js';
 import { DirectoryError } from '../src/directory/types.js';
 import { AccountError } from '../src/accounts/store.js';
+import type { TaskGrant } from '../src/accounts/grants.js';
+import { grantReference } from '../src/accounts/grants.js';
 import type { AccountChallenge, BrowserAttempt } from '../src/accounts/store.js';
 import type { ConnectionRecord } from '../src/directory/types.js';
 import type { PolicyAdmission } from '../src/policy/admission.js';
@@ -244,6 +246,10 @@ function delegatedFixture() {
   let gate: Promise<void> | undefined; let consumed = false;
   const attempt = { challenge: ch, state: 'synthetic-private-state', nonce: 'synthetic-private-nonce', verifier: 'synthetic-private-verifier' };
   const accounts = {
+    reserveGrant: async (input: TaskGrant) => input,
+    getGrant: async (_ref: string) => undefined as TaskGrant | undefined,
+    safeGrantOutput: async () => true,
+    bindGrant: async () => { throw new Error('not issuance'); },
     prepareBrowser: async (_ch: AccountChallenge) => consumed || done ? undefined : attempt,
     claimBrowser: async (state: string) => {
       if (consumed || state !== attempt.state) return undefined;
@@ -269,6 +275,30 @@ function delegatedFixture() {
     exchanges: () => exchanges, verifies: () => verifies, disconnects: () => disconnects,
     gate: (value: Promise<void>) => { gate = value; } };
 }
+
+test('delegated admission reserves sender generation before inbox and refuses immutable grant conflicts or missing authenticated sender', async t => {
+  const d = delegatedFixture(); await d.delegated.accounts.complete(); const f = await fixture(t, 2, d.delegated); await f.provision();
+  const reserved: TaskGrant[] = [];
+  d.delegated.accounts.reserveGrant = async input => { assert.equal(f.admitted.length, 0); reserved.push(input); return input; };
+  assert.equal((await f.run('work')).kind, 'accepted'); assert.equal(reserved.length, 1);
+  assert.deepEqual(reserved[0], { ref: grantReference(f.scope, f.config.targets[0]!, f.event.externalEventId, f.event.replyTarget!), objectId: d.ch.objectId,
+    generation: 1, provider: 'workiq', targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest, eventId: f.event.externalEventId, tools: ['workiq'] });
+  d.delegated.accounts.reserveGrant = async () => { throw new AccountError('conflict'); };
+  assert.equal((await f.run('retry')).kind, 'conflict'); assert.equal(f.admitted.length, 1);
+  assert.equal((await f.sink.admit(f.event, f.route, { ...context(), delegatedTenant: true, controlRecipient: { id: '29:p' },
+    subject: { tenantId: f.scope.tenantId, chatKind: 'personal' } })).kind, 'conflict'); assert.equal(reserved.length, 1);
+});
+
+test('browser publishes success signal before held notification while callback work remains awaited', async t => {
+  const d = delegatedFixture(); const f = await fixture(t, 2, { ...d.delegated, publicOrigin: 'https://signin.example.invalid' });
+  await f.provision(); await f.run('work', 'work'); let committed = false;
+  const held = deferred<void>(); f.sendGate(held.promise);
+  let done = false; const pending = f.sink.browser!.callback(new URLSearchParams({ state: 'synthetic-private-state', code: 'synthetic-private-code' }),
+    { ...context(), committed: () => { committed = true; } }).then(value => { done = true; return value; });
+  for (let n = 0; n < 1000 && f.sent.length < 2; n++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.sent.length, 2); assert.equal(committed, true); assert.equal(done, false);
+  held.resolve(); assert.equal(await pending, true); assert.equal(f.admitted.length, 0);
+});
 
 for (const failure of ['mixed-case', 'partial-false', 'partial-throw', 'new-generation'] as const)
   test(`SSO completion reconciles ${failure} without weakening the account generation fence`, async t => {

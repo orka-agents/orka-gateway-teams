@@ -1,4 +1,7 @@
 import { createAccountStore } from '../accounts/store.js';
+import { createTaskService } from '../accounts/task-service.js';
+import type { TaskService } from '../accounts/task-service.js';
+import { grantReference } from '../accounts/grants.js';
 import type { AccountStore } from '../accounts/store.js';
 import { createDelegatedAuth } from '../auth/delegated.js';
 import type { FetchKeys } from '../ingress/auth.js';
@@ -34,7 +37,7 @@ import { readSigninKey, snapshotRegistry } from './config.js';
 
 export interface RegistryRuntimeDependencies extends IngressRuntimeDependencies {
   graphIdentityRequest?: ImdsRequest; graphRequest?: typeof https.request; kubernetesRequest?: typeof https.request;
-  delegatedRequest?: typeof https.request; delegatedKeys?: FetchKeys;
+  delegatedRequest?: typeof https.request; delegatedKeys?: FetchKeys; workiqRequest?: typeof https.request;
 }
 export async function startRegistryRuntime(input: RegistryConfig, dependencies: RegistryRuntimeDependencies = {}, signal?: AbortSignal): Promise<IngressRuntime> {
   const config = snapshotRegistry(input); const deps = { ...dependencies };
@@ -54,12 +57,17 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   let ready = false; let fatal = false; let opening = true; let receiver: Receiver | undefined; let api: OutboundServer | undefined;
   let stopRuntime: (() => Promise<void>) | undefined; let closing: Promise<void> | undefined;
   let directory: Directory | undefined; let directoryTable: DirectoryTable | undefined; let accounts: AccountStore | undefined;
-  let admission: ReturnType<typeof createRegistryAdmission> | undefined;
+  let admission: ReturnType<typeof createRegistryAdmission> | undefined; let tasks: TaskService | undefined;
   const authority: LeaseAuthority = {
     allowed: () => !loss.signal.aborted && !abort.signal.aborted && authorities.every(a => a.allowed()),
     revalidate: async () => (await Promise.all(authorities.map(a => a.revalidate()))).every(Boolean) && authority.allowed(), lost: loss.signal,
   };
   const clients = config.targets.map(t => createOrkaClient(t.config.scope, { bearerToken: t.config.bearerToken, authority,
+    ...(config.sso ? { delegatedGrant: async (event, signal) => {
+      const ref = grantReference(t.config.scope, t, event.externalEventId, event.replyTarget!);
+      const grant = await accounts!.getGrant(ref, { signal: signal ?? abort.signal, deadline: performance.now() + 2000 });
+      return grant?.targetId === t.id && grant.targetDigest === t.identityDigest ? ref : undefined;
+    } } : {}),
     ...(t.config.caFile === undefined ? {} : { ca: readCaBundle(t.config.caFile) }) }));
   // Each ciphertext transport has its own four native slots; all borrow this identity.
   const provider = prepareStorageIdentity(shared.config.storage.identity).createProvider(deps.storageIdentity, Math.max(32, config.targets.length * 2 + (config.sso ? 8 : 4)));
@@ -68,6 +76,7 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
     // Handler/relay work drains first, then all native policy/provisioner work,
     // then directory requests, while every V3 lease and token source remain owned.
     const results: PromiseSettledResult<unknown>[] = await Promise.allSettled([authorizer.close(), ...readers.map(r => r.close())]);
+    results.push(...await Promise.allSettled([tasks?.close()]));
     results.push(...await Promise.allSettled([delegatedAuth?.close(), accounts?.close()])); key?.fill(0);
     results.push(...await Promise.allSettled([Promise.resolve().then(() => directory?.close() ?? directoryTable?.close())]));
     unsubscribe(); results.push(...await Promise.allSettled(handles.map(h => Promise.resolve().then(() => h.close()))));
@@ -118,6 +127,11 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
       accounts = createAccountStore({ account: shared.config.storage.account, table: config.sso.accountTable,
         appId: shared.config.scope.appId, tenantId: shared.config.scope.tenantId }, key!,
       { token: provider.token, ...(deps.tableRequest ? { request: deps.tableRequest } : {}) }, authority); key!.fill(0);
+      tasks = createTaskService({ accounts, auth: delegatedAuth!, authority,
+        targets: config.targets.map(t => ({ id: t.id, gatewayUid: t.gatewayUid, identityDigest: t.identityDigest!, taskPassToken: t.taskPassToken! })),
+        privateCredentials: config.targets.flatMap(t => [t.config.bearerToken, t.config.outbound!.bearerToken]),
+        ...(deps.workiqRequest ? { workiq: { request: deps.workiqRequest } } : {}),
+        log: category => { process.stderr.write(`teams-ingress: ${category}\n`); } });
     }
     admission = createRegistryAdmission({ config, directory, authority, active, authorizer,
       ...(accounts && delegatedAuth && config.sso ? { delegated: { accounts, auth: delegatedAuth, apiUri: config.sso.apiUri, connectionName: config.sso.connectionName,
@@ -133,7 +147,7 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
     api = await startTargetOutboundServer(shared.config.outbound!, slots.map(s => ({
       ...s.target.config.outbound!, prefix: `/targets/${s.target.id}`,
       dispatcher: receiver!.outbounds!.get(s.target.id)!, scope: { appId: s.target.config.scope.appId, tenantId: s.target.config.scope.tenantId },
-    })), active);
+    })), active, tasks);
     assertStarting(); if (!authority.allowed()) throw new Error('Registry authority lost'); ready = true;
   } catch {
     ready = false; abort.abort();

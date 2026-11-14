@@ -62,6 +62,10 @@ not JSON. Each is a regular, single-link private file owned by the runtime user
 (mode 0600 or stricter), bounded to 16 KiB, under an owned directory not writable
 by group or others. Symlinks and aliased parent paths are rejected. Directional
 bearers must be distinct across every slot. No credential belongs in the manifest.
+SSO-enabled targets also require `taskPassTokenFile`, a separate private
+controller credential; non-SSO targets omit it. It must differ from every other
+controller/ingress/callback bearer. See [root Task tools](delegated-auth.md#root-task-tools)
+for the controller configuration, pass routes and fixed Work IQ arguments.
 
 Use the existing shared bot, listener, policy and Table environment settings from
 the [runtime reference](runtime-reference.md) and [Table guide](table-runtime.md):
@@ -149,8 +153,10 @@ coalesced by configured target rather than logging requests or private identitie
 
 Every target uses `/targets/<id>/v1/deliveries`,
 `/targets/<id>/v1/health` and `/targets/<id>/v1/capabilities`, authenticated
-with that target's distinct callback bearer. Unprefixed routes are not registered
-in multi-target mode. Configure each Orka's
+with that target's distinct callback bearer. Unprefixed delivery/health/capabilities routes are not registered
+in multi-target mode. SSO-enabled registries separately expose the unprefixed
+`/v1/task-passes` and `/v1/task-tools/workiq` routes with controller/pass-only
+authentication; callback bearers cannot use those routes. Configure each Orka's
 callback base accordingly. These are on the shared outbound listener, not the
 SDK's `/api/messages` listener. A slot's bearer cannot authorize another slot's
 path. Authentication precedes body parsing, readiness and storage; unknown paths

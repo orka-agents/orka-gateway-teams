@@ -64,6 +64,28 @@ test('callback accepts bounded unique form fields only and never echoes code or 
   assert.equal((await call(f.port, '/oauth/callback', 'POST', '{}', { 'content-type': 'application/json' })).status, 415);
 });
 
+test('durably committed callback answers200 before slow notification exceeds real10s timer and drains held work', { timeout: 20000 }, async t => {
+  const { grantsFixture } = await import('./support/task-grants.js'); const f = await grantsFixture(t);
+  const entered = deferred<void>(); const release = deferred<void>(); let oldWork = 0;
+  const adapter = new NativeAdapter(async () => true, { origin: 'https://signin.example.invalid', begin: async () => undefined,
+    callback: async (_form, ctx) => {
+      const ch = await f.store.challenge(f.subject, 'browser-chat', 'browser-attempt', ctx);
+      assert.equal(await f.store.claim(ch, ctx), 'claimed');
+      assert.equal(await f.store.complete(ch, { accessToken: 'NEW-PRIVATE', expiresAt: f.now() + 100000 }, ctx), true);
+      (ctx as typeof ctx & { committed?(): void }).committed?.(); entered.resolve(); await release.promise; return true;
+    } });
+  adapter.registerRoute('POST', '/api/messages', async () => { oldWork++; return { status: 200 }; });
+  const port = await adapter.listen('127.0.0.1', 0); t.after(() => { release.resolve(); return adapter.stop(); });
+  const response = call(port, '/oauth/callback', 'POST', 'state=s&code=private', { 'content-type': 'application/x-www-form-urlencoded' }).catch(() => ({ status: 0, text: '' }));
+  await entered.promise;
+  // Hold real post-publication work beyond the receiver's unchanged absolute timer.
+  await new Promise(resolve => setTimeout(resolve, 10100));
+  const result = await response; assert.equal(result.status, 200); assert.match(result.text, /signed in/); assert.doesNotMatch(result.text, /PRIVATE/);
+  assert.equal((await f.store.inspect(f.subject, { signal: new AbortController().signal, deadline: performance.now() + 1000 })).linked, true);
+  let drained = false; const stop = adapter.stop().then(() => { drained = true; }); await new Promise(resolve => setImmediate(resolve)); assert.equal(drained, false);
+  release.resolve(); await stop; assert.equal(oldWork, 0);
+});
+
 test('browser work cannot occupy all Bot HTTP slots and shutdown drains actual handlers', async t => {
   const f = await fixture(t); const held = deferred<void>(); f.hold(held.promise);
   const first = call(f.port, '/signin?challenge=' + challenge).catch(() => undefined);

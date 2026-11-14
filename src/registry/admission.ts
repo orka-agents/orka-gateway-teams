@@ -1,5 +1,6 @@
 import { identity } from '../delivery/identity.js';
 import { AccountError } from '../accounts/store.js';
+import { grantReference } from '../accounts/grants.js';
 import type { AccountStore, AccountChallenge, AccountTokens } from '../accounts/store.js';
 import { uuid } from '../policy/config.js';
 import type { createDelegatedAuth } from '../auth/delegated.js';
@@ -216,6 +217,11 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
               log('signin-required');
               return await control(candidate({ kind: 'signin', targetId: slot.target.id, challengeId: challenge.id, recipient: context.controlRecipient! }, connection!.identityDigest), eligible, false, ctx, connection);
             }
+            try {
+              await accounts.reserveGrant({ ref: grantReference(scope, slot.target, event.externalEventId, event.replyTarget!), objectId: subject.objectId,
+                generation: account.generation, provider: 'workiq', targetId: slot.target.id, targetDigest: slot.target.identityDigest!,
+                eventId: event.externalEventId, tools: ['workiq'] }, ctx); assertActive(ctx);
+            } catch (error) { if (error instanceof AccountError && error.code === 'conflict') return { kind: 'conflict' }; throw error; }
           }
           return await slot.inbox.admit(event, route);
         }
@@ -317,13 +323,14 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
       const attempt = await d.accounts.prepareBrowser(ch, ctx); assertActive(ctx);
       return attempt ? d.auth.authorizeUrl(attempt, `${origin}/oauth/callback`) : undefined;
     }),
-    callback: (form: URLSearchParams, supplied: DirectoryContext) => browserOperation(supplied, false, async ctx => {
+    callback: (form: URLSearchParams, supplied: DirectoryContext & { committed?(): void }) => browserOperation(supplied, false, async ctx => {
       const attempt = await d.accounts.claimBrowser(form.get('state') ?? '', ctx); assertActive(ctx);
       // Even consent refusal burns its state; retry starts with a new chat request.
       if (!attempt || form.has('error') || !form.get('code')) return false;
       const ch = attempt.challenge; const bound = await browserControl(ch, ctx); if (!bound) return false;
       const tokens = await d.auth.redeemCode(form.get('code')!, attempt, `${origin}/oauth/callback`, ctx); assertActive(ctx);
       if (!await completeLinked(ch, tokens, ctx)) return false;
+      supplied.committed?.();
       try {
         const activityId = `signin:${ch.id}`; const connection = bound.connection;
         await control({ schema: 1, kind: 'control', scope, conversationId: ch.conversationId, chatKind: connection.chatKind, activityId,

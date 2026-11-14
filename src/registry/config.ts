@@ -8,7 +8,7 @@ import { absoluteFile, readRegistryFile } from './files.js';
 export interface RegistryTarget {
   id: string; label: string; gatewayUid: string; frontAgent: Readonly<{ namespace: string; name: string }>;
   kubernetesBaseUrl: string; kubernetesTokenFile: string; kubernetesCaFile?: string;
-  config: TableServeConfig; readonly identityDigest?: string;
+  config: TableServeConfig; readonly identityDigest?: string; taskPassToken?: string;
 }
 export interface SigninConfig { accountTable: string; keyFile: string; apiUri: string; connectionName: string; publicOrigin?: string }
 export interface RegistryConfig { sso?: Readonly<SigninConfig>; schemaVersion: 1; directoryTable?: string; groupPolicyFile?: string; targets: readonly RegistryTarget[] }
@@ -52,7 +52,9 @@ export function snapshotRegistry(input: RegistryConfig): RegistryConfig {
     const ids = new Set<string>(); const inboxes = new Set<string>(); const deliveries = new Set<string>(); const tokens = new Set<string>();
     let shared: string | undefined;
     const targets = root.targets.map(item => {
-      const raw = auditFields(item, [...metadataKeys, 'config', 'identityDigest']);
+      const raw = auditFields(item, [...metadataKeys, 'config', 'identityDigest', 'taskPassToken']);
+      const taskPassToken = raw.taskPassToken;
+      if (sso ? typeof taskPassToken !== 'string' || !taskPassToken || taskPassToken.length > 4096 || !/^[A-Za-z0-9._~+/-]+=*$/u.test(taskPassToken) : taskPassToken !== undefined) throw new ConfigurationError();
       const config = snapshotTableServeConfig(raw.config as TableServeConfig);
       if (config.storage.backend !== 'table-v3' || !config.outbound || config.scope.orkaBaseUrl !== (raw.config as TableServeConfig).scope.orkaBaseUrl) throw new ConfigurationError();
       const metadata = targetMetadata(raw, config); const { scope, storage, receiver, policy, outbound } = config;
@@ -69,8 +71,11 @@ export function snapshotRegistry(input: RegistryConfig): RegistryConfig {
       const identityDigest = createHash('sha256').update(JSON.stringify(['teams-target-v1', scope.appId, scope.tenantId, metadata.id,
         scope.orkaBaseUrl, metadata.kubernetesBaseUrl, scope.gatewayNamespace, scope.gatewayName, metadata.gatewayUid,
         metadata.frontAgent.namespace, metadata.frontAgent.name])).digest('hex');
-      return Object.freeze({ ...metadata, config, identityDigest });
+      return Object.freeze({ ...metadata, config, identityDigest, ...(typeof taskPassToken === 'string' ? { taskPassToken } : {}) });
     });
+    for (const target of targets) if (target.taskPassToken !== undefined) {
+      if (tokens.has(target.taskPassToken)) throw new ConfigurationError(); tokens.add(target.taskPassToken);
+    }
     return Object.freeze({ schemaVersion: 1, ...(sso ? { sso: Object.freeze(sso) } : {}), ...(directoryTable === undefined ? {} : { directoryTable }), ...(groupPolicyFile === undefined ? {} : { groupPolicyFile }), targets: Object.freeze(targets) });
   } catch { throw new ConfigurationError(); }
 }
@@ -98,14 +103,15 @@ export function parseRegistryConfig(env: NodeJS.ProcessEnv): RegistryConfig {
     const root = auditFields(JSON.parse(readRegistryFile(absoluteFile(captured.ORKA_REGISTRY_FILE), 256 * 1024, false)), ['schemaVersion', 'targets']);
     if (!Array.isArray(root.targets) || !root.targets.length || root.targets.length > 32) throw new ConfigurationError();
     const targets = root.targets.map(item => {
-      const raw = auditFields(item, [...metadataKeys, 'orkaBaseUrl', 'gatewayNamespace', 'gatewayName', 'ingressStoreId', 'deliveryStoreId', 'ingressTokenFile', 'callbackTokenFile', 'orkaCaFile']);
+      const raw = auditFields(item, [...metadataKeys, 'orkaBaseUrl', 'gatewayNamespace', 'gatewayName', 'ingressStoreId', 'deliveryStoreId', 'ingressTokenFile', 'callbackTokenFile', 'orkaCaFile', 'taskPassTokenFile']);
       const parsed = parseRuntimeConfig({ ...captured, ORKA_BASE_URL: text(raw.orkaBaseUrl, 4096), ORKA_GATEWAY_NAMESPACE: text(raw.gatewayNamespace),
         ORKA_GATEWAY_NAME: text(raw.gatewayName), TABLE_INGRESS_STORE_ID: text(raw.ingressStoreId), TABLE_DELIVERY_STORE_ID: text(raw.deliveryStoreId),
         ORKA_BEARER_TOKEN: readRegistryFile(absoluteFile(raw.ingressTokenFile), 16384).trim(),
         ORKA_OUTBOUND_BEARER_TOKEN: readRegistryFile(absoluteFile(raw.callbackTokenFile), 16384).trim(),
         ...(raw.orkaCaFile === undefined ? {} : { ORKA_CA_FILE: absoluteFile(raw.orkaCaFile) }) }, 'serve');
       if (!('storage' in parsed) || parsed.scope.orkaBaseUrl !== raw.orkaBaseUrl) throw new ConfigurationError();
-      return { ...targetMetadata(raw, parsed), config: parsed };
+      return { ...targetMetadata(raw, parsed), config: parsed,
+        ...(raw.taskPassTokenFile === undefined ? {} : { taskPassToken: readRegistryFile(absoluteFile(raw.taskPassTokenFile), 4097).trim() }) };
     });
     const keys = ['SSO_ACCOUNT_TABLE', 'SSO_KEY_FILE', 'SSO_API_URI', 'SSO_CONNECTION_NAME', 'SSO_PUBLIC_ORIGIN'];
     const sso = keys.some(k => captured[k] !== undefined) ? { accountTable: captured.SSO_ACCOUNT_TABLE!, keyFile: captured.SSO_KEY_FILE!,

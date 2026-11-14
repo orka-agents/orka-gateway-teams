@@ -1,5 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { identity } from '../ingress/codec.js';
+import { grantRef, taskGrant, grantBinding } from './grants.js';
+import type { TaskGrant, GrantBinding } from './grants.js';
 import { canonicalJSON, parseCanonicalJSON, validateScope } from '../directory/codec.js';
 import { createNativeTable } from '../directory/table.js';
 import type { DirectoryBinding, DirectoryContext, DirectoryDependencies } from '../directory/types.js';
@@ -21,7 +23,8 @@ export class AccountError extends Error {
 type Account = { kind: 'account'; objectId: string; generation: number; lastUsed: number; tokens?: AccountTokens; challengeId?: string };
 type Challenge = AccountChallenge & { kind: 'challenge'; ownerUUID?: string;
   browser?: { state: string; nonce: string; verifier: string; consumed: boolean } };
-type Document = Account | Challenge;
+type Grant = TaskGrant & { kind: 'grant' };
+type Document = Account | Challenge | Grant;
 // The native transport cannot accept a plaintext document or a token-bearing value.
 type Ciphertext = { generation: number; ciphertext: Buffer };
 type CipherRow = { row: string; etag: string; value: Ciphertext };
@@ -62,7 +65,8 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     if (typeof id !== 'string' || !/^[a-f0-9]{64}\.[a-f0-9-]{36}$/u.test(id)) bad('invalid-input');
     uuid(id.slice(65)); return { row: `challenge_${id.slice(0, 64)}` };
   };
-  const docKey = (v: Document) => v.kind === 'account' ? accountKey(v.objectId) : idKey(v.id);
+  const grantKey = (ref: string) => ({ row: `grant_${grantRef(ref)}` });
+  const docKey = (v: Document) => v.kind === 'account' ? accountKey(v.objectId) : v.kind === 'grant' ? grantKey(v.ref) : idKey(v.id);
   function validTokens(input: unknown): AccountTokens {
     const v = object(input, ['accessToken', 'expiresAt', 'refreshToken', 'assertion', 'assertionExpiresAt']);
     const token = (s: unknown) => { if (typeof s !== 'string' || !s || Buffer.byteLength(s) > 16 * 1024 || /[\p{Cc}\uD800-\uDFFF]/u.test(s)) bad(); };
@@ -77,6 +81,8 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
       object(v, ['kind', 'objectId', 'generation', 'lastUsed', 'tokens', 'challengeId']); integer(v.lastUsed, 0, Number.MAX_SAFE_INTEGER);
       if (v.tokens !== undefined) validTokens(v.tokens);
       if (v.challengeId !== undefined) idKey(v.challengeId);
+    } else if (v.kind === 'grant') {
+      const { kind: _kind, ...grant } = v; taskGrant(grant);
     } else {
       object(v, ['kind', 'id', 'objectId', 'conversationId', 'activityId', 'generation', 'expiresAt', 'state', 'ownerUUID', 'method', 'browser']);
       if (v.kind !== 'challenge' || !['open', 'exchanging', 'committing', 'done', 'failed'].includes(v.state) ||
@@ -125,7 +131,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         const v = object(input, [...Object.keys(types), ...Object.keys(types).map(k => `${k}@odata.type`),
           'odata.etag', 'odata.metadata', 'odata.id', 'odata.editLink', 'odata.editlink', 'odata.type']);
         for (const [k, type] of Object.entries(types)) if (v[`${k}@odata.type`] !== undefined && v[`${k}@odata.type`] !== type) bad();
-        if (v.PartitionKey !== partition || typeof v.RowKey !== 'string' || !/^(?:account|challenge)_[a-f0-9]{64}$/u.test(v.RowKey) ||
+        if (v.PartitionKey !== partition || typeof v.RowKey !== 'string' || !/^(?:account|challenge|grant)_[a-f0-9]{64}$/u.test(v.RowKey) ||
           (expected && v.RowKey !== expected.row) || v.V !== 1 || v.Armed !== false || v['Payload@odata.type'] !== 'Edm.Binary' ||
           typeof v.Payload !== 'string' || v.Payload.length > 66_000) bad();
         const data = Buffer.from(v.Payload, 'base64');
@@ -179,7 +185,52 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
       row.value.state !== state || (state !== 'done' && now() >= ch.expiresAt) || a?.value.generation !== ch.generation) return undefined;
     return { row, account: a };
   }
+  const publicGrant = ({ kind: _kind, ...grant }: Grant): TaskGrant => grant;
+  async function liveGrant(ref: string, c: DirectoryContext): Promise<Row | undefined> {
+    const row = await read(grantKey(ref), c); if (row?.value.kind !== 'grant') return undefined;
+    const account = await read(accountKey(row.value.objectId), c);
+    return account?.value.kind === 'account' && account.value.generation === row.value.generation && usable(account.value) ? row : undefined;
+  }
   return {
+    reserveGrant(input: TaskGrant, ctx: DirectoryContext): Promise<TaskGrant> {
+      return run(ctx, async c => {
+        let grant: TaskGrant; try { grant = taskGrant(input); if (grant.binding) bad('invalid-input'); } catch { return bad('invalid-input'); }
+        const same = (v: Document) => {
+          if (v.kind !== 'grant') return false;
+          const { binding: _binding, ...reservation } = publicGrant(v); return canonicalJSON(reservation) === canonicalJSON(grant);
+        };
+        const existing = await read(grantKey(grant.ref), c);
+        if (existing && !same(existing.value)) bad('conflict');
+        const a = await read(accountKey(grant.objectId), c);
+        if (a?.value.kind !== 'account' || a.value.generation !== grant.generation || !usable(a.value)) bad('conflict');
+        const saved = existing ?? await persist(undefined, { kind: 'grant', ...grant }, c, same);
+        if (!same(saved.value) || !await liveGrant(grant.ref, c)) bad('conflict');
+        return publicGrant(saved.value as Grant);
+      });
+    },
+    getGrant(ref: string, ctx: DirectoryContext): Promise<TaskGrant | undefined> {
+      return run(ctx, async c => { const row = await liveGrant(ref, c); return row && publicGrant(row.value as Grant); });
+    },
+    safeGrantOutput(ref: string, text: string, ctx: DirectoryContext): Promise<boolean> {
+      return run(ctx, async c => {
+        const grant = await liveGrant(ref, c); if (grant?.value.kind !== 'grant') return false;
+        const row = await read(accountKey(grant.value.objectId), c); if (row?.value.kind !== 'account' || row.value.generation !== grant.value.generation) return false;
+        const tokens = tokensFor(row.value, row.etag);
+        return !!tokens && ![tokens.accessToken, tokens.refreshToken, tokens.assertion].some(secret => secret && text.includes(secret));
+      });
+    },
+    bindGrant(ref: string, targetId: string, input: GrantBinding, ctx: DirectoryContext): Promise<TaskGrant> {
+      return run(ctx, async c => {
+        let binding: GrantBinding; try { binding = grantBinding(input); } catch { return bad('invalid-input'); }
+        if (binding.deadline <= now()) bad('invalid-input');
+        const row = await liveGrant(ref, c); const v = row?.value;
+        if (!row || v?.kind !== 'grant' || v.targetId !== targetId || binding.tools.some(t => !v.tools.includes(t))) bad('conflict');
+        const same = (g: Document) => g.kind === 'grant' && canonicalJSON(g) === canonicalJSON({ ...v, binding });
+        if (v.binding && !same(v)) bad('conflict');
+        const saved = v.binding ? row : await persist(row, { ...v, binding }, c, same);
+        if (!same(saved.value) || !await liveGrant(ref, c)) bad('conflict'); return publicGrant(saved.value as Grant);
+      });
+    },
     inspect(subject: AccountSubject, ctx: DirectoryContext, forDisconnect = false): Promise<{ generation: number; linked: boolean }> {
       return run(ctx, async c => { const r = await read(accountKey(subject.objectId), c); const v = r?.value as Account | undefined;
         return { generation: v?.generation ?? 0, linked: !!v && usable(v) && !!v.tokens &&
