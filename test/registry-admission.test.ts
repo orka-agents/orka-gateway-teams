@@ -249,6 +249,7 @@ function delegatedFixture() {
     reserveGrant: async (input: TaskGrant) => input,
     getGrant: async (_ref: string) => undefined as TaskGrant | undefined,
     watch: () => { throw new Error('not a tool handoff'); },
+    pin: () => { throw new Error('not a tool handoff'); },
     safeGrantOutput: async () => true, safeOutput: async () => true, invalidate: async () => {},
     reserveWrite: async () => { throw new Error('not a write'); }, completeWrite: async () => {},
     bindGrant: async () => { throw new Error('not issuance'); },
@@ -346,7 +347,8 @@ test('browser completion correlates the saved sign-in control and asks only for 
   await f.provision(); await f.run('work', 'work');
   const browser = f.sink.browser!;
   assert.notEqual(browser, undefined);
-  const url = new URL((await browser.begin(d.ch.id, context()))!);
+  const begun = await browser.begin(d.ch.id, context()); assert.ok(typeof begun === 'string');
+  const url = new URL(begun);
   assert.equal(url.searchParams.get('redirect_uri'), 'https://signin.example.invalid/oauth/callback');
   assert.equal(await browser.callback(new URLSearchParams({ state: 'synthetic-private-state', code: 'synthetic-private-code' }), context()), true);
   assert.equal(await browser.callback(new URLSearchParams({ state: 'synthetic-private-state', code: 'synthetic-private-code' }), context()), false);

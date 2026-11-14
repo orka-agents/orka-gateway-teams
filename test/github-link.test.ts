@@ -70,14 +70,17 @@ async function setup(t: test.TestContext, chatKind: 'personal' | 'groupChat' = '
       controlRecipient: { id: '29:fixture-person', ...(chatKind === 'groupChat' ? { isTargeted: true as const } : {}) }, ...changed });
   const adapter = new NativeAdapter(async () => false, sink.browser); adapter.registerRoute('POST', '/api/messages', async () => ({ status: 200 }));
   const port = await adapter.listen('127.0.0.1', 0); t.after(() => adapter.stop()); const root = `http://127.0.0.1:${port}`;
-  const start = async () => {
-    assert.equal((await run('link github')).kind, 'accepted'); const card = JSON.parse(sent.at(-1)!);
+  const browserCookies = new Map<string, string>();
+  const start = async (objectId = oid) => {
+    assert.equal((await run('link github', randomUUID(), { subject: { tenantId: miConfig.tenantId, objectId, chatKind } })).kind, 'accepted'); const card = JSON.parse(sent.at(-1)!);
     const url = new URL(card.attachments[0].content.buttons[0].value); const challenge = url.searchParams.get('challenge')!;
     const response = await fetch(root + url.pathname + url.search, { redirect: 'manual' }); await response.text(); assert.equal(response.status, 302);
-    const ms = new URL(response.headers.get('location')!); msNonce = ms.searchParams.get('nonce')!; return { challenge, ms };
+    const ms = new URL(response.headers.get('location')!); msNonce = ms.searchParams.get('nonce')!;
+    const cookie = response.headers.get('set-cookie')?.split(';')[0]; if (cookie) browserCookies.set(ms.searchParams.get('state')!, cookie);
+    return { challenge, ms, cookie, response };
   };
-  const proof = async (ms: URL) => {
-    const response = await fetch(root + '/oauth/callback', { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+  const proof = async (ms: URL, cookie = browserCookies.get(ms.searchParams.get('state')!)) => {
+    const response = await fetch(root + '/oauth/callback', { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded', ...(cookie ? { cookie } : {}) },
       body: new URLSearchParams({ state: ms.searchParams.get('state')!, code: 'MS_CODE_PRIVATE' }).toString() }); await response.text(); return response;
   };
   const finish = async (state: string, cookie?: string, error = false) => {
@@ -88,6 +91,26 @@ async function setup(t: test.TestContext, chatKind: 'personal' | 'groupChat' = '
     work: () => work, msPosts: () => msPosts, wrongSender: () => { msOid = miConfig.appId; }, wrongNonce: () => { msNonce = 'wrong'; },
     revoke: () => { allowed = false; }, policy: () => { policy = { kind: 'no-access', text: '' }; }, outcome: (value: ProviderResult) => { outcome = value; } };
 }
+
+for (const transplant of ['missing', 'other-browser']) test(`valid attacker Microsoft code/state in ${transplant} cookie jar cannot start GitHub linking`, async t => {
+  const f = await setup(t);
+  // Victim B and attacker A have separate browser jars. The last proof is valid
+  // for A's real oid+nonce, not a wrong-sender token rejected by the old defense.
+  const victim = await f.start('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb');
+  const attacker = await f.start();
+  const stolen = await f.proof(attacker.ms, transplant === 'missing' ? '' : victim.cookie ?? '');
+  assert.equal(stolen.status, 400);
+  assert.equal(stolen.headers.get('set-cookie'), null);
+  assert.equal(stolen.headers.get('location'), null);
+  assert.equal(f.msPosts(), 0); assert.equal(f.requests.length, 0);
+  // Rejection must not consume A's valid state/code.
+  const rightful = await f.proof(attacker.ms); assert.equal(rightful.status, 302); assert.equal(f.msPosts(), 1);
+  const github = new URL(rightful.headers.get('location')!);
+  const cookie = rightful.headers.get('set-cookie')!.split(';')[0]!;
+  assert.equal((await f.finish(github.searchParams.get('state')!, cookie)).status, 200);
+  assert.deepEqual(await f.githubAccounts.inspect({ objectId: oid }, context()), { generation: 2, linked: true });
+  assert.equal(f.requests.length, 2);
+});
 
 test('admission freezes all five tools with unlinked0 and duplicate admission cannot adopt a later GitHub link', async t => {
   const f = await setup(t); const ch = await f.accounts.challenge({ objectId: oid }, expectedEvent.contextId, 'workiq', context());
@@ -107,7 +130,8 @@ test('native same-browser Microsoft proof then GitHub /user links only GitHub; o
   const f = await setup(t, 'groupChat'); const subject = { objectId: oid };
   const workiq = await f.accounts.challenge(subject, expectedEvent.contextId, 'workiq', context()); await f.accounts.claim(workiq, context());
   await f.accounts.complete(workiq, { accessToken: 'OLD_MS_ACCESS', expiresAt: Date.now() + 600000 }, context());
-  const { ms } = await f.start(); assert.equal(f.requests.length, 0); assert.equal(f.work(), 0);
+  const { ms, response: started } = await f.start(); assert.equal(f.requests.length, 0); assert.equal(f.work(), 0);
+  assert.match(started.headers.get('set-cookie')!, /^__Host-github-ms=[A-Za-z0-9_-]{43}; Path=\/; Secure; HttpOnly; SameSite=None; Max-Age=[1-9][0-9]{0,2}$/);
   assert.deepEqual(JSON.parse(f.sent[0]!).recipient, { id: '29:fixture-person', isTargeted: true });
   const proof = await f.proof(ms); assert.equal(proof.status, 302); assert.equal(f.msPosts(), 1);
   const github = new URL(proof.headers.get('location')!); assert.equal(github.origin + github.pathname, 'https://github.com/login/oauth/authorize');

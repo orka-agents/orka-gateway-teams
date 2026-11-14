@@ -59,8 +59,13 @@ test('simultaneous GitHub completions publish one new generation only', async t 
 test('GitHub continuation requires local Microsoft browser claim and consumes only the matching cookie once', async t => {
   const f = await setup(t); const ch = await f.store.challenge(subject, 'chat', 'browser', context());
   assert.equal(await f.store.prepareGitHub({ challenge: ch, state: '', nonce: '', verifier: '' }, context()), undefined);
-  const ms = await f.store.prepareBrowser(ch, context()); assert.ok(ms);
-  const verified = await f.store.claimBrowser(ms.state, context()); assert.ok(verified);
+  assert.equal(await f.store.prepareBrowser(ch, context()), undefined);
+  const ms = await f.store.prepareBrowser(ch, context(), 'a'.repeat(43)); assert.ok(ms);
+  assert.deepEqual(await f.store.prepareBrowser(ch, context(), 'a'.repeat(43)), ms);
+  assert.equal(await f.store.prepareBrowser(ch, context(), 'b'.repeat(43)), undefined);
+  assert.equal(await f.store.claimBrowser(ms.state, context()), undefined);
+  assert.equal(await f.store.claimBrowser(ms.state, context(), 'b'.repeat(43)), undefined);
+  const verified = await f.store.claimBrowser(ms.state, context(), 'a'.repeat(43)); assert.ok(verified);
   assert.equal(await f.open().prepareGitHub(verified, context()), undefined);
   const github = await f.store.prepareGitHub(verified, context()); assert.ok(github);
   assert.notEqual(github.state, ms.state); assert.notEqual(github.verifier, ms.verifier);
@@ -75,7 +80,7 @@ test('GitHub continuation requires local Microsoft browser claim and consumes on
 test('disconnect and expiry fence GitHub browser continuations', async t => {
   for (const invalidate of ['disconnect', 'expire']) {
     const f = await setup(t); const ch = await f.store.challenge(subject, 'chat', invalidate, context());
-    const ms = await f.store.prepareBrowser(ch, context()); const verified = await f.store.claimBrowser(ms!.state, context());
+    const ms = await f.store.prepareBrowser(ch, context(), 'a'.repeat(43)); const verified = await f.store.claimBrowser(ms!.state, context(), 'a'.repeat(43));
     const github = await f.store.prepareGitHub(verified!, context()); assert.ok(github);
     if (invalidate === 'disconnect') await f.store.disconnect(subject, context()); else f.advance(600_000);
     assert.equal(await f.store.claimGitHub(github.state, github.cookie, context()), undefined);
@@ -125,7 +130,7 @@ test('durable renewal marker prevents a successor retry even while original remo
 
 test('a verified continuation can resume after reopen, but its consumed state never can', async t => {
   const f = await setup(t); const ch = await f.store.challenge(subject, 'chat', 'restart', context());
-  const ms = await f.store.prepareBrowser(ch, context()); const verified = await f.store.claimBrowser(ms!.state, context());
+  const ms = await f.store.prepareBrowser(ch, context(), 'a'.repeat(43)); const verified = await f.store.claimBrowser(ms!.state, context(), 'a'.repeat(43));
   assert.equal(await f.store.complete(verified!.challenge, pair(), context()), false);
   const github = await f.store.prepareGitHub(verified!, context()); assert.ok(github);
   await f.store.close(); const successor = f.open();
@@ -164,4 +169,17 @@ test('disconnect/relink during refresh cannot be overwritten by the old whole pa
   await f.link('new-link', { ...pair('WINNER'), expiresAt: epoch + 9000 }); release.resolve();
   assert.deepEqual(await pending, { kind: 'signin-required' });
   assert.deepEqual(await f.store.acquire(subject, 4, unused, context()), { kind: 'token', accessToken: 'WINNER' });
+});
+
+test('nonselected pin preserves GitHub pair and generation without refreshing or invalidating watches', async t => {
+  const f = await setup(t); await f.link(); const guard = f.store.watch(subject);
+  assert.equal(await f.store.pin(subject, 2, context()), true); assert.equal(guard.active(), true);
+  assert.deepEqual(await f.store.inspect(subject, context()), { generation: 2, linked: true });
+  assert.deepEqual(await f.store.acquire(subject, 2, unused, context()), { kind: 'token', accessToken: 'GITHUB-ACCESS' });
+  assert.equal(await f.store.pin(subject, 1, context()), false);
+  f.advance(1001); let refreshed = 0;
+  assert.deepEqual(await f.store.acquire(subject, 2, unused, context(), async token => {
+    refreshed++; assert.equal(token, 'GITHUB-REFRESH'); return { ...pair('NEW-ACCESS', 'NEW-REFRESH'), expiresAt: epoch + 5000 };
+  }), { kind: 'token', accessToken: 'NEW-ACCESS' });
+  assert.equal(refreshed, 1); guard.release();
 });

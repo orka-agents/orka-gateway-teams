@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { identity } from '../delivery/identity.js';
 import { AccountError } from '../accounts/store.js';
 import { grantReference, githubTools } from '../accounts/grants.js';
@@ -329,16 +330,19 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
   const d = options.delegated; const origin = d?.publicOrigin;
   const browser = d && origin ? {
     origin,
-    begin: (id: string, supplied: DirectoryContext) => browserOperation<string | undefined>(supplied, undefined, async ctx => {
+    begin: (id: string, supplied: DirectoryContext, cookie?: string) => browserOperation<string | { redirect: string; cookie: { value: string; maxAge: number } } | undefined>(supplied, undefined, async ctx => {
       const workiq = await d.accounts.getChallenge(id, ctx); assertActive(ctx);
       const ch = workiq ?? await options.github?.accounts.getChallenge(id, ctx); assertActive(ctx);
       if (!ch || !await browserControl(ch, ctx, !workiq)) return undefined;
-      const attempt = await (workiq ? d.accounts : options.github!.accounts).prepareBrowser(ch, ctx); assertActive(ctx);
-      return attempt ? d.auth.authorizeUrl(attempt, `${origin}/oauth/callback`) : undefined;
+      const candidate = workiq ? undefined : cookie ?? randomBytes(32).toString('base64url');
+      const attempt = await (workiq ? d.accounts : options.github!.accounts).prepareBrowser(ch, ctx, candidate); assertActive(ctx);
+      if (!attempt) return undefined;
+      const redirect = d.auth.authorizeUrl(attempt, `${origin}/oauth/callback`);
+      return workiq ? redirect : { redirect, cookie: { value: candidate!, maxAge: Math.max(1, Math.min(600, Math.floor((ch.expiresAt - Date.now()) / 1000))) } };
     }),
-    callback: (form: URLSearchParams, supplied: DirectoryContext & { committed?(): void }) => browserOperation<boolean | { redirect: string; cookie: { value: string; maxAge: number } }>(supplied, false, async ctx => {
+    callback: (form: URLSearchParams, supplied: DirectoryContext & { committed?(): void }, cookie?: string) => browserOperation<boolean | { redirect: string; cookie: { value: string; maxAge: number } }>(supplied, false, async ctx => {
       const workiq = await d.accounts.claimBrowser(form.get('state') ?? '', ctx); assertActive(ctx);
-      const attempt = workiq ?? await options.github?.accounts.claimBrowser(form.get('state') ?? '', ctx); assertActive(ctx);
+      const attempt = workiq ?? await options.github?.accounts.claimBrowser(form.get('state') ?? '', ctx, cookie); assertActive(ctx);
       // Even consent refusal burns its state; retry starts with a new chat request.
       if (!attempt || form.has('error') || !form.get('code')) return false;
       const ch = attempt.challenge; const bound = await browserControl(ch, ctx, !workiq); if (!bound) return false;

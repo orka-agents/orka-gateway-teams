@@ -633,7 +633,7 @@ test('native registry wires optional GitHub custody and checks its secret before
   const root = `http://127.0.0.1:${runtime.port}`; const button = new URL(JSON.parse(sent.at(-1)!).attachments[0].content.buttons[0].value);
   const start = await fetch(root + button.pathname + button.search, { redirect: 'manual' }); await start.text(); assert.equal(start.status, 302);
   const ms = new URL(start.headers.get('location')!); nonce = ms.searchParams.get('nonce')!;
-  const proof = await fetch(root + '/oauth/callback', { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+  const proof = await fetch(root + '/oauth/callback', { method: 'POST', redirect: 'manual', headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: start.headers.get('set-cookie')!.split(';')[0]! },
     body: new URLSearchParams({ state: ms.searchParams.get('state')!, code: 'MS_CODE_PRIVATE' }).toString() }); await proof.text(); assert.equal(proof.status, 302);
   const github = new URL(proof.headers.get('location')!); const cookie = proof.headers.get('set-cookie')!.split(';')[0]!;
   const complete = await fetch(root + '/github/callback?' + new URLSearchParams({ state: github.searchParams.get('state')!, code: 'GH_CODE_PRIVATE' }), { headers: { cookie } });

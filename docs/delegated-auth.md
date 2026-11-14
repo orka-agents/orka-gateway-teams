@@ -120,8 +120,13 @@ Absence of GitHub settings preserves Microsoft-only behavior.
 The only additional browser endpoint is `GET /github/callback`. Both shipped
 proxies forward its success and denial query strings and browser cookie, while
 retaining their existing path/method restrictions. The callback requires the
-one-use encrypted state plus a random `__Host-github-link` cookie set only after
-Microsoft proof (Secure, HttpOnly, SameSite=Lax, Path=/, at most ten minutes).
+one-use encrypted state plus browser binding established before leaving for Microsoft.
+The initial `__Host-github-ms` cookie is random, Secure, HttpOnly, Path=/,
+SameSite=None (required for Entra's cross-site form POST), and expires within ten
+minutes. Only its digest is stored with the attempt. Missing, wrong, or another
+browser's cookie is rejected before state consumption or Microsoft redemption;
+old unbound attempts fail closed. Same-browser repeat starts reuse the binding.
+After Microsoft proof the continuation uses a separate `__Host-github-link` cookie (Secure, HttpOnly, SameSite=Lax, Path=/, at most ten minutes).
 Missing/wrong cookies cannot consume the state. Correct callbacks consume it
 conditionally before token redemption, including consent denial. A verified
 continuation can survive a drained restart with its original browser cookie;
@@ -326,8 +331,14 @@ process restart. An uncertain operation needs operator reconciliation, not a new
 key or an automatic retry. Calls recheck owner, frozen generations, pass expiry
 and Task deadline before native handoff. Under the single owner, per-account
 mutation guards synchronously fence both providers through native handoff,
-including a mutation already pending when the guards register; sequential Table
-reads alone cannot provide that fence. A provider401 compare-and-invalidates
+including a mutation already pending when the guards register. Selected acquisition
+CAS-pins its account row; under the registered guards the other required provider
+is also conditionally pinned at the same usable generation, without refreshing
+credentials. A late UNKNOWN older conditional write then loses its ETag or is
+observed before handoff. Pin conflict or unreconciled uncertainty refuses this call without
+automatic retry, a bounded availability tradeoff under concurrency. Sequential
+Table reads alone cannot provide that fence; this is not distributed instantaneous
+revocation beyond the existing single-owner scope. A provider401 compare-and-invalidates
 only the rejected access token's same-generation revision, not a rotated pair.
 
 Output guards cover both providers' access/refresh tokens, the GitHub client

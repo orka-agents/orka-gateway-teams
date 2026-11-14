@@ -24,7 +24,7 @@ export class AccountError extends Error {
 }
 type Account = { kind: 'account'; objectId: string; generation: number; lastUsed: number; tokens?: AccountTokens; challengeId?: string; renewing?: true };
 type Challenge = AccountChallenge & { kind: 'challenge'; ownerUUID?: string;
-  browser?: { state: string; nonce: string; verifier: string; consumed: boolean };
+  browser?: { state: string; nonce: string; verifier: string; consumed: boolean; cookieDigest?: string };
   github?: { state: string; verifier: string; cookieDigest: string; consumed: boolean } };
 type Grant = TaskGrant & { kind: 'grant' };
 type Write = { kind: 'write'; id: string; ref: string; tool: string; objectId: string; generation: number; githubGeneration: number;
@@ -105,7 +105,8 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
       if (v.kind !== 'challenge' || !['open', 'exchanging', 'committing', 'done', 'failed'].includes(v.state) ||
         v.method !== undefined && v.method !== 'browser') bad();
       if (v.browser !== undefined) {
-        const b = object(v.browser, ['state', 'nonce', 'verifier', 'consumed']);
+        const b = object(v.browser, ['state', 'nonce', 'verifier', 'consumed', ...(provider === 'github' ? ['cookieDigest'] : [])]);
+        if (b.cookieDigest !== undefined && (typeof b.cookieDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(b.cookieDigest))) bad();
         if (typeof b.state !== 'string' || !b.state.startsWith(v.id + '.') || !/^[A-Za-z0-9_-]{43}$/u.test(b.state.slice(v.id.length + 1)) ||
           typeof b.nonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(b.nonce) ||
           typeof b.verifier !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(b.verifier) || typeof b.consumed !== 'boolean') bad();
@@ -346,27 +347,33 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
       return run(ctx, async c => { const r = await read(idKey(id), c);
         return r?.value.kind === 'challenge' && r.value.id === id ? publicChallenge(r.value) : undefined; });
     },
-    prepareBrowser(ch: AccountChallenge, ctx: DirectoryContext): Promise<BrowserAttempt | undefined> {
+    prepareBrowser(ch: AccountChallenge, ctx: DirectoryContext, cookie?: string): Promise<BrowserAttempt | undefined> {
       return run(ctx, async c => {
+        if (provider === 'github' && (typeof cookie !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(cookie))) return undefined;
+        const bound = (v: Challenge) => provider !== 'github' || !!v.browser?.cookieDigest && timingSafeEqual(Buffer.from(hash(cookie)), Buffer.from(v.browser.cookieDigest));
         const row = await read(idKey(ch.id), c); const a = await read(accountKey(ch.objectId), c);
         if (!row || !sameChallenge(row.value, ch) || !browserAvailable(row.value) || a?.value.generation !== ch.generation) return undefined;
         let saved = row;
         if (!row.value.browser) {
           const random = () => randomBytes(32).toString('base64url');
-          saved = await persist(row, { ...row.value, browser: { state: `${ch.id}.${random()}`, nonce: random(), verifier: random(), consumed: false } }, c,
-            v => sameChallenge(v, ch) && browserAvailable(v) && !!v.browser);
+          saved = await persist(row, { ...row.value, browser: { state: `${ch.id}.${random()}`, nonce: random(), verifier: random(), consumed: false,
+            ...(provider === 'github' ? { cookieDigest: hash(cookie) } : {}) } }, c,
+            v => sameChallenge(v, ch) && browserAvailable(v) && !!v.browser && bound(v));
         }
-        if (saved.value.kind !== 'challenge' || !browserAvailable(saved.value) ||
+        if (saved.value.kind !== 'challenge' || !browserAvailable(saved.value) || !bound(saved.value) ||
           (await read(accountKey(ch.objectId), c))?.value.generation !== ch.generation) return undefined;
         return attempt(saved.value);
       });
     },
-    claimBrowser(state: string, ctx: DirectoryContext): Promise<BrowserAttempt | undefined> {
+    claimBrowser(state: string, ctx: DirectoryContext, cookie?: string): Promise<BrowserAttempt | undefined> {
       return run(ctx, async c => {
         if (typeof state !== 'string' || !/^[a-f0-9]{64}\.[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\.[A-Za-z0-9_-]{43}$/u.test(state)) return undefined;
         const row = await read(idKey(state.slice(0, 101)), c);
         if (row?.value.kind !== 'challenge' || !browserAvailable(row.value) || !row.value.browser ||
           !timingSafeEqual(Buffer.from(state), Buffer.from(row.value.browser.state))) return undefined;
+        // Bind before consuming state or redeeming an otherwise valid Microsoft code.
+        if (provider === 'github' && (typeof cookie !== 'string' || !/^[A-Za-z0-9_-]{43}$/u.test(cookie) || !row.value.browser.cookieDigest ||
+          !timingSafeEqual(Buffer.from(hash(cookie)), Buffer.from(row.value.browser.cookieDigest)))) return undefined;
         const ch = row.value; const a = await read(accountKey(ch.objectId), c);
         if (a?.value.generation !== ch.generation) return undefined;
         const claimed: Challenge = { ...ch, method: 'browser', state: 'exchanging', ownerUUID, browser: { ...ch.browser!, consumed: true } };
@@ -379,7 +386,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
       return run(ctx, async c => {
         if (provider !== 'github') return undefined;
         const owned = await current(input.challenge, c); const ch = owned?.row.value;
-        if (!owned || ch?.kind !== 'challenge' || ch.method !== 'browser' || ch.github || ch.browser?.state !== input.state) return undefined;
+        if (!owned || ch?.kind !== 'challenge' || ch.method !== 'browser' || ch.github || !ch.browser?.cookieDigest || ch.browser.state !== input.state) return undefined;
         const random = () => randomBytes(32).toString('base64url'); const cookie = random();
         const github = { state: `${ch.id}.${random()}`, verifier: random(), cookieDigest: hash(cookie), consumed: false };
         await persist(owned.row, { ...ch, github }, c);
@@ -432,6 +439,15 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
           remember(accountKey(ch.objectId).row, ch.generation, published.etag, value);
           return true;
         } catch (e) { if (e instanceof AccountError && ['conflict', 'unavailable'].includes(e.code)) return false; throw e; }
+      });
+    },
+    /** Fence older UNKNOWN conditional writes without changing credentials or refreshing either provider. */
+    pin(subject: AccountSubject, generation: number, ctx: DirectoryContext): Promise<boolean> {
+      return run(ctx, async c => {
+        const row = await read(accountKey(subject.objectId), c); const a = row?.value;
+        if (!row || a?.kind !== 'account' || a.generation !== generation || !usable(a)) return false;
+        await persist(row, { ...a, lastUsed: now() }, c);
+        return true;
       });
     },
     acquire(subject: AccountSubject, generation: number, refresh: (assertion: string) => Promise<AccountTokens>, ctx: DirectoryContext,

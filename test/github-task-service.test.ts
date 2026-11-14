@@ -233,6 +233,13 @@ test('the first binding tool subset cannot authorize another named endpoint', as
 });
 test('two simultaneous absent reservation reads still give only the exact CREATE winner send permission', async t => {
   const f = await setup(t); const passes = [await f.issue(), await f.issue()]; const both = deferred(); let reads = 0;
+  // Exercise the reservation race after both real account pins succeed. Concurrent
+  // pin conflicts may independently refuse a caller before it reaches this seam.
+  const pin = f.store.pin; let prior = Promise.resolve(); let pins = 0; const pinned = deferred();
+  f.store.pin = (...input) => {
+    const pending = prior.then(() => pin(...input)); prior = pending.then(() => {});
+    return pending.then(async value => { if (++pins === 2) pinned.resolve(); await pinned.promise; return value; });
+  };
   f.controls.hook = async r => { if (r.req.method === 'GET' && r.url.pathname.includes("RowKey='write_")) {
     if (++reads === 2) both.resolve(); if (reads <= 2) await both.promise; } r.reply(); };
   const results = await Promise.all(passes.map(pass => f.service.handle('/v1/task-tools/github-create-issue', pass, args, context(), 'create-race')));
@@ -267,4 +274,89 @@ test('both providers and operator/controller secrets are excluded from read and 
     f.w.behavior((_req, res, body) => res.end(JSON.stringify(completed(body.id, secret))));
     const workiq = await f.call('workiq', { question: 'Question' }); assert.notEqual(workiq.status, 200); assert.ok(!JSON.stringify(workiq).includes(secret));
   }
+});
+
+for (const delayed of ['workiq', 'github'] as const) test(`late UNKNOWN ${delayed} disconnect cannot commit across a NEW call's handoff`, async t => {
+  const f = await setup(t); const generation = delayed === 'workiq' ? 1n : 2n;
+  const account = [...f.rows.values()].find(r => String(r.RowKey).startsWith('account_') && Buffer.from(String(r.Payload), 'base64').readBigUInt64BE() === generation)!;
+  const oldTag = account['odata.etag']; const store = delayed === 'workiq' ? f.store : f.githubAccounts;
+  let captured: import('./support/directory-table.js').DirectoryRequest | undefined; let oldReads = 0;
+  f.controls.hook = r => {
+    if (r.req.method === 'PUT' && r.body?.RowKey === account.RowKey) {
+      assert.equal(captured, undefined); captured = r; assert.equal(r.req.headers['if-match'], oldTag);
+      r.res.destroy(); // Body fully received; backend has not applied the conditional operation.
+    } else {
+      if (captured && r.req.method === 'GET' && r.url.pathname.includes(String(account.RowKey))) oldReads++;
+      r.reply();
+    }
+  };
+  await assert.rejects(store.disconnect(f.subject, context()), { code: 'unavailable' });
+  assert.ok(captured); assert.equal(oldReads, 1); assert.equal(f.rows.get(String(account.RowKey))!['odata.etag'], oldTag);
+  delete f.controls.hook;
+  const guard = store.watch(f.subject); assert.equal(guard.active(), true); guard.release();
+  const pass = await f.issue(); // Failure settled and pending cleared BEFORE this new pass/call.
+  let attempted = false; let committed = false;
+  const apply = () => {
+    assert.ok(captured); attempted = true;
+    const before = f.rows.get(String(account.RowKey))!;
+    captured.reply(); // Original fixture parser enforces actual If-Match, no direct row edits.
+    const after = f.rows.get(String(account.RowKey))!;
+    committed = after['odata.etag'] !== before['odata.etag'];
+    if (committed) {
+      assert.equal(before['odata.etag'], oldTag); assert.equal(after.Payload, captured.body!.Payload);
+      assert.equal(Buffer.from(String(after.Payload), 'base64').readBigUInt64BE(), generation + 1n);
+    } else {
+      assert.notEqual(before['odata.etag'], oldTag); assert.equal(captured.res.statusCode, 412);
+    }
+  };
+  if (delayed === 'workiq') {
+    const inspect = f.githubAccounts.inspect; let reads = 0;
+    f.githubAccounts.inspect = async (...input) => { const result = await inspect(...input); if (++reads === 2) apply(); return result; };
+  } else {
+    const get = f.store.getGrant; let reads = 0;
+    f.store.getGrant = async (...input) => { const result = await get(...input); if (++reads === 4) apply(); return result; };
+  }
+  const tool = delayed === 'workiq' ? 'github-create-issue' : 'workiq';
+  const result = await f.service.handle('/v1/task-tools/' + tool, pass, tool === 'workiq' ? { question: 'Question' } : args, context(), 'late-new-operation');
+  assert.equal(attempted, true);
+  if (committed) {
+    // A revocation that actually commits before handoff must have zero native effects.
+    assert.equal(f.requests.length, 0); assert.equal(f.w.bodies.length, 0); assert.notEqual(result.status, 200);
+  } else {
+    // Pin wins: the old revocation never took effect, so the valid operation may proceed.
+    assert.equal(result.status, 200);
+    assert.equal(f.requests.filter(r => r.method === 'POST').length, delayed === 'workiq' ? 1 : 0);
+    assert.equal(f.w.bodies.length, delayed === 'github' ? 1 : 0);
+    assert.deepEqual(await store.inspect(f.subject, context()), { generation: Number(generation), linked: true });
+  }
+});
+
+for (const tool of ['workiq', 'github-create-issue']) for (const failure of ['uncertain', 'owner']) test(`${tool} nonselected pin ${failure} refuses before native handoff`, async t => {
+  const f = await setup(t); const pass = await f.issue();
+  const generation = tool === 'workiq' ? 2n : 1n;
+  const row = [...f.rows.values()].find(r => String(r.RowKey).startsWith('account_') && Buffer.from(String(r.Payload), 'base64').readBigUInt64BE() === generation)!;
+  let pins = 0;
+  f.controls.hook = r => {
+    if (r.req.method === 'PUT' && r.body?.RowKey === row.RowKey) {
+      pins++;
+      if (failure === 'owner') { r.reply(); f.revoke(); } else r.res.destroy();
+    } else r.reply();
+  };
+  const result = await f.service.handle('/v1/task-tools/' + tool, pass, tool === 'workiq' ? { question: 'Question' } : args, context(), 'pin-failure');
+  assert.equal(pins, 1); assert.notEqual(result.status, 200); assert.equal(f.requests.length, 0); assert.equal(f.w.bodies.length, 0);
+});
+for (const tool of ['workiq', 'github-create-issue']) test(`${tool} pin relies on exact conditional readback, not a received acknowledgement`, async t => {
+  const f = await setup(t); const pass = await f.issue(); const generation = tool === 'workiq' ? 2n : 1n;
+  const row = [...f.rows.values()].find(r => String(r.RowKey).startsWith('account_') && Buffer.from(String(r.Payload), 'base64').readBigUInt64BE() === generation)!;
+  let pins = 0;
+  f.controls.hook = r => {
+    if (r.req.method !== 'PUT' || r.body?.RowKey !== row.RowKey) { r.reply(); return; }
+    pins++; const writeHead = r.res.writeHead; const end = r.res.end;
+    // Apply the real If-Match, but lose its response; only the later exact GET can prove the pin.
+    r.res.writeHead = function () { return this; }; r.res.end = function () { return this; };
+    try { r.reply(); } finally { r.res.writeHead = writeHead; r.res.end = end; r.res.destroy(); }
+  };
+  const result = await f.service.handle('/v1/task-tools/' + tool, pass, tool === 'workiq' ? { question: 'Question' } : args, context(), 'pin-readback');
+  assert.equal(pins, 1); assert.equal(result.status, 200);
+  assert.equal(f.requests.length, tool === 'workiq' ? 0 : 1); assert.equal(f.w.bodies.length, tool === 'workiq' ? 1 : 0);
 });

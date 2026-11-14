@@ -10,8 +10,8 @@ class HttpFailure extends Error { constructor(readonly status: number) { super('
 
 export interface BrowserSignin {
   readonly origin: string;
-  begin(challengeId: string, context: { signal: AbortSignal; deadline: number }): Promise<string | undefined>;
-  callback(form: URLSearchParams, context: { signal: AbortSignal; deadline: number; committed?(): void }): Promise<boolean | { redirect: string; cookie: { value: string; maxAge: number } }>;
+  begin(challengeId: string, context: { signal: AbortSignal; deadline: number }, cookie?: string): Promise<string | { redirect: string; cookie: { value: string; maxAge: number } } | undefined>;
+  callback(form: URLSearchParams, context: { signal: AbortSignal; deadline: number; committed?(): void }, cookie?: string): Promise<boolean | { redirect: string; cookie: { value: string; maxAge: number } }>;
   githubCallback?(form: URLSearchParams, cookie: string, context: { signal: AbortSignal; deadline: number; committed?(): void }): Promise<boolean>;
 }
 const CHALLENGE = /^[a-f0-9]{64}\.[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
@@ -147,17 +147,28 @@ export class NativeAdapter implements IHttpServerAdapter {
       if (ctx.signal.aborted || this.stopping) throw new HttpFailure(503);
       browserResponse(res, ok ? 200 : 400, undefined, clear); return;
     }
+    // Only the fixed early host cookie is accepted; never a context secret or selector.
+    let initialCookie: string | undefined;
+    if (req.headers.cookie !== undefined) {
+      const cookies = req.headers.cookie.split(';').map(v => v.trim()).filter(v => v.startsWith('__Host-github-ms='));
+      initialCookie = cookies[0]?.slice('__Host-github-ms='.length);
+      if (req.headersDistinct.cookie?.length !== 1 || cookies.length > 1 || initialCookie !== undefined && !/^[A-Za-z0-9_-]{43}$/u.test(initialCookie)) throw new HttpFailure(400);
+    }
     if (req.method === 'GET') {
       const query = new URLSearchParams(req.url!.slice('/signin?'.length));
       const id = query.get('challenge');
       if ([...query.keys()].length !== 1 || !id || !CHALLENGE.test(id)) throw new HttpFailure(400);
-      const redirect = await this.browser!.begin(id, ctx);
+      const begun = await this.browser!.begin(id, ctx, initialCookie);
+      const redirect = typeof begun === 'object' ? begun.redirect : begun;
       if (ctx.signal.aborted || this.stopping) throw new HttpFailure(503);
       if (!redirect) throw new HttpFailure(400);
       // A sign-in handler can redirect only to Entra, never a request-supplied return URL.
       const url = new URL(redirect);
       if (url.protocol !== 'https:' || url.hostname !== 'login.microsoftonline.com' || url.port || url.username || url.password || url.hash) throw new HttpFailure(503);
-      browserResponse(res, 302, redirect); return;
+      const cookie = typeof begun === 'object' ? begun.cookie : undefined;
+      if (cookie && (!/^[A-Za-z0-9_-]{43}$/u.test(cookie.value) || !Number.isInteger(cookie.maxAge) || cookie.maxAge < 1 || cookie.maxAge > 600)) throw new HttpFailure(503);
+      // Entra form_post is cross-site POST: explicit Lax would drop this binding.
+      browserResponse(res, 302, redirect, cookie ? `__Host-github-ms=${cookie.value}; Path=/; Secure; HttpOnly; SameSite=None; Max-Age=${cookie.maxAge}` : undefined); return;
     }
     if (req.headersDistinct['content-type']?.length !== 1 ||
       !/^application\/x-www-form-urlencoded(?:\s*;\s*charset=utf-8)?$/iu.test(req.headers['content-type'] ?? '') ||
@@ -170,7 +181,7 @@ export class NativeAdapter implements IHttpServerAdapter {
       !!form.get('code') === !!form.get('error')) throw new HttpFailure(400);
     // Account publication is success even when the best-effort notification outlives HTTP.
     // Keep awaiting the callback: response completion is not actual-work completion.
-    const ok = await this.browser!.callback(form, { ...ctx, committed: () => { if (!ctx.signal.aborted && !this.stopping) browserResponse(res, 200); } });
+    const ok = await this.browser!.callback(form, { ...ctx, committed: () => { if (!ctx.signal.aborted && !this.stopping) browserResponse(res, 200); } }, initialCookie);
     if (ctx.signal.aborted || this.stopping) throw new HttpFailure(503);
     if (typeof ok === 'object') {
       const url = new URL(ok.redirect); const cookie = ok.cookie;

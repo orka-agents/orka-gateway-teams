@@ -105,6 +105,10 @@ export function createTaskService(options: {
       // Own refresh must finish first. From here neither account may mutate across awaits.
       guards.push(options.accounts.watch(subject));
       if (frozen.githubGeneration && g) guards.push(g.accounts.watch(subject));
+      // Selected acquisition already pins its row. Fence late UNKNOWN writes on
+      // the other required account too; uncertainty/conflict refuses, never retries.
+      if (tool !== 'workiq' ? !await options.accounts.pin(subject, frozen.generation, ctx) :
+        frozen.githubGeneration && g && !await g.accounts.pin(subject, frozen.githubGeneration, ctx)) return refusal('signin-required', writing ? 503 : 403);
       // A lookup failure may conceal an earlier successful effect: write storage uncertainty is always503.
       const reservation = writing ? await options.accounts.reserveWrite(frozen, tool, operation!, args, ctx) : undefined;
       if (reservation?.kind === 'uncertain') return refusal('tool-unavailable', 503);
