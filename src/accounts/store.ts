@@ -444,9 +444,10 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     /** Fence older UNKNOWN conditional writes without changing credentials or refreshing either provider. */
     pin(subject: AccountSubject, generation: number, ctx: DirectoryContext): Promise<boolean> {
       return run(ctx, async c => {
-        const row = await read(accountKey(subject.objectId), c); const a = row?.value;
+        const k = accountKey(subject.objectId); const row = await read(k, c); const a = row?.value;
         if (!row || a?.kind !== 'account' || a.generation !== generation || !usable(a)) return false;
-        await persist(row, { ...a, lastUsed: now() }, c);
+        const saved = await persist(row, { ...a, lastUsed: now() }, c);
+        const cached = assertions.get(k.row); if (cached?.etag === row.etag) cached.etag = saved.etag;
         return true;
       });
     },

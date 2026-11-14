@@ -554,6 +554,20 @@ test('publication proof excludes idle accounts even with an unexpired access tok
   assert.equal(await f.store.published(ch, context()), false);
 });
 
+for (const check of ['masking', 'renewal']) test(`Work IQ pin preserves matching ephemeral assertion for ${check}`, async t => {
+  const f = await setup(t); await f.link();
+  const grant = await f.store.reserveGrant({ ref: 'a'.repeat(64), objectId: subject.objectId, generation: 1, provider: 'workiq',
+    targetId: 'tools', targetDigest: 'b'.repeat(64), eventId: 'pin', tools: ['workiq'] }, context());
+  assert.equal(await f.store.pin(subject, 1, context()), true);
+  if (check === 'masking') assert.equal(await f.store.safeGrantOutput(grant.ref, 'echo ASSERTION-SENTINEL', context()), false);
+  else {
+    f.advance(1001); let renewed = 0;
+    assert.deepEqual(await f.store.acquire(subject, 1, async assertion => {
+      renewed++; assert.equal(assertion, 'ASSERTION-SENTINEL'); return { accessToken: 'RENEWED', expiresAt: epoch + 10_000 };
+    }, context()), { kind: 'token', accessToken: 'RENEWED' });
+    assert.equal(renewed, 1);
+  }
+});
 test('local handoff guards ignore usage and unrelated accounts, but fence token-pair and generation mutations', async t => {
   const f = await setup(t); await f.link(); const guard = f.store.watch(subject);
   try {
