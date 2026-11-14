@@ -11,7 +11,7 @@ class HttpFailure extends Error { constructor(readonly status: number) { super('
 export interface BrowserSignin {
   readonly origin: string;
   begin(challengeId: string, context: { signal: AbortSignal; deadline: number }): Promise<string | undefined>;
-  callback(form: URLSearchParams, context: { signal: AbortSignal; deadline: number }): Promise<boolean>;
+  callback(form: URLSearchParams, context: { signal: AbortSignal; deadline: number; committed?(): void }): Promise<boolean>;
 }
 const CHALLENGE = /^[a-f0-9]{64}\.[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
 
@@ -152,7 +152,9 @@ export class NativeAdapter implements IHttpServerAdapter {
     const keys = [...form.keys()];
     if (keys.some(key => !allowed.has(key)) || new Set(keys).size !== keys.length || !form.get('state') ||
       !!form.get('code') === !!form.get('error')) throw new HttpFailure(400);
-    const ok = await this.browser!.callback(form, ctx);
+    // Account publication is success even when the best-effort notification outlives HTTP.
+    // Keep awaiting the callback: response completion is not actual-work completion.
+    const ok = await this.browser!.callback(form, { ...ctx, committed: () => { if (!ctx.signal.aborted && !this.stopping) browserResponse(res, 200); } });
     if (ctx.signal.aborted || this.stopping) throw new HttpFailure(503);
     browserResponse(res, ok ? 200 : 400);
   }

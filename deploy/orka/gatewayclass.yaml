@@ -5,6 +5,8 @@ metadata:
 spec:
   category: chat
   contractVersion: orka.gateway.v1
+  allowedMetadataKeys:
+    - gatewayGrantRef
   capabilities:
     inboundText: true
     outboundText: true

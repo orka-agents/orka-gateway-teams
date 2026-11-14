@@ -33,7 +33,8 @@ function ready(value: Record<string, unknown>, current: number): boolean {
 /** No ownership, background queue or Teams effect: the caller reserves first and owns drain/markProvisioned.
  * Every check is fresh; never use this result as a cached authorization for a later event. */
 export function createBindingProvisioner(input: RegistryTarget, client: KubernetesClient) {
-  const target = snapshotRegistry({ schemaVersion: 1, targets: [input] }).targets[0]!;
+  const { taskPassToken: _controllerOnly, ...targetConfig } = input;
+  const target = snapshotRegistry({ schemaVersion: 1, targets: [targetConfig] }).targets[0]!;
   const scope = target.config.scope; const namespace = scope.gatewayNamespace;
   function capture(context: KubernetesContext): KubernetesContext {
     const signal = context.signal; const deadline = Math.min(context.deadline, performance.now() + 10000); const allowed = context.allowed.bind(context);

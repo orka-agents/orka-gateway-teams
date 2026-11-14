@@ -10,7 +10,7 @@ import { miConfig } from './support/managed-identity.js';
 const sso = { accountTable: 'Accounts', keyFile: '/private/account-key', apiUri: 'api://gateway', connectionName: 'workiq' };
 function input() {
   const value = registryInput();
-  for (const target of value.targets) target.config.receiver = { ...miConfig };
+  for (const target of value.targets) { target.config.receiver = { ...miConfig }; Object.assign(target, { taskPassToken: `controller-${target.id}` }); }
   return { ...value, groupPolicyFile: '/private/policy', sso };
 }
 test('delegated registry config is atomic, opt-in, MI-only and account table is physically separate', t => {
@@ -26,6 +26,28 @@ test('delegated registry config is atomic, opt-in, MI-only and account table is 
   for (const key of ['SSO_ACCOUNT_TABLE', 'SSO_KEY_FILE', 'SSO_API_URI', 'SSO_CONNECTION_NAME']) {
     assert.throws(() => parseRegistryConfig({ ...f.env, [key]: 'partial' }));
   }
+});
+test('dedicated task-pass credentials cover every SSO target, use bearer grammar and never overlap directional credentials', () => {
+  const valid = input(); assert.equal((snapshotRegistry(valid).targets[0] as any).taskPassToken, 'controller-primary');
+  for (const bad of [undefined, '', 'spaces forbidden', 'bad\\\"quote', 'x'.repeat(4097), 'ingress-primary', 'callback-primary', 'ingress-tools', 'callback-tools', 'controller-tools']) {
+    const value = input(); Object.assign(value.targets[0]!, { taskPassToken: bad }); assert.throws(() => snapshotRegistry(value));
+  }
+  const ordinary = registryInput(); Object.assign(ordinary.targets[0]!, { taskPassToken: 'controller-primary' }); assert.throws(() => snapshotRegistry(ordinary));
+});
+test('controller credential files are snapshotted privately once, before ownership; nonSSO and incomplete coverage refuse', t => {
+  const f = registryFixture(t);
+  for (const target of f.manifest.targets) {
+    const path = join(f.directory, `${target.id}-controller`); writeFileSync(path, `controller-${target.id}\n`, { mode: 0o600 }); Object.assign(target, { taskPassTokenFile: path });
+  }
+  f.save();
+  const env = { ...f.env, TEAMS_CLIENT_SECRET: undefined, TEAMS_CREDENTIAL_MODE: miConfig.credentialMode,
+    TEAMS_MANAGED_IDENTITY_CLIENT_ID: miConfig.managedIdentityClientId, TEAMS_MANAGED_IDENTITY_PRINCIPAL_ID: miConfig.managedIdentityPrincipalId,
+    SSO_ACCOUNT_TABLE: 'Accounts', SSO_KEY_FILE: '/private/key', SSO_API_URI: 'api://gateway', SSO_CONNECTION_NAME: 'workiq' };
+  const captured = parseRegistryConfig(env); assert.deepEqual(captured.targets.map(t => t.taskPassToken), ['controller-primary', 'controller-tools']);
+  const path = join(f.directory, 'primary-controller'); writeFileSync(path, 'rotated'); assert.equal(snapshotRegistry(captured).targets[0]!.taskPassToken, 'controller-primary');
+  chmodSync(path, 0o644); assert.throws(() => parseRegistryConfig(env)); chmodSync(path, 0o600);
+  assert.throws(() => parseRegistryConfig(f.env));
+  delete (f.manifest.targets[1] as any).taskPassTokenFile; f.save(); assert.throws(() => parseRegistryConfig(env));
 });
 test('browser origin is opt-in and permits only a canonical configured HTTPS destination', () => {
   const publicOrigin = 'https://signin.example.invalid';

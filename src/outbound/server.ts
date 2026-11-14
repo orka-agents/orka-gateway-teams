@@ -9,6 +9,8 @@ import { ConfigurationError, tlsVerificationEnabled } from '../ingress/config.js
 import { MAX_HTTP_BODY_BYTES } from '../protocol/types.js';
 import type { DeliveryDispatcher, DeliveryResponse } from './types.js';
 import { decodeDelivery } from './validate.js';
+import type { TaskService } from '../accounts/task-service.js';
+import { parseCanonicalJSON } from '../directory/codec.js';
 
 export interface OutboundServerConfig { host: string; port: number; bearerToken: string; interimDelivery?: boolean; meetingDrafts?: boolean }
 export interface OutboundServer { port: number; failed: Promise<never>; stop(): Promise<void> }
@@ -26,7 +28,7 @@ export async function startOutboundServer(config: OutboundServerConfig, dispatch
 export interface OutboundTarget {
   prefix: string; bearerToken: string; dispatcher: DeliveryDispatcher; scope: Readonly<JournalScope>; interimDelivery?: boolean; meetingDrafts?: boolean;
 }
-export async function startTargetOutboundServer(config: { host: string; port: number }, targets: readonly OutboundTarget[], isReady: () => boolean): Promise<OutboundServer> {
+export async function startTargetOutboundServer(config: { host: string; port: number }, targets: readonly OutboundTarget[], isReady: () => boolean, tasks?: TaskService): Promise<OutboundServer> {
   if (!tlsVerificationEnabled() || !isIP(config.host) || !Number.isInteger(config.port) || config.port < 0 || config.port > 65535 || !targets.length || targets.length > 32) throw new ConfigurationError();
   const prefixes = new Set<string>(); const bearers = new Set<string>();
   const slots = targets.map(target => {
@@ -74,11 +76,25 @@ export async function startTargetOutboundServer(config: { host: string; port: nu
       const values = req.headersDistinct.authorization;
       const token = values?.length === 1 ? /^Bearer ([A-Za-z0-9._~+/-]+=*)$/iu.exec(values[0]!)?.[1] : undefined;
       const slot = slots.find(s => ['/v1/health', '/v1/capabilities', '/v1/deliveries'].some(path => req.url === s.prefix + path));
+      const taskRoute = tasks && (req.url === '/v1/task-passes' || req.url === '/v1/task-tools/workiq');
       const candidates = slot ? [slot] : slots;
-      if (!token || token.length > 8192 || !candidates.some(s => timingSafeEqual(s.expected, digest(token)))) throw new HttpFailure(401);
-      if (!slot) throw new HttpFailure(404);
+      if (!token || token.length > 8192 || !(taskRoute ? tasks.authenticate(req.url!, token) : candidates.some(s => timingSafeEqual(s.expected, digest(token))))) throw new HttpFailure(401);
+      if (!slot && !taskRoute) throw new HttpFailure(404);
       authenticated = true;
-      const { dispatcher, scope, capabilities, prefix } = slot;
+      if (taskRoute) {
+        if (stopping || !tlsVerificationEnabled() || !healthy() || !isReady()) throw new HttpFailure(503);
+        if (req.method !== 'POST') throw new HttpFailure(404);
+        if (active >= 32) throw new HttpFailure(503);
+        active++; admitted = true;
+        const type = req.headersDistinct['content-type']; const encoding = req.headersDistinct['content-encoding'];
+        if (type?.length !== 1 || !/^application\/json(?:\s*;\s*charset=utf-8)?$/iu.test(type[0]!) ||
+          encoding !== undefined && (encoding.length !== 1 || encoding[0] !== 'identity')) throw new HttpFailure(415);
+        if (Number(req.headers['content-length'] ?? 0) > MAX_HTTP_BODY_BYTES) throw new HttpFailure(413);
+        let input: unknown; try { input = parseCanonicalJSON(await readBody(req, controller.signal)); } catch { throw new HttpFailure(400); }
+        const result = await tasks.handle(req.url!, token, input, { signal: controller.signal, deadline: deadline - 1000 });
+        respond(res, result.status, result.body); return;
+      }
+      const { dispatcher, scope, capabilities, prefix } = slot!;
       if (stopping || !tlsVerificationEnabled() || !healthy() || !isReady()) throw new HttpFailure(503);
       if (req.method === 'GET' && req.url === prefix + '/v1/health') { respond(res, 200, { status: 'ok' }); return; }
       if (req.method === 'GET' && req.url === prefix + '/v1/capabilities') { respond(res, 200, capabilities); return; }
