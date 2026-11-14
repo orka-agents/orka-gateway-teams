@@ -248,6 +248,7 @@ function delegatedFixture() {
   const accounts = {
     reserveGrant: async (input: TaskGrant) => input,
     getGrant: async (_ref: string) => undefined as TaskGrant | undefined,
+    watch: () => { throw new Error('not a tool handoff'); },
     safeGrantOutput: async () => true, safeOutput: async () => true, invalidate: async () => {},
     reserveWrite: async () => { throw new Error('not a write'); }, completeWrite: async () => {},
     bindGrant: async () => { throw new Error('not issuance'); },

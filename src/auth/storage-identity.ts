@@ -36,7 +36,7 @@ export function prepareStorageIdentity(input: Readonly<StorageIdentityConfig>): 
     };
     assertUsable();
     return { assertUsable, createProvider(dependencies = {}, maxCallers = 32) {
-      if (created || !Number.isInteger(maxCallers) || maxCallers < 1 || maxCallers > 72) throw new Error('Invalid storage identity credentials'); created = true;
+      if (created || !Number.isInteger(maxCallers) || maxCallers < 1 || maxCallers > 76) throw new Error('Invalid storage identity credentials'); created = true;
       assertUsable();
       let request = dependencies.request;
       if (request !== undefined && typeof request !== 'function') throw new Error('Invalid storage identity credentials');

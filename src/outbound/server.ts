@@ -79,8 +79,11 @@ export async function startTargetOutboundServer(config: { host: string; port: nu
       const slot = slots.find(s => ['/v1/health', '/v1/capabilities', '/v1/deliveries'].some(path => req.url === s.prefix + path));
       const taskRoute = tasks && (req.url === '/v1/task-passes' || ['workiq', ...githubTools].some(t => req.url === `/v1/task-tools/${t}`));
       const candidates = slot ? [slot] : slots;
-      if (!token || token.length > 8192 || !(taskRoute ? tasks.authenticate(req.url!, token) : candidates.some(s => timingSafeEqual(s.expected, digest(token))))) throw new HttpFailure(401);
-      if (!slot && !taskRoute) throw new HttpFailure(404);
+      // A refused write credential says nothing about an earlier effect. Never grant access,
+      // but retain the same uncertainty status as the authenticated service boundary.
+      const writing = githubTools.some(tool => writeTool(tool) && req.url === `/v1/task-tools/${tool}`);
+      if (!token || token.length > 8192 || !(taskRoute ? tasks.authenticate(req.url!, token) : candidates.some(s => timingSafeEqual(s.expected, digest(token))))) throw new HttpFailure(writing ? 503 : 401);
+      if (!slot && !taskRoute) throw new HttpFailure(writing ? 503 : 404);
       authenticated = true;
       if (taskRoute) {
         if (stopping || !tlsVerificationEnabled() || !healthy() || !isReady()) throw new HttpFailure(503);

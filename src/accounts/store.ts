@@ -169,6 +169,12 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
   let closed = false; let closing: Promise<void> | undefined;
   const work = new Set<Promise<unknown>>();
   const flights = new Map<string, Promise<{ accessToken: string } | undefined>>();
+  // Only in-flight mutations and handoffs are retained, never per-user revision history.
+  const watches = new Map<string, { pending: number; guards: Set<{ active: boolean }> }>();
+  const watchState = (id: string) => {
+    let state = watches.get(id); if (!state) { state = { pending: 0, guards: new Set() }; watches.set(id, state); } return state;
+  };
+  const unwatch = (id: string, state: ReturnType<typeof watchState>) => { if (!state.pending && !state.guards.size && watches.get(id) === state) watches.delete(id); };
   function check(ctx: DirectoryContext) {
     if (closed) bad('closed');
     if (!authority.allowed() || ctx.authorizeWrite?.() === false) bad('unready');
@@ -190,10 +196,17 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
   type Row = NonNullable<Awaited<ReturnType<typeof read>>>;
   async function persist(previous: Row | undefined, value: Document, ctx: DirectoryContext, winner?: (v: Document) => boolean): Promise<Row> {
     check(ctx); const k = docKey(value); const encrypted = seal(value);
-    const result = previous ? await table.replace(k, previous.etag, encrypted, ctx) : await table.insert(k, encrypted, ctx);
-    check(ctx); const saved = await read(k, ctx);
-    if (saved && ((saved.encrypted.generation === encrypted.generation && saved.encrypted.ciphertext.equals(encrypted.ciphertext)) || winner?.(saved.value))) return saved;
-    return bad(result.kind === 'conflict' ? 'conflict' : 'unavailable');
+    const authorityValue = (v: Account) => canonicalJSON({ generation: v.generation, tokens: v.tokens ?? null, renewing: v.renewing ?? false });
+    const changing = value.kind === 'account' && (previous?.value.kind !== 'account' || authorityValue(previous.value) !== authorityValue(value));
+    const state = changing ? watchState(k.row) : undefined;
+    // Invalidate before the conditional write can commit, including uncertain/conflicting writes.
+    if (state) { state.pending++; for (const guard of state.guards) guard.active = false; }
+    try {
+      const result = previous ? await table.replace(k, previous.etag, encrypted, ctx) : await table.insert(k, encrypted, ctx);
+      check(ctx); const saved = await read(k, ctx);
+      if (saved && ((saved.encrypted.generation === encrypted.generation && saved.encrypted.ciphertext.equals(encrypted.ciphertext)) || winner?.(saved.value))) return saved;
+      return bad(result.kind === 'conflict' ? 'conflict' : 'unavailable');
+    } finally { if (state) { state.pending--; unwatch(k.row, state); } }
   }
   const usable = (v: Account): boolean => !!v.tokens && !v.renewing && now() - v.lastUsed < idle &&
     (provider === 'workiq' || v.tokens.refreshExpiresAt! > now());
@@ -218,6 +231,14 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     return account?.value.kind === 'account' && account.value.generation === row.value.generation && usable(account.value) ? row : undefined;
   }
   return {
+    /** Local await-gap fence only; callers must still validate authoritative Table generations. */
+    watch(subject: AccountSubject): { active(): boolean; release(): void } {
+      if (closed) return { active: () => false, release() {} };
+      const id = accountKey(subject.objectId).row; const state = watchState(id);
+      const guard = { active: !closed && !state.pending }; state.guards.add(guard);
+      return { active: () => !closed && authority.allowed() && guard.active,
+        release() { guard.active = false; state.guards.delete(guard); unwatch(id, state); } };
+    },
     reserveGrant(input: TaskGrant, ctx: DirectoryContext): Promise<TaskGrant> {
       return run(ctx, async c => {
         let grant: TaskGrant; try { grant = taskGrant(input); if (grant.binding) bad('invalid-input'); } catch { return bad('invalid-input'); }
@@ -475,7 +496,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         forget(accountKey(subject.objectId).row); return generation; }, true);
     },
     close(): Promise<void> {
-      if (!closing) { closed = true; for (const id of assertions.keys()) forget(id);
+      if (!closing) { closed = true; watches.clear(); for (const id of assertions.keys()) forget(id);
         closing = Promise.allSettled([table.close(), ...work]).then(() => { secret.fill(0); }); }
       return closing;
     },

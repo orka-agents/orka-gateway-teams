@@ -554,6 +554,30 @@ test('publication proof excludes idle accounts even with an unexpired access tok
   assert.equal(await f.store.published(ch, context()), false);
 });
 
+test('local handoff guards ignore usage and unrelated accounts, but fence token-pair and generation mutations', async t => {
+  const f = await setup(t); await f.link(); const guard = f.store.watch(subject);
+  try {
+    f.advance(1); assert.equal((await f.store.acquire(subject, 1, async () => tokens(), context())).kind, 'token');
+    await f.store.disconnect({ objectId: 'unrelated' }, context()); assert.equal(guard.active(), true);
+    f.advance(1000); assert.equal((await f.store.acquire(subject, 1, async () => ({ accessToken: 'ROTATED', expiresAt: epoch + 10000 }), context())).kind, 'token');
+    assert.equal(guard.active(), false);
+  } finally { guard.release(); }
+  const fresh = f.store.watch(subject); assert.equal(fresh.active(), true);
+  await f.store.disconnect(subject, context()); assert.equal(fresh.active(), false); fresh.release();
+  const next = f.store.watch(subject); guard.release();
+  await f.store.disconnect(subject, context()); assert.equal(next.active(), false); next.release();
+});
+test('guards registered during a conditional account mutation stay invalid after failure and do not poison later handoffs', async t => {
+  const f = await setup(t); await f.link(); const entered = deferred(); const release = deferred(); t.after(() => release.resolve());
+  f.controls.hook = async r => { if (r.req.method === 'PUT' && String(r.body?.RowKey).startsWith('account_')) { entered.resolve(); await release.promise; r.res.destroy(); } else r.reply(); };
+  const before = f.store.watch(subject); const pending = f.store.disconnect(subject, context());
+  const rejected = assert.rejects(pending); await entered.promise;
+  const during = f.store.watch(subject); assert.equal(before.active(), false); assert.equal(during.active(), false);
+  release.resolve(); await rejected; assert.equal(during.active(), false); before.release(); during.release();
+  delete f.controls.hook; const after = f.store.watch(subject); assert.equal(after.active(), true);
+  await f.store.close(); assert.equal(after.active(), false); after.release();
+  const closed = f.store.watch(subject); assert.equal(closed.active(), false); closed.release();
+});
 test('brief SSO assertions never survive process lifetime even while encrypted access tokens do', async t => {
   const f = await setup(t); await f.link(); await f.store.close(); f.advance(1001);
   let refreshed = false;

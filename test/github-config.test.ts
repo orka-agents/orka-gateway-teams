@@ -7,8 +7,8 @@ import { startRegistryRuntime } from '../src/registry/runtime.js';
 import { registryFixture, registryInput } from './support/registry.js';
 import { miConfig } from './support/managed-identity.js';
 const github = { clientId: 'Iv1.synthetic', clientSecretFile: '/private/github-secret' };
-function input() {
-  const value = registryInput();
+function input(count = 2) {
+  const value = registryInput(count);
   for (const target of value.targets) { target.config.receiver = { ...miConfig }; Object.assign(target, { taskPassToken: `controller-${target.id}` }); }
   return { ...value, groupPolicyFile: '/private/policy', sso: { accountTable: 'Accounts', keyFile: '/private/account-key', apiUri: 'api://gateway', connectionName: 'workiq', publicOrigin: 'https://signin.example.invalid' }, github };
 }
@@ -19,6 +19,10 @@ test('GitHub is optional, nonsecret, atomic and requires Microsoft browser sign-
     assert.throws(() => snapshotRegistry({ ...input(), github: { ...github, ...bad } } as never));
   assert.throws(() => snapshotRegistry({ ...input(), sso: undefined } as never));
   assert.throws(() => snapshotRegistry({ ...input(), sso: { ...input().sso, publicOrigin: undefined } } as never));
+});
+test('GitHub configurations accept31/32 targets and still refuse33', () => {
+  for (const count of [31, 32]) assert.equal(snapshotRegistry(input(count)).targets.length, count);
+  assert.throws(() => snapshotRegistry(input(33)));
 });
 test('GitHub env settings preserve only file path/client ID; partial and raw-secret configuration fail closed', t => {
   const f = registryFixture(t);

@@ -166,7 +166,7 @@ for (const expiry of ['cancellation', 'deadline']) test(`storage singleflight ke
   } finally { gate.resolve(); await provider.close(); }
 });
 
-for (const capacity of [68, 72]) test(`registry capacity ${capacity} drains V3 domains plus directory/account callers through one held refresh`, async t => {
+for (const capacity of [68, 72, 74, 76]) test(`registry capacity ${capacity} drains V3 domains plus directory/account callers through one held refresh`, async t => {
   acaEnvironment(t); const reached = deferred<void>(); const gate = deferred<void>();
   const local = await identityFixture(t, async (_req, res) => { reached.resolve(); await gate.promise; res.end(JSON.stringify(envelope())); });
   const provider = prepareStorageIdentity({ host: 'azure-container-apps', clientId }).createProvider({ request: local.request }, capacity);
@@ -178,7 +178,7 @@ for (const capacity of [68, 72]) test(`registry capacity ${capacity} drains V3 d
     await provider.close(); local.drained();
   } finally { gate.resolve(); await provider.close(); }
 });
-for (const capacity of [0, -1, 73, 1.5, NaN]) test(`invalid storage token capacity ${capacity} is refused before acquisition`, () => {
+for (const capacity of [0, -1, 77, 1.5, NaN]) test(`invalid storage token capacity ${capacity} is refused before acquisition`, () => {
   assert.throws(() => prepareStorageIdentity({ host: 'imds', clientId }).createProvider({}, capacity));
 });
 

@@ -28,9 +28,18 @@ async function setup(t: test.TestContext, linked = true) {
   const body = { protocolVersion: 'orka.gateway.v1', grantRef: grant.ref, namespaceUID: 'ns', gatewayUID: 'gateway', taskUID: 'task', tools, deadline: new Date(f.now() + 600000).toISOString() };
   const issue = async (s = service, input: unknown = body) => { const result = await s.handle('/v1/task-passes', 'CONTROLLER_PRIVATE', input, context()); assert.equal(result.status, 200); return (result.body as { pass: string }).pass; };
   const call = async (tool = 'github-create-issue', value: unknown = args, key: string | undefined = 'operation', s = service) => s.handle('/v1/task-tools/' + tool, await issue(s), value, context(), key);
+  let ready = true; let healthy = true;
   const server = await startTargetOutboundServer({ host: '127.0.0.1', port: 0 }, [{ prefix: '/targets/tools', bearerToken: 'DELIVERY_PRIVATE', scope: { appId: 'app', tenantId: 'tenant' },
-    dispatcher: { healthy: true, deliver: async () => { throw new Error('not delivery'); }, stop: async () => {} } }], () => true, service); t.after(() => server.stop());
-  return { ...f, ...remote, service, server, githubAccounts, openGithub, openService: open, linkGithub, tokens, body, issue, call, w, refresh: (fn: typeof refresh) => { refresh = fn; } };
+    dispatcher: { get healthy() { return healthy; }, deliver: async () => { throw new Error('not delivery'); }, stop: async () => {} } }], () => ready, service); t.after(() => server.stop());
+  const httpCall = (authorization: string | string[] | undefined, tool = 'github-create-issue', port = server.port) => new Promise<number>((resolve, reject) => {
+    const credentials = authorization === undefined ? [] : Array.isArray(authorization) ? authorization : [authorization];
+    const req = request({ host: '127.0.0.1', port, path: '/v1/task-tools/' + tool, method: 'POST', headers: [
+      'Host', '127.0.0.1', ...credentials.flatMap(value => ['Authorization', value]), 'content-type', 'application/json', 'Idempotency-Key', 'http-operation',
+    ] }, res => { res.resume(); res.on('end', () => resolve(res.statusCode!)); });
+    req.on('error', reject); req.end(Buffer.from(JSON.stringify(args)));
+  });
+  return { ...f, ...remote, service, server, githubAccounts, openGithub, openService: open, linkGithub, tokens, body, issue, call, httpCall, w,
+    unready: () => { ready = false; }, unhealthy: () => { healthy = false; }, refresh: (fn: typeof refresh) => { refresh = fn; } };
 }
 test('one mixed-tool grant preserves Work IQ with unlinked GitHub, and cannot adopt a later link', async t => {
   const f = await setup(t, false); assert.deepEqual(await f.call('workiq', { question: 'Question' }), { status: 200, body: { text: 'Answer' } });
@@ -101,6 +110,44 @@ test('GitHub disconnect inside the final awaited Work IQ grant read fences nativ
   await entered.promise; await f.githubAccounts.disconnect(f.subject, context()); release.resolve();
   assert.equal((await pending).status, 503); assert.equal(f.requests.length, 0);
 });
+test('Work IQ disconnect inside the final awaited GitHub inspection fences native POST', async t => {
+  const f = await setup(t); const pass = await f.issue(); const inspect = f.githubAccounts.inspect; let reads = 0;
+  f.githubAccounts.inspect = async (...input) => { const result = await inspect(...input);
+    if (++reads === 2) await f.store.disconnect(f.subject, context()); return result; };
+  assert.equal((await f.service.handle('/v1/task-tools/github-create-issue', pass, args, context(), 'other-final-gap')).status, 503);
+  assert.equal(f.requests.length, 0); assert.equal(f.w.bodies.length, 0);
+});
+test('GitHub disconnect inside the final awaited Work IQ grant read fences Work IQ native POST', async t => {
+  const f = await setup(t); const pass = await f.issue(); const get = f.store.getGrant; let reads = 0;
+  f.store.getGrant = async (...input) => { const result = await get(...input);
+    if (++reads === 4) await f.githubAccounts.disconnect(f.subject, context()); return result; };
+  assert.equal((await f.service.handle('/v1/task-tools/workiq', pass, { question: 'Question' }, context())).status, 403);
+  assert.equal(f.w.bodies.length, 0); assert.equal(f.requests.length, 0);
+});
+test('a provider mutation already pending when acquisition finishes fences native handoff', async t => {
+  const f = await setup(t); const pass = await f.issue(); const entered = deferred(); const release = deferred();
+  const account = [...f.rows.values()].find(r => String(r.RowKey).startsWith('account_') && Buffer.from(String(r.Payload), 'base64').readBigUInt64BE() === 2n)!;
+  f.controls.hook = async r => { if (r.req.method === 'PUT' && r.body?.RowKey === account.RowKey) { entered.resolve(); await release.promise; } r.reply(); };
+  const acquire = f.store.acquire; let disconnect: Promise<number> | undefined;
+  f.store.acquire = async (...input) => { const result = await acquire(...input);
+    disconnect = f.githubAccounts.disconnect(f.subject, context()); await entered.promise; return result; };
+  try {
+    const result = await f.service.handle('/v1/task-tools/workiq', pass, { question: 'Question' }, context());
+    assert.equal(f.w.bodies.length, 0); assert.equal(f.requests.length, 0); assert.equal(result.status, 403);
+  } finally { release.resolve(); await disconnect; }
+});
+for (const tool of ['workiq', 'github-create-issue']) test(`${tool} refresh finishes before guards register and subsequent calls retain authority`, async t => {
+  const f = await setup(t); f.advance(100001);
+  assert.equal((await f.call(tool, tool === 'workiq' ? { question: 'Question' } : args)).status, 200);
+  assert.equal((await f.call(tool, tool === 'workiq' ? { question: 'Question' } : args, 'second')).status, 200);
+  assert.equal(tool === 'workiq' ? f.w.bodies.length : f.requests.length, 2);
+});
+test('GitHub mutations cannot cancel a Work IQ call frozen with unlinked0', async t => {
+  const f = await setup(t, false); const pass = await f.issue(); const get = f.store.getGrant; let reads = 0;
+  f.store.getGrant = async (...input) => { const result = await get(...input); if (++reads === 4) await f.githubAccounts.disconnect(f.subject, context()); return result; };
+  assert.equal((await f.service.handle('/v1/task-tools/workiq', pass, { question: 'Question' }, context())).status, 200);
+  assert.equal(f.w.bodies.length, 1); assert.equal(f.requests.length, 0);
+});
 test('an uncertain operation replay after revocation cannot become a no-effect403', async t => {
   const f = await setup(t); f.behavior((_req, res) => res.destroy()); assert.equal((await f.call()).status, 503);
   const pass = await f.issue(); await f.githubAccounts.disconnect(f.subject, context());
@@ -122,6 +169,33 @@ test('API401 invalidates only the rejected token revision, never a same-generati
     release.resolve(); assert.notEqual((await pending).status, 200);
     assert.deepEqual(await f.githubAccounts.inspect(f.subject, context()), { generation: rotate ? 2 : 3, linked: rotate });
   }
+});
+for (const effect of ['done', 'unknown']) for (const rejection of ['consumed', 'expired', 'authority', 'closed', 'missing', 'malformed', 'duplicate', 'readiness', 'health']) test(`HTTP ${effect} write followed by ${rejection} credential/readiness failure stays503 with no additional POST`, async t => {
+  const f = await setup(t); if (effect === 'unknown') f.behavior((_req, res) => res.destroy());
+  const pass = await f.issue(); assert.equal(await f.httpCall('Bearer ' + pass), effect === 'done' ? 200 : 503); assert.equal(f.requests.length, 1);
+  let authorization: string | string[] | undefined = 'Bearer ' + pass;
+  if (rejection === 'expired') { authorization = 'Bearer ' + await f.issue(); f.advance(290001); }
+  if (rejection === 'authority') f.revoke(); if (rejection === 'closed') await f.service.close();
+  if (rejection === 'missing') authorization = undefined; if (rejection === 'malformed') authorization = 'Basic not-a-pass';
+  if (rejection === 'duplicate') authorization = ['Bearer ' + pass, 'Bearer ' + pass];
+  if (rejection === 'readiness' || rejection === 'health') {
+    authorization = 'Bearer ' + await f.issue(); if (rejection === 'readiness') f.unready(); else f.unhealthy();
+  }
+  assert.equal(await f.httpCall(authorization), 503); assert.equal(f.requests.length, 1);
+  if (rejection !== 'readiness' && rejection !== 'health') assert.equal(await f.httpCall(authorization, 'github-list-issues'), 401);
+  assert.equal(f.requests.length, 1); assert.equal(f.w.bodies.length, 0);
+});
+test('HTTP known write routes remain uncertain without TaskService; read and unknown routes retain ordinary refusal', async t => {
+  const f = await setup(t); const pass = await f.issue();
+  assert.equal(await f.httpCall('Bearer ' + pass), 200); assert.equal(f.requests.length, 1);
+  await f.server.stop(); await f.service.close();
+  const server = await startTargetOutboundServer({ host: '127.0.0.1', port: 0 }, [{ prefix: '/targets/tools', bearerToken: 'DELIVERY_PRIVATE', scope: { appId: 'app', tenantId: 'tenant' },
+    dispatcher: { healthy: true, deliver: async () => { throw new Error('not delivery'); }, stop: async () => {} } }], () => true); t.after(() => server.stop());
+  for (const token of [undefined, 'Basic malformed', 'Bearer ' + pass, 'Bearer DELIVERY_PRIVATE']) {
+    for (const tool of ['github-create-issue', 'github-create-pull-request']) assert.equal(await f.httpCall(token, tool, server.port), 503);
+    for (const tool of ['github-list-issues', 'unknown']) assert.equal(await f.httpCall(token, tool, server.port), token === 'Bearer DELIVERY_PRIVATE' ? 404 : 401);
+  }
+  assert.equal(f.requests.length, 1); assert.equal(f.w.bodies.length, 0);
 });
 test('HTTP write operation keys preserve UTF8 bytes, reject duplicates/control/oversize and never enter tool arguments', async t => {
   const f = await setup(t);

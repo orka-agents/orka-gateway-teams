@@ -317,11 +317,17 @@ Missing/duplicate/invalid operation headers and proven pre-effect argument error
 may return4xx. Write storage lookup failures, prior reservations, revocation of a
 possibly used operation, transport uncertainty and lost completion proof return
 fixed503/408, never a false no-effect403. This matters because Orka treats other
-4xx responses as proven no-effect. A single-use pass is not the write replay
+4xx responses as proven no-effect. Rejected authentication on either named write
+URL also returns503, even with no task service available; it grants no access and
+cannot prove that an earlier operation had no effect. Read and issuance auth
+failures retain401. A single-use pass is not the write replay
 ledger: the durable operation key remains authoritative across fresh passes and
 process restart. An uncertain operation needs operator reconciliation, not a new
 key or an automatic retry. Calls recheck owner, frozen generations, pass expiry
-and Task deadline before native handoff. A provider401 compare-and-invalidates
+and Task deadline before native handoff. Under the single owner, per-account
+mutation guards synchronously fence both providers through native handoff,
+including a mutation already pending when the guards register; sequential Table
+reads alone cannot provide that fence. A provider401 compare-and-invalidates
 only the rejected access token's same-generation revision, not a rotated pair.
 
 Output guards cover both providers' access/refresh tokens, the GitHub client

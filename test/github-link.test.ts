@@ -17,7 +17,7 @@ import type { AdmissionContext } from '../src/ingress/server.js';
 import type { ProviderResult } from '../src/outbound/types.js';
 import type { ReplyRoute } from '../src/ingress/types.js';
 import { binding, context, deferred, directoryFixture } from './support/directory-table.js';
-import { githubFixture } from './support/github.js';
+import { githubFixture, githubPair } from './support/github.js';
 import { httpsFixture } from './support/ingress-https.js';
 import { imdsFixture, miConfig } from './support/managed-identity.js';
 import { registryInput } from './support/registry.js';
@@ -158,12 +158,19 @@ for (const invalidate of ['denial', 'disconnect', 'policy', 'owner']) test(`GitH
   assert.equal((await f.finish(state, cookie, invalidate === 'denial')).status, 400); assert.equal(f.requests.length, 0);
   assert.equal((await f.finish(state, cookie)).status, 400); assert.equal(f.requests.length, 0);
 });
-test('disconnect while native GitHub request is held fences publication', async t => {
+for (const disconnect of [false, true]) test(`held native GitHub response ${disconnect ? 'with disconnect fences' : 'without disconnect permits'} account publication`, async t => {
   const f = await setup(t); const { ms } = await f.start(); const proof = await f.proof(ms);
   const state = new URL(proof.headers.get('location')!).searchParams.get('state')!; const cookie = proof.headers.get('set-cookie')!.split(';')[0]!;
-  const entered = deferred(); const release = deferred(); f.behavior((_req, res) => { entered.resolve(); void release.promise.then(() => res.end('{}')); });
-  const pending = f.finish(state, cookie); await entered.promise; await f.githubAccounts.disconnect({ objectId: oid }, context()); release.resolve();
-  assert.equal((await pending).status, 400); assert.equal((await f.githubAccounts.inspect({ objectId: oid }, context())).linked, false);
+  const entered = deferred(); const release = deferred(); t.after(() => release.resolve());
+  f.behavior((req, res) => {
+    if (req.url !== '/user') { res.end(JSON.stringify(githubPair())); return; }
+    entered.resolve(); void release.promise.then(() => res.end(JSON.stringify({ id: 12345, login: 'changeable', email: 'not-identity@example.invalid' })));
+  });
+  const pending = f.finish(state, cookie); await entered.promise;
+  if (disconnect) await f.githubAccounts.disconnect({ objectId: oid }, context()); release.resolve();
+  assert.equal((await pending).status, disconnect ? 400 : 200);
+  assert.deepEqual(await f.githubAccounts.inspect({ objectId: oid }, context()), { generation: 2, linked: !disconnect });
+  assert.equal(f.requests.length, 2);
 });
 test('GET callback rejects aliases, duplicates, unknown parameters and ambiguous cookies before effects', async t => {
   const f = await setup(t);
