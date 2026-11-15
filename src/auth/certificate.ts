@@ -2,7 +2,7 @@ import { createHash, createPrivateKey, X509Certificate } from 'node:crypto';
 import fs from 'node:fs';
 import type { Stats } from 'node:fs';
 import { basename, dirname, join, parse } from 'node:path';
-import type { TokenCredentials } from '@microsoft/teams.api';
+import type { TokenProviderFn } from '@microsoft/teams.api';
 import type { INetworkModule } from '@azure/msal-node';
 import { certificateTokenEndpoint, createCertificateNetwork } from './network.js';
 import { createAppToken } from './app-token.js';
@@ -11,7 +11,7 @@ import { assertCertificateEnvironment, validateBotCredential } from './credentia
 import type { SharedBotCredentialConfig } from './credentials.js';
 
 type CertificateConfig = Extract<SharedBotCredentialConfig, { credentialMode: 'certificate' }> & { appId: string; tenantId: string };
-export interface PreparedCertificate { assertUsable(): void; createToken(network?: INetworkModule): TokenCredentials['token'] }
+export interface PreparedCertificate { assertUsable(): void; createToken(network?: INetworkModule): TokenProviderFn }
 
 /** Only closures escape. File descriptors close before any store can be owned. */
 export function prepareCertificate(input: CertificateConfig): PreparedCertificate {

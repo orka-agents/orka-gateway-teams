@@ -59,7 +59,10 @@ for (const host of ['imds', 'azure-container-apps'] as const) test(`${host} prep
   const acquire = t.mock.method(ConfidentialClientApplication.prototype, 'acquireTokenByClientCredential', async () => { throw new Error('No CCA'); });
   t.mock.method(App.prototype, 'initialize', async function(this: App) {
     const credentials = this.credentials; selected = !!credentials && 'token' in credentials && !('clientSecret' in credentials);
-    if (credentials && 'token' in credentials) await assert.rejects(async () => credentials.token(PUBLIC.botScope));
+    if (credentials && 'token' in credentials) {
+      const token = credentials.token; assert.ok(typeof token === 'function');
+      await assert.rejects(async () => token(PUBLIC.botScope));
+    }
     await initialize.call(this);
   });
   const input = { ...miConfig, managedIdentityHost: host }; const prepared = prepareReceiver(input);
@@ -87,7 +90,10 @@ for (const host of ['imds', 'azure-container-apps'] as const) test(`${host} setu
   const initialize = App.prototype.initialize;
   t.mock.method(App.prototype, 'initialize', async function(this: App) {
     const credentials = this.credentials; selected = !!credentials && 'token' in credentials && !('clientSecret' in credentials);
-    if (credentials && 'token' in credentials) await assert.rejects(async () => credentials.token(PUBLIC.botScope));
+    if (credentials && 'token' in credentials) {
+      const token = credentials.token; assert.ok(typeof token === 'function');
+      await assert.rejects(async () => token(PUBLIC.botScope));
+    }
     await initialize.call(this);
   });
   const { clientSecret: _unused, ...settings } = files.config;

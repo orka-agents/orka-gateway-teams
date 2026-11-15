@@ -1,5 +1,5 @@
 import { PUBLIC } from '@microsoft/teams.api';
-import type { TokenCredentials } from '@microsoft/teams.api';
+import type { TokenProviderFn } from '@microsoft/teams.api';
 import { ConfidentialClientApplication } from '@azure/msal-node';
 import type { INetworkModule, NetworkRequestOptions, NetworkResponse, NodeAuthOptions } from '@azure/msal-node';
 import { certificateTokenEndpoint, validAccessToken, validateOAuthSuccess } from './network.js';
@@ -10,13 +10,13 @@ type AppCredential =
 
 /** Shared lazy CCA and its in-memory cache; callers own credential preparation and safe errors. */
 export function createAppToken(appId: string, tenantId: string, credential: AppCredential, assertUsable: () => void,
-  network: INetworkModule, tokenFailure: () => Error): TokenCredentials['token'] {
+  network: INetworkModule, tokenFailure: () => Error): TokenProviderFn {
   const endpoint = certificateTokenEndpoint(tenantId); const authority = `${PUBLIC.loginEndpoint}/${tenantId.toLowerCase()}`;
   let client: ConfidentialClientApplication | undefined;
   const guardedNetwork: INetworkModule = {
     sendGetRequestAsync: async () => { throw tokenFailure(); },
     async sendPostRequestAsync<T>(url: string, options?: NetworkRequestOptions): Promise<NetworkResponse<T>> {
-      // MSAL 5.6 appends only this generated telemetry query even with no
+      // MSAL appends only this generated telemetry query even with no
       // extraQueryParameters. Strip it; native I/O still has one exact URL.
       const query = url.slice(endpoint.length);
       if (!url.startsWith(endpoint) || !/^\?client-request-id=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(query)) throw tokenFailure();
