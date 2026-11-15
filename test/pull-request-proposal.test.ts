@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
-import { proposalDigest, proposalIdentity, decodeProposal } from '../src/accounts/pull-request-proposal.js';
+import { proposalDigest, decodeProposal } from '../src/accounts/pull-request-proposal.js';
 import { taskGrant } from '../src/accounts/grants.js';
 import { binding, context } from './support/directory-table.js';
 import { grantsFixture } from './support/task-grants.js';

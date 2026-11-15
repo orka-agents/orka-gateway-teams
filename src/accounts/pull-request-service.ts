@@ -29,7 +29,6 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
           generation: grant.generation, githubGeneration: grant.githubGeneration, targetId: grant.targetId, targetDigest: grant.targetDigest,
           grantRef: grant.ref, taskUID: grant.binding.taskUID, createdAt, expiresAt: createdAt + 3_600_000, payloadDigest: '' } as Proposal;
         p.payloadDigest = proposalDigest(p);
-        if (!await safeOutput(proposalOutput(p))) throw new GitHubError();
       }
       if (!await safeOutput(proposalOutput(p))) throw new GitHubError();
       p = await options.accounts.reserveProposal({ ...p, state: 'pending' }, operation, ctx);

@@ -16,6 +16,14 @@ test('card_escapes_untrusted_labels_and_fits_20KiB', () => {
   const card = buildPullRequestCard(p, 'room', false); const wire = JSON.stringify(card);
   assert.ok(Buffer.byteLength(JSON.stringify({ type: 'message', attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: card }] })) <= 20 * 1024);
   assert.ok(!wire.includes('[Admin](')); assert.match(wire, /incomplete/); assert.match(wire, /truncated/);
+  p.title = '&'.repeat(256); p.body = '&'.repeat(16384); p.displayName = '&'.repeat(1024);
+  p.owner = 'a'.repeat(100); p.repo = '_'.repeat(100); p.head = '_'.repeat(256); p.base = '_'.repeat(256);
+  p.files = Array.from({ length: 10 }, () => ({ path: '&'.repeat(4096), additions: 1, deletions: 1 }));
+  for (const viewer of ['room', 'sender'] as const) {
+    const escaped = buildPullRequestCard(p, viewer, false);
+    assert.ok(Buffer.byteLength(JSON.stringify({ type: 'message', replyToId: p.activityId, attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: escaped }] })) <= 20 * 1024);
+    assert.ok(cardInvokeResponse({ statusCode: 200, type: 'application/vnd.microsoft.card.adaptive', value: escaped }));
+  }
 });
 test('expired_or_superseded_card_shows_current_state and closed invoke projection drops extra wrapper fields', () => {
   for (const state of ['expired', 'superseded'] as const) {

@@ -116,7 +116,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     return reply.kind === 'discovery' ? reply.targets.every(t => eligible.some(e => e.id === t.id)) : eligible.some(e => e.id === reply.targetId);
   }
   async function control(candidate: ControlRecord, eligible: readonly { id: string }[], denied: boolean, ctx: DirectoryContext,
-    connection?: ConnectionRecord): Promise<AdmissionResult> {
+    connection?: ConnectionRecord, beforeArm?: () => void): Promise<AdmissionResult> {
     assertActive(ctx);
     const saved = candidate.state === 'ready' ? await directory.reserveControl(candidate, ctx) : candidate; assertActive(ctx);
     if (!permitted(saved.reply, eligible, denied)) return { kind: 'conflict' };
@@ -128,6 +128,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
         route.conversation.tenantId !== scope.tenantId || route.conversation.id !== saved.conversationId) throw new DirectoryError('corrupt');
     if (!sender) throw new DirectoryError('unready');
     const message = saved.reply.kind === 'pr-approval' ? await proposalMessage(saved, ctx) : formatControl(saved.reply, options.delegated, route.conversation.conversationType);
+    beforeArm?.();
     const armed = await directory.armControl(keyOf(saved), ctx); assertActive(ctx);
     const sendAuthority = saved.reply.kind === 'pr-approval' ? { ...authority, allowed: () => authority.allowed() && active(ctx) && ctx.authorizeWrite?.() !== false } : authority;
     const outcome = await sender.send(route, message, { signal: ctx.signal, deadline: ctx.deadline, authority: sendAuthority });
@@ -159,6 +160,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
   async function postProposal(p: Proposal, supplied: DirectoryContext): Promise<'delivered' | 'uncertain' | 'unavailable'> {
     if (consumers >= 4 || !options.delegated || p.route.conversation.conversationType === 'channel') return 'unavailable'; consumers++;
     const ctx = { ...supplied, authorizeWrite: () => active(supplied) && supplied.authorizeWrite?.() !== false };
+    let armAttempted = false;
     const activityId = `pr:${p.id}:${p.revision}`; const key = { kind: 'control' as const, conversationId: p.conversationId, activityId };
     try {
       assertActive(ctx); const bound = await proposalConnection(p, { tenantId: p.tenantId, objectId: p.objectId, chatKind: p.route.conversation.conversationType === 'groupChat' ? 'groupChat' : 'personal' }, ctx);
@@ -167,14 +169,20 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
         fingerprint: controlFingerprint(scope, p.conversationId, activityId, p.objectId, `${p.id}:${p.revision}:${p.payloadDigest}`, p.targetDigest),
         currentTargetDigest: p.targetDigest, desiredTargetDigest: p.targetDigest,
         route: { serviceUrl: p.route.serviceUrl, channelId: 'msteams', bot: p.route.bot, conversation: { ...p.route.conversation, conversationType: bound.connection.chatKind } },
-        reply: { kind: 'pr-approval', targetId: p.targetId, proposal: p.id, rev: p.revision, digest: p.payloadDigest }, state: 'ready' }, bound.targets, false, ctx, bound.connection);
+        reply: { kind: 'pr-approval', targetId: p.targetId, proposal: p.id, rev: p.revision, digest: p.payloadDigest }, state: 'ready' }, bound.targets, false, ctx, bound.connection, () => { armAttempted = true; });
       const receipt = await directory.getControl(key, ctx); assertActive(ctx);
       if (receipt?.state !== 'delivered') return receipt && receipt.state !== 'ready' && receipt.state !== 'rejected' ? 'uncertain' : 'unavailable';
       try { const version = await options.delegated.accounts.getProposal(p.id, ctx);
         if (version && !version.proposal.cardActivityId) await options.delegated.accounts.replaceProposal(version, { ...version.proposal, cardActivityId: receipt.providerMessageId }, ctx);
       } catch { /* The directory receipt remains authoritative. */ }
       return 'delivered';
-    } catch { return 'uncertain'; }
+    } catch {
+      if (!armAttempted) try {
+        const receipt = await directory.getControl(key, ctx);
+        if (!receipt || receipt.state === 'ready' || receipt.state === 'rejected') return 'unavailable';
+      } catch { /* An unreadable prior attempt is not proof of no effect. */ }
+      return 'uncertain';
+    }
     finally { consumers--; }
   }
   async function cardAction(input: unknown, supplied: ExchangeContext): Promise<{ status: number; body: unknown }> {

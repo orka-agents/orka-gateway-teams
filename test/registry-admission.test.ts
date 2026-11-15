@@ -292,6 +292,8 @@ test('uncertain_card_send_never_resends_after_restart and refresh scopes identit
   const p = { ...proposalFixture(), ...f.scope, objectId: d.ch.objectId, conversationId: f.event.contextId, route: f.route,
     targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest!, createdAt: Date.now(), expiresAt: Date.now() + 3_600_000 };
   d.delegated.accounts.getProposal = async () => ({ proposal: p, etag: 'W/"1"' });
+  f.fail(true, 'target-paused'); assert.equal(await f.sink.postProposal(p, context()), 'unavailable'); assert.equal(f.sent.length, 0);
+  f.fail(false); await new Promise(resolve => setTimeout(resolve, 1010));
   f.outcome({ kind: 'unknown' }); assert.equal(await f.sink.postProposal(p, context()), 'uncertain'); assert.equal(f.sent.length, 1);
   const restarted = f.restart(); assert.equal(await restarted.postProposal(p, context()), 'uncertain'); assert.equal(f.sent.length, 1);
   const input = { type: 'invoke', name: 'adaptiveCard/action', id: 'refresh', channelId: 'msteams',

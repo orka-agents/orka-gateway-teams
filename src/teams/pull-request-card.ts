@@ -3,8 +3,15 @@ import type { Proposal } from '../accounts/pull-request-proposal.js';
 import { object } from '../storage/table/codec.js';
 import { MAX_OUTGOING_MESSAGE_BYTES } from './format.js';
 
-const label = (s: string, max: number) => Array.from(s).slice(0, max).join('').replace(/&/gu, '&amp;').replace(/</gu, '&lt;')
-  .replace(/>/gu, '&gt;').replace(/([\\`*_{}\[\]()#+.!|~-])/gu, '\\$1') + (Array.from(s).length > max ? '… (truncated)' : '');
+function label(s: string, max: number): string {
+  const points = Array.from(s);
+  const escaped = (n: number) => points.slice(0, n).join('').replace(/&/gu, '&amp;').replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;').replace(/([\\`*_{}\[\]()#+.!|~-])/gu, '\\$1');
+  // Budget the escaped JSON bytes, without splitting a Unicode point or an escape sequence.
+  let low = 0; let high = Math.min(points.length, max);
+  while (low < high) { const mid = Math.ceil((low + high) / 2); if (Buffer.byteLength(JSON.stringify(escaped(mid))) <= max) low = mid; else high = mid - 1; }
+  return escaped(low) + (low < points.length ? '… (truncated)' : '');
+}
 /** Preview only. Decision actions are deliberately absent until the decision handler ships. */
 export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', _decisionsEnabled: boolean): IAdaptiveCard {
   const block = (text: string, heading = false): ITextBlock => ({ type: 'TextBlock', text, wrap: true, ...(heading ? { weight: 'Bolder', size: 'Medium' } : {}) });

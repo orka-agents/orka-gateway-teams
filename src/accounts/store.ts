@@ -277,7 +277,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         const p = decodeProposal(input);
         if (p.state !== 'pending' || p.id !== proposalIdentity(p.grantRef, p.taskUID, operation)) bad('invalid-input');
         let row = await read(proposalKey(p.id), c);
-        const key = selectorKey(proposalSelectorId(p)); let selector = await read(key, c);
+        const key = selectorKey(proposalSelectorId(p)); const selector = await read(key, c);
         if (row) {
           if (row.value.kind !== 'proposal' || canonicalJSON(proposalArgs(row.value.proposal)) !== canonicalJSON(proposalArgs(p))) bad('operation-conflict');
         } else row = await persist(undefined, { kind: 'proposal', objectId: p.objectId, generation: p.generation, proposal: p,
