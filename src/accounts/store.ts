@@ -8,7 +8,7 @@ import type { DirectoryBinding, DirectoryContext, DirectoryDependencies } from '
 import { DirectoryError } from '../directory/types.js';
 import { etag, integer, object, uuid } from '../storage/table/codec.js';
 
-import { decodeProposal, decodeSelector, proposalIdentity, proposalSelectorId, proposalArgs, projectClaim } from './pull-request-proposal.js';
+import { decodeProposal, decodeSelector, proposalIdentity, proposalSelectorId, proposalArgs, proposalDigest, projectClaim } from './pull-request-proposal.js';
 import type { Proposal, ProposalVersion, ProposalSelector } from './pull-request-proposal.js';
 
 export interface AccountSubject { objectId: string }
@@ -274,14 +274,19 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     getProposal(id: string, ctx: DirectoryContext): Promise<ProposalVersion | undefined> { return run(ctx, c => proposalVersion(id, c)); },
     reserveProposal(input: Proposal, operation: string, ctx: DirectoryContext): Promise<Proposal> {
       return run(ctx, async c => {
-        const p = decodeProposal(input);
+        const p = decodeProposal(structuredClone(input));
         if (p.state !== 'pending' || p.id !== proposalIdentity(p.grantRef, p.taskUID, operation)) bad('invalid-input');
         let row = await read(proposalKey(p.id), c);
         const key = selectorKey(proposalSelectorId(p)); const selector = await read(key, c);
         if (row) {
           if (row.value.kind !== 'proposal' || canonicalJSON(proposalArgs(row.value.proposal)) !== canonicalJSON(proposalArgs(p))) bad('operation-conflict');
-        } else row = await persist(undefined, { kind: 'proposal', objectId: p.objectId, generation: p.generation, proposal: p,
-          ...(selector ? { predecessor: selector.etag } : {}) }, c, v => v.kind === 'proposal' && canonicalJSON(proposalArgs(v.proposal)) === canonicalJSON(proposalArgs(p)));
+        } else {
+          const candidate: ProposalRow = { kind: 'proposal', objectId: p.objectId, generation: p.generation, proposal: p,
+            ...(selector ? { predecessor: selector.etag } : {}) };
+          // Preserve complete verified totals, omitting trailing previews if the encrypted document would overflow.
+          while (Buffer.byteLength(canonicalJSON(candidate)) > 48 * 1024 && p.files.length) { p.files.pop(); p.payloadDigest = proposalDigest(p); }
+          row = await persist(undefined, candidate, c, v => v.kind === 'proposal' && canonicalJSON(proposalArgs(v.proposal)) === canonicalJSON(proposalArgs(p)));
+        }
         if (row.value.kind !== 'proposal') bad();
         // A replay may publish only against its original observed predecessor, never a newer selector.
         if (selector?.value.kind === 'proposal-selector' && selector.value.proposalId === p.id) return (await proposalVersion(p.id, c))!.proposal;

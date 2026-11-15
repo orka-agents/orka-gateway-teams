@@ -17,14 +17,14 @@ async function setup(t: test.TestContext) {
   const ch = await ghAccounts.challenge(f.subject, 'chat-private', 'github', context()); await ghAccounts.claim(ch, context());
   await ghAccounts.complete(ch, { accessToken: 'GH_ACCESS_PRIVATE', refreshToken: 'GH_REFRESH_PRIVATE', providerUserId: '12345', expiresAt: f.now() + 100_000, refreshExpiresAt: f.now() + 1_000_000 }, context());
   const github = createGitHub({ clientId: 'client', clientSecret: 'CLIENT_PRIVATE', publicOrigin: 'https://signin.example.invalid' }, { request: remote.request }); t.after(() => github.close());
-  let author: unknown = commit(); let total = 1; let oversized = false; let heldPage = false; let complete = true;
+  let author: unknown = commit(); let total = 1; let oversized = false; let heldPage = false; let complete = true; let longFiles = false;
   remote.behavior((req, res) => {
     if (req.path === '/user') return void res.end('{"id":12345,"login":"sender"}');
     if (req.path.includes('/git/ref/heads/')) return void res.end(JSON.stringify({ ref: 'refs/heads/orka/fix', object: { type: 'commit', sha: 'a'.repeat(40) } }));
     if (heldPage && req.path.endsWith('page=2')) return;
     res.end(oversized ? 'x'.repeat(1024 * 1024 + 1) : JSON.stringify({ total_commits: total, base_commit: { sha: 'b'.repeat(40) },
       commits: Array.from({ length: req.path.endsWith('page=1') ? Math.min(total, 100) : total - 100 }, (_, i) => req.path.endsWith('page=2') && i === 0 ? author : commit()),
-      files: req.path.endsWith('page=1') ? Array.from({ length: complete ? 1 : 300 }, (_, i) => ({ filename: `src/file-${i}.ts`, additions: 3, deletions: 1, patch: 'PRIVATE PATCH' })) : undefined }));
+      files: req.path.endsWith('page=1') ? Array.from({ length: longFiles ? 10 : complete ? 1 : 300 }, (_, i) => ({ filename: longFiles ? 'f'.repeat(3990) + `${i}.ts` : `src/file-${i}.ts`, additions: 3, deletions: 1, patch: 'PRIVATE PATCH' })) : undefined }));
   });
   const p = proposalFixture(); const { conversationId, replyTarget, route, senderMRI, objectId, displayName, activityId } = p;
   const grant = { ...f.input, githubGeneration: 2, tools: ['workiq', 'github-propose-pull-request'],
@@ -42,7 +42,7 @@ async function setup(t: test.TestContext) {
   const call = async (value: unknown = args, key = 'operation', ctx = context()) => service.handle('/v1/task-tools/github-propose-pull-request', await issue(), value, ctx, key);
   return { ...f, ...remote, github, proposals, service, grant, body, issue, call, sent: () => sent,
     total: (n: number) => { total = n; }, author: (v: unknown) => { author = v; }, oversized: () => { oversized = true; },
-    holdPage: () => { heldPage = true; }, incomplete: () => { complete = false; }, outcome: (v: typeof outcome) => { outcome = v; } };
+    holdPage: () => { heldPage = true; }, longFiles: () => { longFiles = true; }, incomplete: () => { complete = false; }, outcome: (v: typeof outcome) => { outcome = v; } };
 }
 test('propose_is_local_not_pulls_post and same_operation_replays_without_reads_or_new_candidate', async t => {
   const f = await setup(t); const first = await f.call(); assert.equal(first.status, 200); assert.match(JSON.stringify(first.body), /Approval card sent/);
@@ -71,6 +71,12 @@ test('300 returned files explicitly mark incomplete counts without storing patch
   const f = await setup(t); f.incomplete(); assert.equal((await f.call()).status, 200);
   const p = (await f.store.getProposal(proposalIdentity(f.grant.ref, 'task', 'operation'), context()))!.proposal;
   assert.equal(p.filesComplete, false); assert.equal(p.fileCount, 300); assert.equal(p.additions, 900); assert.equal(p.files.length, 10);
+});
+test('large descriptions and filename previews respect the complete encrypted document budget', async t => {
+  const f = await setup(t); f.longFiles();
+  assert.equal((await f.call({ ...args, body: 'b'.repeat(16384) })).status, 200);
+  const p = (await f.store.getProposal(proposalIdentity(f.grant.ref, 'task', 'operation'), context()))!.proposal;
+  assert.equal(p.fileCount, 10); assert.equal(p.additions, 30); assert.ok(p.files.length > 0 && p.files.length < 10);
 });
 test('child_tool_omission_denied and both provider credential sentinels never reach card persistence', async t => {
   const f = await setup(t); await f.issue();

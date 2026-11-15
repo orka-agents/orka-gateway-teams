@@ -299,6 +299,8 @@ test('uncertain_card_send_never_resends_after_restart and refresh scopes identit
   const input = { type: 'invoke', name: 'adaptiveCard/action', id: 'refresh', channelId: 'msteams',
     conversation: { id: p.conversationId, tenantId: p.tenantId, conversationType: 'groupChat' }, from: { id: p.senderMRI, aadObjectId: p.objectId },
     value: { action: { type: 'Action.Execute', verb: 'pr-refresh', data: { proposal: p.id, rev: 1, digest: p.payloadDigest } } } };
+  const tenantOnly = { ...input, conversation: { ...input.conversation, tenantId: undefined } };
+  assert.equal((await restarted.cardAction!(tenantOnly, context())).status, 200);
   const sender = await restarted.cardAction!(input, context()); assert.equal(sender.status, 200); assert.match(JSON.stringify(sender.body), /Approval actions are not enabled yet/);
   const other = await restarted.cardAction!({ ...input, from: { id: '29:other', aadObjectId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' } },
     { ...context(), subject: { ...context().subject, objectId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', chatKind: 'groupChat' } });

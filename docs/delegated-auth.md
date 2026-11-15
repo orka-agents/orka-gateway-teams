@@ -387,8 +387,9 @@ automatically, and a historical grant cannot gain the tool or a missing origin.
 Only same-repository head/base refs are accepted. The gateway reads `/user`, pins
 the head SHA, and verifies every compared git author is
 `Orka Publisher <publisher@orka.ai>`, including later commit pages. The card shows
-verified counts, the first ten files, agent-labelled title/description and a
-SHA-pinned compare link. At the 300-file API boundary, returned file/line totals
+verified counts, up to ten file previews, agent-labelled title/description and a
+compare link pinned to both verified SHAs. Large filenames may reduce the retained
+preview count to fit the encrypted document budget; the card shows “+N more”. At the 300-file API boundary, returned file/line totals
 are explicitly incomplete. Long labels/descriptions are visibly truncated to
 preserve the existing 20 KiB message budget; full diffs and patches are not stored.
 

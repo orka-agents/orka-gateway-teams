@@ -194,7 +194,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
       if (action.type !== 'Action.Execute' || action.verb !== 'pr-refresh' || data.rev !== 1 || typeof data.proposal !== 'string' || typeof data.digest !== 'string' ||
         !supplied.subject.objectId || input.from.aadObjectId !== supplied.subject.objectId) return denied;
       const p = (await options.delegated.accounts.getProposal(data.proposal, ctx))?.proposal;
-      if (!p || p.conversationId !== input.conversation.id || p.tenantId !== input.conversation.tenantId || p.payloadDigest !== data.digest || p.revision !== data.rev ||
+      if (!p || p.conversationId !== input.conversation.id || input.conversation.tenantId !== undefined && p.tenantId !== input.conversation.tenantId || p.payloadDigest !== data.digest || p.revision !== data.rev ||
         !await proposalConnection(p, supplied.subject, ctx)) return denied;
       const card = buildPullRequestCard(p, supplied.subject.objectId === p.objectId ? 'sender' : 'room', false);
       if (!await safeProposal(p, proposalOutput(p), ctx) || !await safeProposal(p, JSON.stringify(card), ctx)) return denied;

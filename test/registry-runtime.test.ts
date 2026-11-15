@@ -685,6 +685,9 @@ test('native registry wires optional GitHub custody and checks its secret before
   await preview('preview'); assert.equal(sent.length, beforePreview + 1);
   const refresh = { ...message, type: 'invoke', name: 'adaptiveCard/action', value: { action: card.refresh.action } };
   assert.equal((await post(runtime.port, f.auth.token(), refresh)).status, 200);
+  const channelTenantOnly = { ...refresh, conversation: { ...message.conversation, tenantId: undefined } };
+  const tenantResponse = await post(runtime.port, f.auth.token(), channelTenantOnly);
+  assert.equal(tenantResponse.status, 200); assert.equal((await tenantResponse.json() as { type: string }).type, 'application/vnd.microsoft.card.adaptive');
   await runtime.stop(); await runtime.done; runtime = await startRegistryRuntime(config, deps);
   await preview('preview'); assert.equal(sent.length, beforePreview + 1);
   await preview('replacement'); const replaced = await post(runtime.port, f.auth.token(), refresh);
