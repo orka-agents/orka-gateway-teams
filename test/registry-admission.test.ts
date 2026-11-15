@@ -246,6 +246,7 @@ function delegatedFixture() {
   let gate: Promise<void> | undefined; let consumed = false;
   const attempt = { challenge: ch, state: 'synthetic-private-state', nonce: 'synthetic-private-nonce', verifier: 'synthetic-private-verifier' };
   const accounts = {
+    providerIdentity: async () => undefined,
     getProposal: async () => undefined, reserveProposal: async () => { throw new Error('not a proposal'); },
     replaceProposal: async () => { throw new Error('not a proposal'); },
     reserveGrant: async (input: TaskGrant) => input,

@@ -409,6 +409,10 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         if (!same(saved.value) || !await liveGrant(ref, c)) bad('conflict'); return publicGrant(saved.value as Grant);
       });
     },
+    providerIdentity(subject: AccountSubject, generation: number, ctx: DirectoryContext): Promise<string | undefined> {
+      return run(ctx, async c => { const a = (await read(accountKey(subject.objectId), c))?.value;
+        return provider === 'github' && a?.kind === 'account' && a.generation === generation && usable(a) ? a.tokens?.providerUserId : undefined; });
+    },
     inspect(subject: AccountSubject, ctx: DirectoryContext, forDisconnect = false): Promise<{ generation: number; linked: boolean }> {
       return run(ctx, async c => { const r = await read(accountKey(subject.objectId), c); const v = r?.value as Account | undefined;
         return { generation: v?.generation ?? 0, linked: !!v && usable(v) && !!v.tokens &&
