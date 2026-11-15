@@ -1,4 +1,4 @@
-import type { TokenCredentials } from '@microsoft/teams.api';
+import type { TokenProviderFn } from '@microsoft/teams.api';
 import { assertManagedIdentityEnvironment, validateBotCredential } from './credentials.js';
 import type { SharedBotCredentialConfig } from './credentials.js';
 import type { INetworkModule } from '@azure/msal-node';
@@ -11,7 +11,7 @@ import { prepareAcaIdentity } from './aca.js';
 
 type ManagedIdentityConfig = Extract<SharedBotCredentialConfig, { credentialMode: 'managed-identity-federation' }> & { appId: string; tenantId: string };
 export interface ManagedIdentityDependencies { imdsRequest?: ImdsRequest; acaRequest?: ImdsRequest; entraNetwork?: INetworkModule }
-export interface PreparedManagedIdentity { assertUsable(): void; createToken(dependencies?: ManagedIdentityDependencies): TokenCredentials['token'] }
+export interface PreparedManagedIdentity { assertUsable(): void; createToken(dependencies?: ManagedIdentityDependencies): TokenProviderFn }
 
 /** Structural preparation only: no credential files, CCA, requests or descriptors. */
 export function prepareManagedIdentity(input: ManagedIdentityConfig): PreparedManagedIdentity {

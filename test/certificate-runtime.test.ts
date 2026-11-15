@@ -93,7 +93,10 @@ test('certificate setup validates real pair, uses deny-only SDK callback and kee
   });
   t.mock.method(App.prototype, 'initialize', async function(this: App) {
     const credentials = this.credentials; selected = !!credentials && 'token' in credentials && !('clientSecret' in credentials);
-    if (credentials && 'token' in credentials) await assert.rejects(async () => credentials.token(PUBLIC.botScope));
+    if (credentials && 'token' in credentials) {
+      const token = credentials.token; assert.ok(typeof token === 'function');
+      await assert.rejects(async () => token(PUBLIC.botScope));
+    }
     await initialize.call(this);
   });
   const { clientSecret: _unused, ...settings } = files.config;
