@@ -37,6 +37,7 @@ export interface ExchangeResponse { status: 200 | 412; body: { id: string; conne
 export interface AdmissionSink { readonly scope: IngressStore['scope']; readonly browser?: BrowserSignin;
   bindControlSender?(sender: Pick<ProviderSender, 'send'>): void;
   exchange?(activity: unknown, context: ExchangeContext): Promise<ExchangeResponse>;
+  cardAction?(activity: unknown, context: ExchangeContext): Promise<{ status: number; body: unknown }>;
   admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>, context?: AdmissionContext): AdmissionResult | Promise<AdmissionResult> }
 export interface ReceiverOutbound { authority?: import('../storage/table/types.js').LeaseAuthority; interimDelivery?: boolean; meetingDrafts?: boolean; journal: DeliveryJournalPort; correlation?: SessionCorrelationPort; getRoute: (key: string) => ReplyRoute | undefined | Promise<ReplyRoute | undefined> }
 export type ReceiverOutbounds = ReceiverOutbound | { targets: readonly (ReceiverOutbound & { id: string })[] };
@@ -125,6 +126,11 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
         const result = await sink.exchange(input, { ...adapter.requestContext, subject });
         return { status: result.status, body: { invokeResponse: result.body } };
       } catch { return { status: 412, body: { invokeResponse: { id: '', connectionName: '', failureDetail: 'signin-required' } } }; }
+    }
+    if (input.type === 'invoke' && input.name === 'adaptiveCard/action' && sink.cardAction) {
+      const subject = readPolicySubject(input, config.tenantId);
+      if (!subject.objectId || !controlRecipient(input)) return { status: 403 };
+      try { return await sink.cardAction(input, { ...adapter.requestContext, subject }); } catch { return { status: 403 }; }
     }
     const converted = convertActivity(input as unknown as Activity, { tenantId: config.tenantId, replyTarget: randomUUID() });
     if (converted.kind === 'invalid') return { status: 400 };

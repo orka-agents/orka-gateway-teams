@@ -10,6 +10,7 @@ import { AccountError } from './store.js';
 import { githubArguments, GitHubError } from './github.js';
 import type { createGitHub } from './github.js';
 import type { GitHubTool } from './grants.js';
+import type { createPullRequestService } from './pull-request-service.js';
 import { createWorkIQ, workIQArguments } from './workiq.js';
 
 export interface TaskReply { status: number; body: unknown }
@@ -31,6 +32,7 @@ export function createTaskService(options: {
   accounts: AccountStore; authority: LeaseAuthority; targets: readonly Target[];
   auth: { exchange(token: string, ctx: DirectoryContext): Promise<AccountTokens>; refresh(token: string, ctx: DirectoryContext): Promise<AccountTokens> };
   github?: { accounts: AccountStore; auth: Pick<ReturnType<typeof createGitHub>, 'refresh' | 'tool' | 'safeOutput'> };
+  proposals?: ReturnType<typeof createPullRequestService>;
   workiq?: Parameters<typeof createWorkIQ>[0]; now?: () => number; privateCredentials?: readonly string[]; log?(category: 'grant-binding-conflict'): void;
 }) {
   const now = options.now ?? Date.now; const provider = createWorkIQ(options.workiq);
@@ -112,14 +114,18 @@ export function createTaskService(options: {
       if (tool !== 'workiq' ? !await options.accounts.pin(subject, frozen.generation, ctx) :
         frozen.githubGeneration && g && !await g.accounts.pin(subject, frozen.githubGeneration, ctx)) return refusal('signin-required', writing ? 503 : 403);
       // A lookup failure may conceal an earlier successful effect: write storage uncertainty is always503.
-      const reservation = writing ? await options.accounts.reserveWrite(frozen, tool, operation!, args, ctx) : undefined;
+      const proposing = tool === 'github-propose-pull-request';
+      const reservation = writing && !proposing ? await options.accounts.reserveWrite(frozen, tool, operation!, args, ctx) : undefined;
       if (reservation?.kind === 'uncertain') return refusal('tool-unavailable', 503);
       if (!await options.authority.revalidate() || !await live()) return refusal('tool-unavailable', writing ? 503 : 403);
       if (reservation?.kind === 'done') {
         return await safeOutput(frozen, reservation.text, token, acquired.accessToken, ctx) && await live() ?
           { status: 200, body: { text: reservation.text } } : refusal('tool-unavailable', 503);
       }
-      const result = tool === 'workiq' ? await provider.ask(args, acquired.accessToken, ctx) : await g!.auth.tool(tool as GitHubTool, args, acquired.accessToken, ctx);
+      if (proposing && !options.proposals) return refusal('tool-unavailable', 503);
+      const result = proposing ? await options.proposals!.propose(frozen, args as Record<string, string>, operation!, acquired.accessToken, ctx,
+        text => safeOutput(frozen, text, token, acquired!.kind === 'token' ? acquired!.accessToken : '', ctx)) :
+        tool === 'workiq' ? await provider.ask(args, acquired.accessToken, ctx) : await g!.auth.tool(tool as GitHubTool, args, acquired.accessToken, ctx);
       if (!await safeOutput(frozen, result.text, token, acquired.accessToken, ctx) || !await live()) return refusal('tool-unavailable', writing ? 503 : 403);
       if (reservation?.kind === 'send') await options.accounts.completeWrite(reservation.id, result.text, ctx);
       if (!active(ctx)) return refusal('tool-unavailable', writing ? 503 : 403);

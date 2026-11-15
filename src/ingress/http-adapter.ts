@@ -1,3 +1,4 @@
+import { cardInvokeResponse } from '../teams/pull-request-card.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -217,7 +218,8 @@ function respond(res: ServerResponse, status: number, body?: unknown): void {
       invoke = { id: value.id, connectionName: value.connectionName, ...(status === 412 ? { failureDetail: 'signin-required' as const } : {}) };
     }
   }
-  const text = JSON.stringify(invoke ?? (accepted ? { status: (body as { status: string }).status } : { error: 'Request rejected' }));
+  const card = status === 200 && body !== null && typeof body === 'object' && 'cardInvokeResponse' in body ? cardInvokeResponse(body.cardInvokeResponse) : undefined;
+  const text = JSON.stringify(card ?? invoke ?? (accepted ? { status: (body as { status: string }).status } : { error: 'Request rejected' }));
   res.writeHead(status, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(text), 'Connection': 'close' });
   res.end(text);
 }

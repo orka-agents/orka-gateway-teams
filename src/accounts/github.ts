@@ -7,6 +7,7 @@ import { tlsVerificationEnabled } from '../ingress/config.js';
 import { object as fields } from '../storage/table/codec.js';
 import { githubTools } from './grants.js';
 import type { GitHubTool } from './grants.js';
+import type { ProposalFacts } from './pull-request-proposal.js';
 
 export class GitHubError extends Error { constructor(readonly code = 'unavailable') { super('GitHub sign-in unavailable'); } }
 export function githubArguments(tool: GitHubTool, input: unknown): Record<string, string> {
@@ -22,7 +23,11 @@ export function githubArguments(tool: GitHubTool, input: unknown): Record<string
   if (!/^[A-Za-z0-9-]+$/u.test(out.owner!) || !/^[A-Za-z0-9_.-]+$/u.test(out.repo!) || ['.', '..'].includes(out.repo!)) throw failure();
   for (const key of keys) text(key, key === 'body' ? 16384 : key === 'path' ? 1024 : 256, ['body', 'ref', 'state'].includes(key));
   if (tool === 'github-read-file' && (out.path!.includes('\\') || out.path!.split('/').some(s => !s || s === '.' || s === '..'))) throw failure();
-  if (out.state !== undefined && !['open', 'closed', 'all'].includes(out.state)) throw failure(); return out;
+  if (out.state !== undefined && !['open', 'closed', 'all'].includes(out.state)) throw failure();
+  if (tool === 'github-propose-pull-request') for (const ref of [out.base!, out.head!]) {
+    if (!/^[A-Za-z0-9_][A-Za-z0-9._/-]*$/u.test(ref) || /\.\.|\/\/|@\{|\/$|\.$|\.lock(?:\/|$)/u.test(ref)) throw failure();
+  }
+  return out;
 }
 
 const failure = () => new GitHubError();
@@ -101,8 +106,43 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
   }
   return {
     safeOutput: (text: string) => !text.includes(config.clientSecret),
+    readProposalFacts(args: Record<string, string>, token: string, ctx: DirectoryContext): Promise<ProposalFacts> {
+      const pending = (async () => {
+        active(ctx); if (!credential(token) || work.size >= 4) throw failure(); githubArguments('github-propose-pull-request', args);
+        const root = `/repos/${encodeURIComponent(args.owner!)}/${encodeURIComponent(args.repo!)}`;
+        const get = async (path: string) => { const v = await json(token, {}, ctx, { path }); active(ctx); if (!object(v)) throw failure(); return v; };
+        const sha = (v: unknown) => { if (typeof v !== 'string' || !/^[a-f0-9]{40}$/u.test(v)) throw failure(); return v; };
+        const count = (v: unknown) => { if (!Number.isSafeInteger(v) || (v as number) < 0) throw failure(); return v as number; };
+        const user = await get('/user');
+        if (!Number.isSafeInteger(user.id) || (user.id as number) <= 0 || typeof user.login !== 'string' || !/^[A-Za-z0-9-]{1,39}$/u.test(user.login)) throw failure();
+        const ref = await get(`${root}/git/ref/heads/${args.head!.split('/').map(encodeURIComponent).join('/')}`);
+        if (ref.ref !== `refs/heads/${args.head}` || !object(ref.object) || ref.object.type !== 'commit') throw failure();
+        const headSHA = sha(ref.object.sha);
+        const first = await get(`${root}/compare/${encodeURIComponent(args.base!)}...${headSHA}?per_page=100&page=1`);
+        if (!object(first.base_commit)) throw failure(); const baseSHA = sha(first.base_commit.sha); const total = count(first.total_commits);
+        if (!total) throw failure(); let checked = 0;
+        const authors = (v: Record<string, unknown>) => {
+          if (v.total_commits !== total || !Array.isArray(v.commits) || v.commits.length !== Math.min(100, total - checked)) throw failure();
+          for (const c of v.commits) {
+            if (!object(c) || !object(c.commit) || !object(c.commit.author) || c.commit.author.name !== 'Orka Publisher' || c.commit.author.email !== 'publisher@orka.ai') throw failure();
+          }
+          checked += v.commits.length;
+        };
+        authors(first);
+        while (checked < total) authors(await get(`${root}/compare/${baseSHA}...${headSHA}?per_page=100&page=${checked / 100 + 1}`));
+        if (!Array.isArray(first.files) || first.files.length > 300) throw failure(); let additions = 0; let deletions = 0;
+        const files = first.files.map(file => {
+          if (!object(file) || typeof file.filename !== 'string' || !file.filename || Buffer.byteLength(file.filename) > 4096 || /[\p{Cc}\uD800-\uDFFF]/u.test(file.filename)) throw failure();
+          const a = count(file.additions); const d = count(file.deletions); additions = count(additions + a); deletions = count(deletions + d);
+          return { path: file.filename, additions: a, deletions: d };
+        });
+        return { headSHA, baseSHA, githubId: String(user.id), githubLogin: user.login, commits: total, files: files.slice(0, 10),
+          fileCount: files.length, additions, deletions, filesComplete: files.length < 300 };
+      })().catch((e: unknown) => { throw e instanceof GitHubError ? e : failure(); });
+      work.add(pending); void pending.then(() => work.delete(pending), () => work.delete(pending)); return pending;
+    },
     tool(tool: GitHubTool, input: unknown, token: string, ctx: DirectoryContext): Promise<{ text: string }> {
-      try { active(ctx); if (!githubTools.includes(tool) || !credential(token) || work.size >= 4) throw failure(); } catch { return Promise.reject(failure()); }
+      try { active(ctx); if (tool === 'github-propose-pull-request' || !githubTools.includes(tool) || !credential(token) || work.size >= 4) throw failure(); } catch { return Promise.reject(failure()); }
       const pending = (async () => {
         const args = githubArguments(tool, input); const root = `/repos/${encodeURIComponent(args.owner!)}/${encodeURIComponent(args.repo!)}`;
         let path: string; let body: Record<string, string> | undefined;

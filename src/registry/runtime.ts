@@ -1,3 +1,4 @@
+import { createPullRequestService } from '../accounts/pull-request-service.js';
 import { createGitHub } from '../accounts/github.js';
 import { readRegistryFile } from './files.js';
 import { createAccountStore } from '../accounts/store.js';
@@ -141,7 +142,10 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
       accounts = createAccountStore({ account: shared.config.storage.account, table: config.sso.accountTable,
         appId: shared.config.scope.appId, tenantId: shared.config.scope.tenantId }, key!,
       { token: provider.token, ...(deps.tableRequest ? { request: deps.tableRequest } : {}) }, authority); key!.fill(0);
-      tasks = createTaskService({ accounts, auth: delegatedAuth!, authority,
+      const proposals = github && githubAccounts ? createPullRequestService({ accounts, githubAccounts, github,
+        scope: { appId: shared.config.scope.appId, tenantId: shared.config.scope.tenantId },
+        postProposal: (p, ctx) => admission ? admission.postProposal(p, ctx) : Promise.resolve('unavailable') }) : undefined;
+      tasks = createTaskService({ accounts, auth: delegatedAuth!, authority, ...(proposals ? { proposals } : {}),
         ...(github && githubAccounts ? { github: { accounts: githubAccounts, auth: github } } : {}),
         targets: config.targets.map(t => ({ id: t.id, gatewayUid: t.gatewayUid, identityDigest: t.identityDigest!, taskPassToken: t.taskPassToken! })),
         privateCredentials: config.targets.flatMap(t => [t.config.bearerToken, t.config.outbound!.bearerToken]),
@@ -149,6 +153,8 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
         log: category => { process.stderr.write(`teams-ingress: ${category}\n`); } });
     }
     admission = createRegistryAdmission({ config, directory, authority, active, authorizer,
+      safeOutput: text => !config.targets.some(t => [t.taskPassToken, t.config.bearerToken, t.config.outbound!.bearerToken,
+        t.config.receiver.clientSecret].some(s => s && text.includes(s))),
       ...(github && githubAccounts ? { github: { accounts: githubAccounts, auth: github } } : {}),
       ...(accounts && delegatedAuth && config.sso ? { delegated: { accounts, auth: delegatedAuth, apiUri: config.sso.apiUri, connectionName: config.sso.connectionName,
         ...(config.sso.publicOrigin ? { publicOrigin: config.sso.publicOrigin } : {}) } } : {}),

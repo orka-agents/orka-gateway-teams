@@ -12,6 +12,8 @@ import { startReceiver } from '../src/ingress/server.js';
 import { initializeIngressStore, openIngressStore } from '../src/ingress/store.js';
 import { activity, authFixture, deferred, post, receiverConfig, scope, serviceUrl } from './support/ingress-auth.js';
 import { expectedEvent } from './fixtures/incoming.js';
+import { buildPullRequestCard } from '../src/teams/pull-request-card.js';
+import { proposalFixture } from './support/pull-request-proposal.js';
 
 test('SDK registered HTTP route verifies a real signature and durably admits the original personal event', async (t) => {
   const auth = await authFixture(t);
@@ -324,4 +326,21 @@ test('native HTTP parser rejects oversized/compressed/malformed UTF8 JSON and ov
     socket.on('data', (chunk) => { response += chunk.toString(); }); socket.on('end', () => resolve(response)); socket.on('error', reject);
   });
   assert.match(oversized, /^HTTP\/1.1 400/); assert.equal(store.claim(), undefined);
+});
+
+test('card_invoke_actual_wire_body_preserved and extra_card_wrapper_fields_never_escape_projection', async t => {
+  const auth = await authFixture(t); const card = buildPullRequestCard(proposalFixture(), 'sender', false); let invoked = 0;
+  let value: unknown = { statusCode: 200, type: 'application/vnd.microsoft.card.adaptive', value: card, secret: 'INNER_PRIVATE' };
+  const receiver = await startReceiver(receiverConfig, { scope, admit() { throw new Error('not a message'); },
+    cardAction: async (_input, ctx) => { assert.equal(ctx.subject.objectId, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'); invoked++;
+      return { status: 200, body: { cardInvokeResponse: value, secret: 'OUTER_PRIVATE' } }; } }, auth.dependencies);
+  t.after(() => receiver.stop());
+  const body = activity(); Object.assign(body, { type: 'invoke', name: 'adaptiveCard/action', value: { action: { type: 'Action.Execute', verb: 'pr-refresh', data: {} } } });
+  body.from.aadObjectId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const response = await post(receiver.port, auth.token(), body); assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { statusCode: 200, type: 'application/vnd.microsoft.card.adaptive', value: card });
+  value = { statusCode: 200, type: 'application/vnd.microsoft.card.adaptive', value: { ...card, body: [{ type: 'TextBlock', text: 'x'.repeat(21000) }] } };
+  const oversized = await post(receiver.port, auth.token(), body); assert.ok(!(await oversized.text()).includes('x'.repeat(100)));
+  const before = invoked; assert.equal((await post(receiver.port, auth.token({ aud: 'wrong-app' }), body)).status, 401); assert.equal(invoked, before);
+  assert.equal((await post(receiver.port, auth.token(), { ...body, conversation: { ...body.conversation, tenantId: 'other' } })).status, 403);
 });

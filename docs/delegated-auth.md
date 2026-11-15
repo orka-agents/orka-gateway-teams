@@ -188,7 +188,9 @@ Rotation requires a drained restart at both ends.
 Admission saves an encrypted grant before admitting work. It binds the sender,
 Work IQ account generation, target routing identity, event and `workiq` tool.
 With GitHub configured, the same Work IQ-owned grant also freezes the GitHub
-generation and all four supported GitHub tool names. Generation0 means unlinked:
+generation and the supported GitHub tool names. Only new grants include
+`github-propose-pull-request` and the authenticated proposal reply origin;
+stored historical grants retain their exact tool arrays. Generation0 means unlinked:
 a mixed-tool Agent can still use Work IQ, but that Task cannot adopt a later
 GitHub link. A positive frozen GitHub generation must remain usable for issuance
 and calls. GitHub calls select only that sender's original generation; no parallel
@@ -292,6 +294,7 @@ Each Tool must use its exact name and fixed gateway endpoint, with
 | `github-list-issues` | `read` | `/v1/task-tools/github-list-issues` | `owner`, `repo`, optional `state` (`open`, `closed`, `all`) |
 | `github-create-issue` | `write` | `/v1/task-tools/github-create-issue` | `owner`, `repo`, `title`, optional `body` |
 | `github-create-pull-request` | `write` | `/v1/task-tools/github-create-pull-request` | `owner`, `repo`, `title`, `head`, `base`, optional `body` |
+| `github-propose-pull-request` | `write` | `/v1/task-tools/github-propose-pull-request` | `owner`, `repo`, `title`, `head`, `base`, optional `body` |
 
 For example, the create-issue Tool's spec contains:
 
@@ -308,7 +311,7 @@ version that field is honored only with `spec.coordination.enabled: true` and
 `spec.coordination.autonomous: true`. Keep those controller-side approval settings
 with the reviewed Agent configuration. The gateway trusts that controller's
 approved operation; it does not receive or independently verify an approval flag.
-The ordinary Agent tool set may include `workiq` and all four GitHub tools together.
+The ordinary Agent tool set may include `workiq` and the GitHub tools together.
 There is no requirement to split providers across Agents. Configure only the
 reviewed tools and retain the controller-only pass credential boundary above.
 
@@ -326,7 +329,8 @@ Owner/repo are bounded ASCII repository components; path is at most1024 UTF8 byt
 title/ref/head/base256 bytes, and body16KiB. Bodies permit TAB/CR/LF; other controls,
 unknown fields and identity/credential/URL/header arguments are refused.
 
-The controller's unique `Idempotency-Key` header identifies each reviewed write.
+For the two direct create tools, the controller's unique `Idempotency-Key`
+header identifies each reviewed write.
 It is not a JSON argument. The gateway preserves its non-control UTF8 bytes
 (up to256), including multibyte keys, and hashes them with the grant reference
 and tool. Child operations also include the issuing child Task UID, so roots and
@@ -369,6 +373,43 @@ arguments and provider errors never enter the write record's plaintext fields or
 Task output. Reservations/results are encrypted with the existing account key;
 retained operation history has no pruning/reset command. Started external calls
 may finish despite cancellation; an unknown outcome is not permission to resend.
+
+### Pull-request proposal preview
+
+`github-propose-pull-request` posts a read-only proposal card, never a GitHub PR.
+Use it instead of `github-create-pull-request` when the sender should review the
+proposal in Teams. It is brokered `write` because it posts to the conversation;
+do **not** put it in `approvalRequiredTools`. Contents read suffices for its branch
+and comparison reads; Pull requests write is needed only for direct PR creation
+or a future approval handler. Contents write stays off. No Agent YAML is changed
+automatically, and a historical grant cannot gain the tool or a missing origin.
+
+Only same-repository head/base refs are accepted. The gateway reads `/user`, pins
+the head SHA, and verifies every compared git author is
+`Orka Publisher <publisher@orka.ai>`, including later commit pages. The card shows
+verified counts, up to ten file previews, agent-labelled title/description and a
+compare link pinned to both verified SHAs. Large filenames may reduce the retained
+preview count to fit the encrypted document budget; the card shows “+N more”. At the 300-file API boundary, returned file/line totals
+are explicitly incomplete. Long labels/descriptions are visibly truncated to
+preserve the existing 20 KiB message budget; full diffs and patches are not stored.
+
+Proposals are encrypted and expire 60 minutes after durable preparation. A new
+proposal replaces the sender's previous pending proposal in that conversation.
+The operation header deduplicates the proposal and its control-send receipt,
+separately from direct GitHub-write reservations. Replay returns frozen facts;
+an armed or unknown card send is never resent, including after restart. An
+unconfirmed arrival is reported honestly, not as a successful send.
+
+The shared card and sender refresh both say “Approval actions are not enabled
+yet”; neither offers Approve, Reject or Revise. Authenticated `pr-refresh` checks
+the current conversation, target and policy. Other allowed room members receive
+a read-only view. Refresh derives expiry/replacement from durable state, but live
+Teams per-user refresh and displayed-card replacement still need qualification.
+
+Older strict account/directory readers do not understand proposal rows and
+`pr-approval` controls. Draining controls alone does not make downgrade safe:
+retain a compatible binary for stored proposals. There is no automatic history
+deletion or migration/reset command.
 
 ## Lifetime, restart and disconnect
 
