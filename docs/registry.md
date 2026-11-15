@@ -156,7 +156,11 @@ Every target uses `/targets/<id>/v1/deliveries`,
 with that target's distinct callback bearer. Unprefixed delivery/health/capabilities routes are not registered
 in multi-target mode. SSO-enabled registries separately expose the unprefixed
 `/v1/task-passes` and `/v1/task-tools/workiq` routes with controller/pass-only
-authentication; callback bearers cannot use those routes. Configure each Orka's
+authentication; callback bearers cannot use those routes. Task-pass issuance accepts
+an optional `parentTaskUID` for narrower child bindings under the same retained
+grant and authenticated Orka; roots keep their existing request shape. See
+[Task authority and child bindings](delegated-auth.md#root-task-tools)
+for parent linkage, original namespace semantics and exact reacquisition. Configure each Orka's
 callback base accordingly. These are on the shared outbound listener, not the
 SDK's `/api/messages` listener. A slot's bearer cannot authorize another slot's
 path. Authentication precedes body parsing, readiness and storage; unknown paths

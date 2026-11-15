@@ -8,7 +8,7 @@ export const writeTool = (tool: string) => tool === 'github-create-issue' || too
 export function operationKey(value: unknown): string {
   if (typeof value !== 'string' || !value || Buffer.byteLength(value) > 256 || /[\p{Cc}\uD800-\uDFFF]/u.test(value)) throw new Error('Invalid operation'); return value;
 }
-export interface GrantBinding { namespaceUID: string; gatewayUID: string; taskUID: string; tools: string[]; deadline: number }
+export interface GrantBinding { namespaceUID: string; gatewayUID: string; taskUID: string; tools: string[]; deadline: number; parentTaskUID?: string }
 export interface TaskGrant {
   ref: string; objectId: string; generation: number; provider: 'workiq'; targetId: string; targetDigest: string; eventId: string;
   tools: string[]; binding?: GrantBinding; githubGeneration?: number;
@@ -26,13 +26,16 @@ export function grantTools(input: unknown): string[] {
   return [...new Set(input as string[])].sort();
 }
 export function grantBinding(input: unknown): GrantBinding {
-  const v = object(input, ['namespaceUID', 'gatewayUID', 'taskUID', 'tools', 'deadline']);
+  const v = object(input, ['namespaceUID', 'gatewayUID', 'taskUID', 'tools', 'deadline', 'parentTaskUID']);
   return { namespaceUID: identity(v.namespaceUID), gatewayUID: identity(v.gatewayUID), taskUID: identity(v.taskUID),
-    tools: grantTools(v.tools), deadline: integer(v.deadline, 1, Number.MAX_SAFE_INTEGER) };
+    tools: grantTools(v.tools), deadline: integer(v.deadline, 1, Number.MAX_SAFE_INTEGER),
+    ...(v.parentTaskUID === undefined ? {} : { parentTaskUID: identity(v.parentTaskUID) }) };
 }
 export function taskGrant(input: unknown): TaskGrant {
   const v = object(input, ['ref', 'objectId', 'generation', 'provider', 'targetId', 'targetDigest', 'eventId', 'tools', 'binding', 'githubGeneration']);
   if (v.provider !== 'workiq') throw new Error('Invalid provider');
+  // Inline bindings are legacy roots; child authority lives in separate immutable rows.
+  if (v.binding !== undefined) object(v.binding, ['namespaceUID', 'gatewayUID', 'taskUID', 'tools', 'deadline']);
   return { ref: grantRef(v.ref), objectId: identity(v.objectId), generation: integer(v.generation, 1, Number.MAX_SAFE_INTEGER), provider: 'workiq',
     targetId: identity(v.targetId), targetDigest: grantRef(v.targetDigest), eventId: identity(v.eventId), tools: grantTools(v.tools),
     ...(v.githubGeneration === undefined ? {} : { githubGeneration: integer(v.githubGeneration, 0, Number.MAX_SAFE_INTEGER) }),

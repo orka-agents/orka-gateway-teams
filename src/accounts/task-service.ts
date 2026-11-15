@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { DirectoryContext } from '../directory/types.js';
 import { object } from '../storage/table/codec.js';
+import { canonicalJSON } from '../directory/codec.js';
 import type { LeaseAuthority } from '../storage/table/types.js';
 import type { TaskGrant } from './grants.js';
 import { grantBinding, grantRef, githubTools, writeTool, operationKey } from './grants.js';
@@ -58,16 +59,17 @@ export function createTaskService(options: {
   }
   async function issue(token: string, input: unknown, ctx: DirectoryContext): Promise<TaskReply> {
     const target = targetFor(token); if (!target) return refusal('tool-unavailable', 401);
-    const v = object(input, ['protocolVersion', 'grantRef', 'namespaceUID', 'gatewayUID', 'taskUID', 'tools', 'deadline']);
+    const v = object(input, ['protocolVersion', 'grantRef', 'namespaceUID', 'gatewayUID', 'taskUID', 'tools', 'deadline', 'parentTaskUID']);
     if (v.protocolVersion !== 'orka.gateway.v1' || v.gatewayUID !== target.gatewayUid) return refusal();
-    const binding = grantBinding({ namespaceUID: v.namespaceUID, gatewayUID: v.gatewayUID, taskUID: v.taskUID, tools: v.tools, deadline: deadline(v.deadline) });
+    const binding = grantBinding({ namespaceUID: v.namespaceUID, gatewayUID: v.gatewayUID, taskUID: v.taskUID, tools: v.tools, deadline: deadline(v.deadline),
+      ...(v.parentTaskUID === undefined ? {} : { parentTaskUID: v.parentTaskUID }) });
     const ref = grantRef(v.grantRef); const grant = await options.accounts.getGrant(ref, ctx);
     if (!grant || grant.targetId !== target.id || grant.targetDigest !== target.identityDigest || binding.deadline <= now() ||
       grant.githubGeneration && !await githubLive(grant, ctx)) return refusal();
     try { await options.accounts.bindGrant(ref, target.id, binding, ctx); }
     catch (e) { if (e instanceof AccountError && e.code === 'conflict') options.log?.('grant-binding-conflict'); throw e; }
     if (!await options.authority.revalidate() || !active(ctx)) return refusal();
-    const bound = await options.accounts.getGrant(ref, ctx); if (!bound?.binding || !active(ctx) || bound.githubGeneration && !await githubLive(bound, ctx)) return refusal();
+    const bound = await options.accounts.getGrant(ref, ctx, binding.taskUID); if (!bound?.binding || !active(ctx) || bound.githubGeneration && !await githubLive(bound, ctx)) return refusal();
     purge(); if (passes.size >= 1024) return refusal('tool-unavailable', 503);
     // Orka checks the five-minute cap against its own clock at receipt.
     const expiresAt = Math.min(now() + 290_000, binding.deadline); if (expiresAt <= now()) return refusal();
@@ -85,11 +87,11 @@ export function createTaskService(options: {
     const ctx = { ...supplied, deadline: Math.min(supplied.deadline, performance.now() + frozen.binding!.deadline - now()),
       authorizeWrite: () => active(supplied) && pass.expiresAt > now() && frozen.binding!.deadline > now() && guards.every(g => g.active()) };
     const live = async () => {
-      const grant = await options.accounts.getGrant(frozen.ref, ctx);
+      const grant = await options.accounts.getGrant(frozen.ref, ctx, frozen.binding!.taskUID);
       if (!grant?.binding || grant.generation !== frozen.generation || grant.githubGeneration !== frozen.githubGeneration ||
-        grant.binding.taskUID !== frozen.binding!.taskUID || !grant.binding.tools.includes(tool)) return false;
+        canonicalJSON(grant.binding) !== canonicalJSON(frozen.binding!) || !grant.binding.tools.includes(tool)) return false;
       if (tool === 'workiq' && grant.githubGeneration && !await githubLive(grant, ctx)) return false;
-      if (!await options.accounts.getGrant(frozen.ref, ctx)) return false;
+      if (!await options.accounts.getGrant(frozen.ref, ctx, frozen.binding!.taskUID)) return false;
       // Table reads remain authoritative; local guards fence both providers through native handoff.
       if (tool !== 'workiq' && grant.githubGeneration && !await githubLive(grant, ctx)) return false;
       return active(ctx) && pass.expiresAt > now() && frozen.binding!.deadline > now();
