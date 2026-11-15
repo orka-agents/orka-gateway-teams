@@ -246,6 +246,8 @@ function delegatedFixture() {
   let gate: Promise<void> | undefined; let consumed = false;
   const attempt = { challenge: ch, state: 'synthetic-private-state', nonce: 'synthetic-private-nonce', verifier: 'synthetic-private-verifier' };
   const accounts = {
+    getProposal: async () => undefined, reserveProposal: async () => { throw new Error('not a proposal'); },
+    replaceProposal: async () => { throw new Error('not a proposal'); },
     reserveGrant: async (input: TaskGrant) => input,
     getGrant: async (_ref: string) => undefined as TaskGrant | undefined,
     watch: () => { throw new Error('not a tool handoff'); },
@@ -284,9 +286,11 @@ test('delegated admission reserves sender generation before inbox and refuses im
   const d = delegatedFixture(); await d.delegated.accounts.complete(); const f = await fixture(t, 2, d.delegated); await f.provision();
   const reserved: TaskGrant[] = [];
   d.delegated.accounts.reserveGrant = async input => { assert.equal(f.admitted.length, 0); reserved.push(input); return input; };
-  assert.equal((await f.run('work')).kind, 'accepted'); assert.equal(reserved.length, 1);
+  assert.equal((await f.run('work', 'proposal-origin-activity')).kind, 'accepted'); assert.equal(reserved.length, 1);
   assert.deepEqual(reserved[0], { ref: grantReference(f.scope, f.config.targets[0]!, f.event.externalEventId, f.event.replyTarget!), objectId: d.ch.objectId,
-    generation: 1, provider: 'workiq', targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest, eventId: f.event.externalEventId, tools: ['workiq'] });
+    generation: 1, provider: 'workiq', targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest, eventId: f.event.externalEventId, tools: ['workiq'],
+    proposalOrigin: { conversationId: f.event.contextId, replyTarget: f.event.replyTarget!, route: f.route,
+      senderMRI: '29:fixture-person', objectId: d.ch.objectId, displayName: 'Example Person', activityId: 'proposal-origin-activity' } });
   d.delegated.accounts.reserveGrant = async () => { throw new AccountError('conflict'); };
   assert.equal((await f.run('retry')).kind, 'conflict'); assert.equal(f.admitted.length, 1);
   assert.equal((await f.sink.admit(f.event, f.route, { ...context(), delegatedTenant: true, controlRecipient: { id: '29:p' },

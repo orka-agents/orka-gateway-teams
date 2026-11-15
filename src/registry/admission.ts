@@ -233,6 +233,8 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
               await accounts.reserveGrant({ ref: grantReference(scope, slot.target, event.externalEventId, event.replyTarget!), objectId: subject.objectId,
                 generation: account.generation, provider: 'workiq', targetId: slot.target.id, targetDigest: slot.target.identityDigest!,
                 eventId: event.externalEventId, tools: ['workiq', ...(options.github ? githubTools : [])],
+                proposalOrigin: { conversationId: event.contextId, replyTarget: event.replyTarget!, route: structuredClone(route),
+                  senderMRI: context.controlRecipient!.id, objectId: subject.objectId, displayName: event.sender.displayName ?? '', activityId: context.activityId },
                 ...(options.github ? { githubGeneration: github?.linked ? github.generation : 0 } : {}) }, ctx); assertActive(ctx);
             } catch (error) { if (error instanceof AccountError && error.code === 'conflict') return { kind: 'conflict' }; throw error; }
           }

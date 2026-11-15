@@ -1,17 +1,19 @@
 import { createHash } from 'node:crypto';
 import { identity } from '../ingress/codec.js';
 import { integer, object } from '../storage/table/codec.js';
+import { proposalOrigin } from './pull-request-proposal.js';
+import type { ProposalOrigin } from './pull-request-proposal.js';
 
-export const githubTools = ['github-read-file', 'github-list-issues', 'github-create-issue', 'github-create-pull-request'] as const;
+export const githubTools = ['github-read-file', 'github-list-issues', 'github-create-issue', 'github-create-pull-request', 'github-propose-pull-request'] as const;
 export type GitHubTool = typeof githubTools[number];
-export const writeTool = (tool: string) => tool === 'github-create-issue' || tool === 'github-create-pull-request';
+export const writeTool = (tool: string) => tool === 'github-create-issue' || tool === 'github-create-pull-request' || tool === 'github-propose-pull-request';
 export function operationKey(value: unknown): string {
   if (typeof value !== 'string' || !value || Buffer.byteLength(value) > 256 || /[\p{Cc}\uD800-\uDFFF]/u.test(value)) throw new Error('Invalid operation'); return value;
 }
 export interface GrantBinding { namespaceUID: string; gatewayUID: string; taskUID: string; tools: string[]; deadline: number; parentTaskUID?: string }
 export interface TaskGrant {
   ref: string; objectId: string; generation: number; provider: 'workiq'; targetId: string; targetDigest: string; eventId: string;
-  tools: string[]; binding?: GrantBinding; githubGeneration?: number;
+  tools: string[]; binding?: GrantBinding; githubGeneration?: number; proposalOrigin?: ProposalOrigin;
 }
 export function grantReference(scope: { appId: string; tenantId: string }, target: { id: string; identityDigest?: string }, eventId: string, replyTarget: string): string {
   // Only the winning inbox candidate can use its grant; a redelivery has a fresh reply target.
@@ -32,12 +34,13 @@ export function grantBinding(input: unknown): GrantBinding {
     ...(v.parentTaskUID === undefined ? {} : { parentTaskUID: identity(v.parentTaskUID) }) };
 }
 export function taskGrant(input: unknown): TaskGrant {
-  const v = object(input, ['ref', 'objectId', 'generation', 'provider', 'targetId', 'targetDigest', 'eventId', 'tools', 'binding', 'githubGeneration']);
+  const v = object(input, ['ref', 'objectId', 'generation', 'provider', 'targetId', 'targetDigest', 'eventId', 'tools', 'binding', 'githubGeneration', 'proposalOrigin']);
   if (v.provider !== 'workiq') throw new Error('Invalid provider');
   // Inline bindings are legacy roots; child authority lives in separate immutable rows.
   if (v.binding !== undefined) object(v.binding, ['namespaceUID', 'gatewayUID', 'taskUID', 'tools', 'deadline']);
   return { ref: grantRef(v.ref), objectId: identity(v.objectId), generation: integer(v.generation, 1, Number.MAX_SAFE_INTEGER), provider: 'workiq',
     targetId: identity(v.targetId), targetDigest: grantRef(v.targetDigest), eventId: identity(v.eventId), tools: grantTools(v.tools),
+    ...(v.proposalOrigin === undefined ? {} : { proposalOrigin: proposalOrigin(v.proposalOrigin) }),
     ...(v.githubGeneration === undefined ? {} : { githubGeneration: integer(v.githubGeneration, 0, Number.MAX_SAFE_INTEGER) }),
     ...(v.binding === undefined ? {} : { binding: grantBinding(v.binding) }) };
 }
