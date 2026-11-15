@@ -27,9 +27,10 @@ type Challenge = AccountChallenge & { kind: 'challenge'; ownerUUID?: string;
   browser?: { state: string; nonce: string; verifier: string; consumed: boolean; cookieDigest?: string };
   github?: { state: string; verifier: string; cookieDigest: string; consumed: boolean } };
 type Grant = TaskGrant & { kind: 'grant' };
+type Binding = { kind: 'binding'; ref: string; objectId: string; generation: number; binding: GrantBinding };
 type Write = { kind: 'write'; id: string; ref: string; tool: string; objectId: string; generation: number; githubGeneration: number;
   argsDigest: string; ownerUUID: string; state: 'reserved' | 'done'; text?: string };
-type Document = Account | Challenge | Grant | Write;
+type Document = Account | Challenge | Grant | Binding | Write;
 // The native transport cannot accept a plaintext document or a token-bearing value.
 type Ciphertext = { generation: number; ciphertext: Buffer };
 type CipherRow = { row: string; etag: string; value: Ciphertext };
@@ -72,8 +73,10 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     uuid(id.slice(65)); return challengeKey(id.slice(0, 64));
   };
   const grantKey = (ref: string) => ({ row: `grant_${grantRef(ref)}` });
+  const bindingKey = (ref: string, taskUID: string) => ({ row: `binding_${hash(['teams-task-binding-v1', grantRef(ref), identity(taskUID)])}` });
   const writeKey = (id: string) => ({ row: `write_${grantRef(id)}` });
-  const docKey = (v: Document) => v.kind === 'account' ? accountKey(v.objectId) : v.kind === 'grant' ? grantKey(v.ref) : v.kind === 'write' ? writeKey(v.id) : idKey(v.id);
+  const docKey = (v: Document) => v.kind === 'account' ? accountKey(v.objectId) : v.kind === 'grant' ? grantKey(v.ref) :
+    v.kind === 'binding' ? bindingKey(v.ref, v.binding.taskUID) : v.kind === 'write' ? writeKey(v.id) : idKey(v.id);
   function validTokens(input: unknown): AccountTokens {
     const v = object(input, ['accessToken', 'expiresAt', 'refreshToken', 'assertion', 'assertionExpiresAt',
       ...(provider === 'github' ? ['providerUserId', 'refreshExpiresAt'] : [])]);
@@ -96,6 +99,9 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
       if (v.challengeId !== undefined) idKey(v.challengeId);
     } else if (v.kind === 'grant') {
       const { kind: _kind, ...grant } = v; taskGrant(grant);
+    } else if (v.kind === 'binding') {
+      object(v, ['kind', 'ref', 'objectId', 'generation', 'binding']); grantRef(v.ref);
+      if (!grantBinding(v.binding).parentTaskUID) bad();
     } else if (v.kind === 'write') {
       object(v, ['kind', 'id', 'ref', 'tool', 'objectId', 'generation', 'githubGeneration', 'argsDigest', 'ownerUUID', 'state', 'text']);
       grantRef(v.id); grantRef(v.ref); grantRef(v.argsDigest); uuid(v.ownerUUID); integer(v.githubGeneration, 1, Number.MAX_SAFE_INTEGER);
@@ -155,7 +161,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         const v = object(input, [...Object.keys(types), ...Object.keys(types).map(k => `${k}@odata.type`),
           'odata.etag', 'odata.metadata', 'odata.id', 'odata.editLink', 'odata.editlink', 'odata.type']);
         for (const [k, type] of Object.entries(types)) if (v[`${k}@odata.type`] !== undefined && v[`${k}@odata.type`] !== type) bad();
-        if (v.PartitionKey !== partition || typeof v.RowKey !== 'string' || !/^(?:account|challenge|grant|write)_[a-f0-9]{64}$/u.test(v.RowKey) ||
+        if (v.PartitionKey !== partition || typeof v.RowKey !== 'string' || !/^(?:account|challenge|grant|binding|write)_[a-f0-9]{64}$/u.test(v.RowKey) ||
           (expected && v.RowKey !== expected.row) || v.V !== 1 || v.Armed !== false || v['Payload@odata.type'] !== 'Edm.Binary' ||
           typeof v.Payload !== 'string' || v.Payload.length > 66_000) bad();
         const data = Buffer.from(v.Payload, 'base64');
@@ -231,6 +237,17 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     const account = await read(accountKey(row.value.objectId), c);
     return account?.value.kind === 'account' && account.value.generation === row.value.generation && usable(account.value) ? row : undefined;
   }
+  async function selectedGrant(ref: string, c: DirectoryContext, taskUID?: string): Promise<TaskGrant | undefined> {
+    const row = await liveGrant(ref, c); if (row?.value.kind !== 'grant') return undefined;
+    const grant = publicGrant(row.value);
+    if (taskUID === undefined) return grant;
+    if (!grant.binding) return undefined;
+    if (grant.binding.taskUID === taskUID) return grant;
+    const child = (await read(bindingKey(ref, taskUID), c))?.value;
+    if (child?.kind !== 'binding' || child.ref !== ref || child.objectId !== grant.objectId || child.generation !== grant.generation ||
+      child.binding.taskUID !== taskUID || child.binding.namespaceUID !== grant.binding.namespaceUID || child.binding.gatewayUID !== grant.binding.gatewayUID) return undefined;
+    return { ...grant, binding: child.binding };
+  }
   return {
     /** Local await-gap fence only; callers must still validate authoritative Table generations. */
     watch(subject: AccountSubject): { active(): boolean; release(): void } {
@@ -256,8 +273,8 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         return publicGrant(saved.value as Grant);
       });
     },
-    getGrant(ref: string, ctx: DirectoryContext): Promise<TaskGrant | undefined> {
-      return run(ctx, async c => { const row = await liveGrant(ref, c); return row && publicGrant(row.value as Grant); });
+    getGrant(ref: string, ctx: DirectoryContext, taskUID?: string): Promise<TaskGrant | undefined> {
+      return run(ctx, c => selectedGrant(ref, c, taskUID));
     },
     safeGrantOutput(ref: string, text: string, ctx: DirectoryContext): Promise<boolean> {
       return run(ctx, async c => {
@@ -309,6 +326,20 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         if (binding.deadline <= now()) bad('invalid-input');
         const row = await liveGrant(ref, c); const v = row?.value;
         if (!row || v?.kind !== 'grant' || v.targetId !== targetId || binding.tools.some(t => !v.tools.includes(t))) bad('conflict');
+        if (binding.parentTaskUID !== undefined) {
+          if (!v.binding || binding.taskUID === v.binding.taskUID || binding.taskUID === binding.parentTaskUID) bad('conflict');
+          const parent = await selectedGrant(ref, c, binding.parentTaskUID);
+          if (!parent?.binding || parent.binding.namespaceUID !== binding.namespaceUID || parent.binding.gatewayUID !== binding.gatewayUID ||
+            binding.deadline > parent.binding.deadline || binding.tools.some(t => !parent.binding!.tools.includes(t))) bad('conflict');
+          const value: Binding = { kind: 'binding', ref, objectId: v.objectId, generation: v.generation, binding };
+          const same = (g: Document) => canonicalJSON(g) === canonicalJSON(value);
+          const previous = await read(bindingKey(ref, binding.taskUID), c);
+          if (previous && !same(previous.value)) bad('conflict');
+          // Insert-only links to already-bound parents make cycles impossible, including concurrent inserts.
+          const saved = previous ?? await persist(undefined, value, c, same);
+          if (!same(saved.value) || !await liveGrant(ref, c)) bad('conflict');
+          return { ...publicGrant(v), binding };
+        }
         const same = (g: Document) => g.kind === 'grant' && canonicalJSON(g) === canonicalJSON({ ...v, binding });
         if (v.binding && !same(v)) bad('conflict');
         const saved = v.binding ? row : await persist(row, { ...v, binding }, c, same);

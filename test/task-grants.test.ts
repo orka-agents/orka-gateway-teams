@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { grantReference } from '../src/accounts/grants.js';
+import { grantReference, taskGrant } from '../src/accounts/grants.js';
 import { binding, context } from './support/directory-table.js';
 
 const epoch = 1_800_000_000_000;
@@ -71,6 +71,67 @@ test('mixed provider generation is immutable while old Work IQ-only grants retai
   const saved = await f.store.reserveGrant(mixed, context()); assert.equal(saved.githubGeneration, 0); assert.equal(saved.tools.length, 5);
   await assert.rejects(f.store.reserveGrant({ ...mixed, githubGeneration: 2 }, context()), /conflict/);
   await f.store.close(); assert.deepEqual(await f.open().getGrant(f.input.ref, context()), saved);
+});
+
+test('child bindings preserve root ciphertext and exactly reacquire nested authority after restart', async t => {
+  const f = await grantsFixture(t); await f.store.reserveGrant(f.input, context());
+  const root = await f.store.bindGrant(f.input.ref, target.id, frozen, context());
+  assert.equal(Object.hasOwn(root.binding!, 'parentTaskUID'), false);
+  assert.throws(() => taskGrant({ ...root, binding: { ...frozen, parentTaskUID: 'forged' } }));
+  const rootRow = JSON.stringify([...f.rows.values()].find(r => String(r.RowKey).startsWith('grant_')));
+  const child = { ...frozen, taskUID: 'child', parentTaskUID: 'task', deadline: frozen.deadline - 1 };
+  const leaf = { ...child, taskUID: 'leaf', parentTaskUID: 'child', deadline: child.deadline - 1 };
+  const bound = await f.store.bindGrant(f.input.ref, target.id, child, context());
+  assert.deepEqual(bound.binding, child);
+  await f.store.bindGrant(f.input.ref, target.id, leaf, context());
+  assert.equal(JSON.stringify([...f.rows.values()].find(r => String(r.RowKey).startsWith('grant_'))), rootRow);
+  assert.deepEqual(await f.store.getGrant(f.input.ref, context()), root);
+  await f.store.close(); const reopened = f.open();
+  assert.deepEqual(await reopened.bindGrant(f.input.ref, target.id, { ...child, tools: ['workiq', 'workiq'] }, context()), bound);
+  assert.deepEqual((await reopened.getGrant(f.input.ref, context(), 'leaf'))?.binding, leaf);
+  assert.deepEqual(await reopened.getGrant(f.input.ref, context(), 'task'), root);
+  assert.equal(await reopened.getGrant(f.input.ref, context(), 'unknown'), undefined);
+  await reopened.disconnect(f.subject, context());
+  assert.equal(await reopened.getGrant(f.input.ref, context(), 'child'), undefined);
+});
+
+test('child bindings refuse missing, cross-grant, inconsistent, widening and cyclic parent links', async t => {
+  const f = await grantsFixture(t); await f.store.reserveGrant(f.input, context());
+  const child = { ...frozen, taskUID: 'child', parentTaskUID: 'task', deadline: frozen.deadline - 1 };
+  assert.equal(await f.store.getGrant(f.input.ref, context(), 'child'), undefined);
+  await assert.rejects(f.store.bindGrant(f.input.ref, target.id, child, context()), /conflict/);
+  await f.store.bindGrant(f.input.ref, target.id, frozen, context());
+  await f.store.bindGrant(f.input.ref, target.id, child, context());
+  const writes = f.requests.filter(r => r.method !== 'GET').length;
+  for (const change of [{ parentTaskUID: 'missing' }, { parentTaskUID: 'child' }, { parentTaskUID: 'leaf' },
+    { namespaceUID: 'child-execution-namespace' }, { gatewayUID: 'other' }, { tools: ['github-read-file'] },
+    { deadline: frozen.deadline + 1 }, { deadline: child.deadline - 1 }]) {
+    await assert.rejects(f.store.bindGrant(f.input.ref, target.id, { ...child, ...change }, context()), /conflict|invalid-input/);
+  }
+  await assert.rejects(f.store.bindGrant(f.input.ref, target.id, { ...frozen, parentTaskUID: 'child' }, context()), /conflict/);
+  await assert.rejects(f.store.bindGrant(f.input.ref, 'other', { ...child, taskUID: 'new' }, context()), /conflict/);
+  const other = { ...f.input, ref: 'b'.repeat(64), eventId: 'other' }; await f.store.reserveGrant(other, context());
+  await f.store.bindGrant(other.ref, target.id, { ...frozen, taskUID: 'other-root' }, context());
+  await assert.rejects(f.store.bindGrant(other.ref, target.id, child, context()), /conflict/);
+  // Only the other grant and its root were created; no refusal mutated authority.
+  assert.equal(f.requests.filter(r => r.method !== 'GET').length, writes + 2);
+});
+
+test('child binding CAS admits only exact winner and reconciles lost publication without retry', async t => {
+  const f = await grantsFixture(t); await f.store.reserveGrant(f.input, context());
+  await f.store.bindGrant(f.input.ref, target.id, frozen, context());
+  const child = { ...frozen, taskUID: 'child', parentTaskUID: 'task' };
+  let creates = 0;
+  f.controls.hook = ({ req, body, res, reply }) => {
+    if (req.method === 'POST' && String(body?.RowKey).startsWith('binding_')) { creates++; reply(); res.destroy(); } else reply();
+  };
+  assert.deepEqual((await f.store.bindGrant(f.input.ref, target.id, child, context())).binding, child);
+  assert.equal(creates, 1); delete f.controls.hook;
+  const candidates = [0, 1].map(n => ({ ...child, taskUID: 'racing-child', deadline: frozen.deadline - n }));
+  const results = await Promise.allSettled(candidates.map(b => f.store.bindGrant(f.input.ref, target.id, b, context())));
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  const winner = results.find(r => r.status === 'fulfilled')!;
+  if (winner.status === 'fulfilled') assert.deepEqual(await f.store.getGrant(f.input.ref, context(), 'racing-child'), winner.value);
 });
 
 test('authority loss and expired binding forbid further grant use', async t => {
