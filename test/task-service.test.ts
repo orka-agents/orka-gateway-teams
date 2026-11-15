@@ -54,6 +54,52 @@ test('real listener accepts only dedicated issuance bearer and exact #1110 body/
   assert.ok(f.logs.includes('grant-binding-conflict'));
 });
 
+test('listener binds descendants before any ancestor call and reacquires exact child after restart', async t => {
+  const f = await fixture(t); await f.issue();
+  const child = { ...f.body, taskUID: 'child', parentTaskUID: 'task', deadline: new Date(f.now() + 200000).toISOString() };
+  const leaf = { ...child, taskUID: 'leaf', parentTaskUID: 'child' };
+  const pass = await f.issue(child); assert.equal(Date.parse(pass.expiresAt), f.now() + 200000);
+  await f.issue(leaf); assert.equal(f.w.bodies.length, 0);
+  assert.deepEqual(await f.post('/v1/task-tools/workiq', pass.pass, { question: 'child question' }), { status: 200, body: { text: 'Answer' } });
+  const old = await f.issue(leaf); await f.service.close(); await f.store.close();
+  const next = f.openService(f.open()); t.after(() => next.close());
+  assert.equal(next.authenticate('/v1/task-tools/workiq', old.pass), false);
+  for (const body of [f.body, child, leaf]) assert.equal((await next.handle('/v1/task-passes', credential, body, context())).status, 200);
+  await f.open().disconnect(f.subject, context());
+  assert.notEqual((await next.handle('/v1/task-passes', credential, child, context())).status, 200);
+  assert.equal(f.w.bodies.length, 1);
+});
+
+test('listener refuses invalid child scope, ancestry, widening, identity fields and relinking without provider calls', async t => {
+  const f = await fixture(t);
+  const child = { ...f.body, taskUID: 'child', parentTaskUID: 'task' };
+  assert.notEqual((await f.post('/v1/task-passes', credential, child)).status, 200);
+  await f.issue(); await f.issue(child);
+  const leaf = { ...child, taskUID: 'leaf', parentTaskUID: 'child' }; await f.issue(leaf);
+  for (const change of [{ parentTaskUID: '' }, { parentTaskUID: null }, { parentTaskUID: 'missing' }, { parentTaskUID: 'child' },
+    { parentTaskUID: 'leaf' }, { taskUID: 'task' }, { namespaceUID: 'execution-namespace-not-root' }, { gatewayUID: 'other-gateway' },
+    { tools: [] }, { deadline: new Date(f.now() + 600001).toISOString() }, { objectId: 'other' }, { targetId: 'other' },
+    { accountGeneration: 2 }, { parentTaskUID: 123 }]) {
+    assert.notEqual((await f.post('/v1/task-passes', credential, { ...child, ...change })).status, 200);
+  }
+  assert.notEqual((await f.post('/v1/task-passes', 'OTHER-CONTROLLER', child)).status, 200);
+  for (const change of [{ taskUID: 'other' }, { sender: 'other' }, { headers: {} }, { url: 'https://other.invalid' }]) {
+    assert.notEqual((await f.post('/v1/task-tools/workiq', (await f.issue(child)).pass, { question: 'q', ...change })).status, 200);
+  }
+  await f.store.disconnect(f.subject, context()); await f.link('relinked');
+  assert.notEqual((await f.post('/v1/task-passes', credential, child)).status, 200);
+  assert.equal(f.w.bodies.length, 0);
+});
+
+test('child account mutation during final owner check prevents provider handoff', async t => {
+  const f = await fixture(t); await f.issue();
+  const child = { ...f.body, taskUID: 'child', parentTaskUID: 'task' };
+  const pass = await f.issue(child);
+  f.authority.revalidate = async () => { await f.store.disconnect(f.subject, context()); return true; };
+  assert.notEqual((await f.post('/v1/task-tools/workiq', pass.pass, { question: 'q' })).status, 200);
+  assert.equal(f.w.bodies.length, 0);
+});
+
 test('pass expiry tolerates the gateway clock leading the controller by five seconds', async t => {
   const f = await fixture(t); const controllerNow = f.now() - 5000;
   const pass = await f.issue();

@@ -29,7 +29,7 @@ type Challenge = AccountChallenge & { kind: 'challenge'; ownerUUID?: string;
 type Grant = TaskGrant & { kind: 'grant' };
 type Binding = { kind: 'binding'; ref: string; objectId: string; generation: number; binding: GrantBinding };
 type Write = { kind: 'write'; id: string; ref: string; tool: string; objectId: string; generation: number; githubGeneration: number;
-  argsDigest: string; ownerUUID: string; state: 'reserved' | 'done'; text?: string };
+  argsDigest: string; ownerUUID: string; state: 'reserved' | 'done'; text?: string; taskUID?: string };
 type Document = Account | Challenge | Grant | Binding | Write;
 // The native transport cannot accept a plaintext document or a token-bearing value.
 type Ciphertext = { generation: number; ciphertext: Buffer };
@@ -103,7 +103,8 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
       object(v, ['kind', 'ref', 'objectId', 'generation', 'binding']); grantRef(v.ref);
       if (!grantBinding(v.binding).parentTaskUID) bad();
     } else if (v.kind === 'write') {
-      object(v, ['kind', 'id', 'ref', 'tool', 'objectId', 'generation', 'githubGeneration', 'argsDigest', 'ownerUUID', 'state', 'text']);
+      object(v, ['kind', 'id', 'ref', 'tool', 'objectId', 'generation', 'githubGeneration', 'argsDigest', 'ownerUUID', 'state', 'text', 'taskUID']);
+      if (v.taskUID !== undefined) identity(v.taskUID);
       grantRef(v.id); grantRef(v.ref); grantRef(v.argsDigest); uuid(v.ownerUUID); integer(v.githubGeneration, 1, Number.MAX_SAFE_INTEGER);
       if (!writeTool(v.tool) || !['reserved', 'done'].includes(v.state) || (v.state === 'done' ? typeof v.text !== 'string' || Buffer.byteLength(v.text) > 32768 : v.text !== undefined)) bad();
     } else {
@@ -300,24 +301,30 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
       { kind: 'send'; id: string } | { kind: 'done'; text: string } | { kind: 'uncertain' }> {
       return run(ctx, async c => {
         if (provider !== 'workiq' || !writeTool(tool) || !grant.githubGeneration || !grant.binding?.tools.includes(tool)) bad('invalid-input');
-        const live = await liveGrant(grant.ref, c);
-        if (live?.value.kind !== 'grant' || canonicalJSON(publicGrant(live.value)) !== canonicalJSON(grant)) bad('conflict');
-        const id = hash(['teams-task-write-v1', grant.ref, tool, operationKey(operation)]); const argsDigest = hash(canonicalJSON(args));
+        const live = await selectedGrant(grant.ref, c, grant.binding.taskUID);
+        if (!live || canonicalJSON(live) !== canonicalJSON(grant)) bad('conflict');
+        const taskUID = grant.binding.parentTaskUID === undefined ? undefined : grant.binding.taskUID;
+        // Preserve historical root identities so an upgrade cannot resend an earlier effect.
+        const id = hash(taskUID === undefined ? ['teams-task-write-v1', grant.ref, tool, operationKey(operation)] :
+          ['teams-task-write-v2', grant.ref, taskUID, tool, operationKey(operation)]); const argsDigest = hash(canonicalJSON(args));
         const previous = await read(writeKey(id), c);
         if (previous) { const v = previous.value;
           if (v.kind !== 'write' || v.ref !== grant.ref || v.tool !== tool || v.argsDigest !== argsDigest || v.objectId !== grant.objectId ||
-            v.generation !== grant.generation || v.githubGeneration !== grant.githubGeneration) bad('operation-conflict');
+            v.generation !== grant.generation || v.githubGeneration !== grant.githubGeneration || v.taskUID !== taskUID) bad('operation-conflict');
           return v.state === 'done' ? { kind: 'done', text: v.text! } : { kind: 'uncertain' };
         }
         // CREATE-only send permission; an existing reservation is uncertain forever.
         await persist(undefined, { kind: 'write', id, ref: grant.ref, tool, objectId: grant.objectId, generation: grant.generation,
-          githubGeneration: grant.githubGeneration, argsDigest, ownerUUID, state: 'reserved' }, c);
+          githubGeneration: grant.githubGeneration, argsDigest, ownerUUID, state: 'reserved', ...(taskUID === undefined ? {} : { taskUID }) }, c);
         return { kind: 'send', id };
       });
     },
     completeWrite(id: string, text: string, ctx: DirectoryContext): Promise<void> {
       return run(ctx, async c => { const row = await read(writeKey(id), c); const v = row?.value;
-        if (!row || v?.kind !== 'write' || v.ownerUUID !== ownerUUID || v.state !== 'reserved' || !await liveGrant(v.ref, c)) bad('conflict');
+        if (!row || v?.kind !== 'write' || v.ownerUUID !== ownerUUID || v.state !== 'reserved') bad('conflict');
+        const grant = await selectedGrant(v.ref, c, v.taskUID);
+        if (!grant?.binding || grant.objectId !== v.objectId || grant.generation !== v.generation || grant.githubGeneration !== v.githubGeneration ||
+          !grant.binding.tools.includes(v.tool)) bad('conflict');
         await persist(row, { ...v, state: 'done', text }, c); });
     },
     bindGrant(ref: string, targetId: string, input: GrantBinding, ctx: DirectoryContext): Promise<TaskGrant> {

@@ -208,18 +208,34 @@ enabling this mode, disabling SSO, or changing the target routing identity.
 An older controller rejects delegated events; there is no plain-text fallback.
 
 On the shared outbound listener, `POST /v1/task-passes` authenticates only the
-particular target's controller bearer. The body is exactly:
+particular target's controller bearer. The root body is exactly:
 
 ```json
 {"protocolVersion":"orka.gateway.v1","grantRef":"<event-reference>","namespaceUID":"<namespace-uid>","gatewayUID":"<gateway-uid>","taskUID":"<task-uid>","tools":["workiq"],"deadline":"2026-01-01T12:00:00Z"}
 ```
 
+Child requests add `"parentTaskUID":"<parent-task-uid>"`; roots omit it. The
+controller establishes ancestor bindings root-to-leaf before issuing the child's
+pass, even if no ancestor has called a tool. Each parent must already be bound
+under the same grant reference, authenticated target Orka, original namespace UID,
+Gateway UID and sender/account generation. A child's tools must be a nonempty
+subset of its parent's and its deadline no later. Cross-namespace children send
+the original gateway namespace UID, not their execution namespace UID.
+
 The controller's first binding is trusted without independent Kubernetes reads.
-Namespace, Gateway and Task UIDs, tool set and deadline freeze durably; a changed
-binding is refused with `grant-binding-conflict`. Restart permits only the same
-binding and generation. Pass replies contain only `pass` and `expiresAt`; random
-passes live in process memory, last at most five minutes or the earlier deadline,
-and can be used once. Restart discards every pass.
+Namespace, Gateway and Task UIDs, parent UID, tool set and deadline freeze durably
+per grant reference and Task UID. Conflicts, reparenting and cycles are refused
+with `grant-binding-conflict`; exact reacquisition after restart cannot change even
+to narrower authority. Root bindings keep their existing inline representation;
+children use separate encrypted, insert-only rows without replacing the root or
+creating another sender reference. No data migration is needed. Older gateways
+can still point-read root records after rollback; they do not read child records
+and refuse child issuance.
+
+Pass replies contain only `pass` and `expiresAt`; random passes live in process
+memory, last at most five minutes or the earlier deadline, and can be used once.
+Restart discards every pass. The existing 1024-pass process limit also counts
+unused ancestor passes until expiry; large delegation trees may receive503.
 
 `POST /v1/task-tools/workiq` accepts only that pass as bearer, never a controller
 or callback credential. Name the Orka Tool `workiq`, set
@@ -253,12 +269,15 @@ budget, including account reads, lease checks and refresh. Work IQ may exceed th
 budget in practice; no live latency result is established. Internal account and
 tool concurrency limits may return a fixed refusal rather than queue work.
 
-Orka checks that the root Task is still Running with the same UID and gateway
-origin before requesting and sending a pass. Completion and cancellation prevent
-new calls through those controller gates, not an independent gateway revocation
-channel. Already-started calls may finish. The gateway independently enforces
-expiry, frozen deadline, generation, single use and process restart. A compromised
-controller can exercise its target's grants; child attenuation is not available.
+A child-capable Orka controller checks the executing Task and UID/snapshot-pinned
+ancestors, provenance, gateway origin and live cancellation before requesting and
+sending a pass. Its parked-parent delegation requires a verified unexpired wait
+for that exact child; ordinary completion ends authority. These are controller
+gates, not an independent gateway revocation channel. Already-started calls may
+finish. The gateway independently enforces the issuing Task's binding, tool subset,
+expiry, frozen deadline, account generations, single use and process restart.
+A compromised controller can exercise its target's grants; the gateway trusts that
+authenticated controller to attest Task ancestry.
 Accounts and grants borrow the same combined registry V3 owner authority, not a
 new failover lease. Shutdown drains tool/provider work before closing that store.
 
@@ -310,7 +329,10 @@ unknown fields and identity/credential/URL/header arguments are refused.
 The controller's unique `Idempotency-Key` header identifies each reviewed write.
 It is not a JSON argument. The gateway preserves its non-control UTF8 bytes
 (up to256), including multibyte keys, and hashes them with the grant reference
-and tool. A canonical arguments digest prevents changing arguments under the
+and tool. Child operations also include the issuing child Task UID, so roots and
+siblings cannot share a write reservation or cached result. Existing root operation
+keys and rows are unchanged, preserving replay protection across upgrades and
+rollback. A canonical arguments digest prevents changing arguments under the
 same key. Before external POST, an encrypted conditional CREATE reserves the
 operation; only its exact winning readback grants one send. A reserved record
 means uncertain by default and never permits another POST, including after

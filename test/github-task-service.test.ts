@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
+import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { createAccountStore } from '../src/accounts/store.js';
 import { createGitHub } from '../src/accounts/github.js';
@@ -62,6 +63,63 @@ test('write success is cached by grant/tool/raw operation identity; changed argu
   assert.deepEqual(await f.call('github-create-issue', args, 'operation', successor), first); assert.equal(f.requests.length, 1);
   assert.ok(!JSON.stringify([...f.rows.values()]).includes('Reviewed issue'));
 });
+test('root and child write identities are independent, durable and preserve legacy root replay keys', async t => {
+  const f = await setup(t); await f.issue();
+  const bodies = [f.body, ...['child', 'sibling'].map(taskUID => ({ ...f.body, taskUID, parentTaskUID: 'task', tools: ['github-create-issue'] }))];
+  const call = async (index: number, value: unknown = args, service = f.service) => service.handle('/v1/task-tools/github-create-issue',
+    await f.issue(service, bodies[index]), value, context(), 'shared-operation');
+  const results = [];
+  f.behavior((_req, res) => { res.statusCode = 201; res.end(JSON.stringify({ number: f.requests.length, html_url: `https://github.com/acme/repo/issues/${f.requests.length}` })); });
+  for (let i = 0; i < bodies.length; i++) { const result = await call(i); assert.equal(result.status, 200); results.push(result); }
+  assert.equal(f.requests.length, 3); assert.notDeepEqual(results[0], results[1]);
+  const legacy = createHash('sha256').update(JSON.stringify(['teams-task-write-v1', f.input.ref, 'github-create-issue', 'shared-operation'])).digest('hex');
+  assert.ok([...f.rows.values()].some(r => r.RowKey === `write_${legacy}`));
+  await f.service.close(); await f.store.close(); const next = f.openService(f.open(), f.openGithub()); t.after(() => next.close());
+  for (let i = 0; i < bodies.length; i++) {
+    assert.deepEqual(await call(i, args, next), results[i]);
+    assert.equal((await call(i, { ...args, title: 'changed' }, next)).status, 403);
+  }
+  assert.equal(f.requests.length, 3);
+});
+
+test('uncertain child writes never resend across restart and cannot poison a sibling operation', async t => {
+  const f = await setup(t); await f.issue();
+  const child = { ...f.body, taskUID: 'child', parentTaskUID: 'task', tools: ['github-create-issue'] };
+  const call = async (body = child, service = f.service) => service.handle('/v1/task-tools/github-create-issue', await f.issue(service, body), args, context(), 'operation');
+  f.behavior((_req, res) => res.destroy()); assert.equal((await call()).status, 503);
+  await f.service.close(); const next = f.openService(f.open(), f.openGithub()); t.after(() => next.close());
+  assert.equal((await call(child, next)).status, 503); assert.equal(f.requests.length, 1);
+  f.behavior((_req, res) => { res.statusCode = 201; res.end('{"number":8,"html_url":"https://github.com/acme/repo/issues/8"}'); });
+  assert.equal((await call({ ...child, taskUID: 'sibling' }, next)).status, 200); assert.equal(f.requests.length, 2);
+});
+
+test('child binding tools, not the root tools, authorize endpoints and further delegation', async t => {
+  const f = await setup(t); await f.issue();
+  const child = { ...f.body, taskUID: 'child', parentTaskUID: 'task', tools: ['github-list-issues'], deadline: new Date(f.now() + 200000).toISOString() };
+  assert.equal((await f.service.handle('/v1/task-tools/github-list-issues', await f.issue(f.service, child), { owner: 'acme', repo: 'repo' }, context())).status, 200);
+  assert.equal(f.requests.length, 1);
+  assert.notEqual((await f.service.handle('/v1/task-tools/github-create-issue', await f.issue(f.service, child), args, context(), 'write')).status, 200);
+  for (const change of [{ tools: ['github-create-issue'] }, { deadline: f.body.deadline }]) {
+    assert.notEqual((await f.service.handle('/v1/task-passes', 'CONTROLLER_PRIVATE', { ...child, taskUID: 'leaf', parentTaskUID: 'child', ...change }, context())).status, 200);
+  }
+  assert.equal(f.requests.length, 1);
+});
+
+for (const provider of ['workiq', 'github'] as const) test(`child ${provider} generation changes after issuance and before native write refuse relinking`, async t => {
+  const f = await setup(t); await f.issue();
+  const child = { ...f.body, taskUID: 'child', parentTaskUID: 'task', tools: ['github-create-issue'] };
+  const pass = await f.issue(f.service, child);
+  const reserve = f.store.reserveWrite;
+  f.store.reserveWrite = async (...input) => { const result = await reserve(...input);
+    if (provider === 'workiq') { await f.store.disconnect(f.subject, context()); await f.link('relinked'); }
+    else { await f.githubAccounts.disconnect(f.subject, context()); await f.linkGithub('relinked'); }
+    return result;
+  };
+  assert.equal((await f.service.handle('/v1/task-tools/github-create-issue', pass, args, context(), 'child-race')).status, 503);
+  assert.notEqual((await f.service.handle('/v1/task-passes', 'CONTROLLER_PRIVATE', child, context())).status, 200);
+  assert.equal(f.requests.length, 0);
+});
+
 test('concurrent same operation sends once; a reservation is uncertain rather than a second send right', async t => {
   const f = await setup(t); const entered = deferred(); const release = deferred();
   f.behavior((_req, res) => { entered.resolve(); void release.promise.then(() => { res.statusCode = 201; res.end('{"number":8,"html_url":"https://github.com/acme/repo/issues/8"}'); }); });
