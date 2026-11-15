@@ -36,7 +36,7 @@ async function setup(t: test.TestContext) {
   const service = createTaskService({ accounts: f.store, authority: f.authority, now: f.now,
     targets: [{ id: 'tools', gatewayUid: 'gateway', identityDigest: f.input.targetDigest, taskPassToken: 'CONTROLLER_PRIVATE' }],
     auth: { exchange: async () => { throw new Error('not SSO'); }, refresh: async () => { throw new Error('not renewal'); } },
-    github: { accounts: ghAccounts, auth: github }, proposals, privateCredentials: ['DELIVERY_PRIVATE'] }); t.after(() => service.close());
+    github: { accounts: ghAccounts, auth: github }, proposals, privateCredentials: ['DELIVERY_PRIVATE', 'QUOTED_"_PRIVATE'] }); t.after(() => service.close());
   const body = { protocolVersion: 'orka.gateway.v1', grantRef: grant.ref, namespaceUID: 'ns', gatewayUID: 'gateway', taskUID: 'task', tools: grant.tools, deadline: new Date(f.now() + 600000).toISOString() };
   const issue = async (input = body) => { const r = await service.handle('/v1/task-passes', 'CONTROLLER_PRIVATE', input, context()); assert.equal(r.status, 200); return (r.body as { pass: string }).pass; };
   const call = async (value: unknown = args, key = 'operation', ctx = context()) => service.handle('/v1/task-tools/github-propose-pull-request', await issue(), value, ctx, key);
@@ -76,7 +76,7 @@ test('child_tool_omission_denied and both provider credential sentinels never re
   const f = await setup(t); await f.issue();
   const child = { ...f.body, taskUID: 'child', parentTaskUID: 'task', tools: ['workiq'] };
   assert.notEqual((await f.service.handle('/v1/task-tools/github-propose-pull-request', await f.issue(child), args, context(), 'child')).status, 200);
-  for (const secret of ['ACCESS-PRIVATE', 'REFRESH-PRIVATE', 'GH_ACCESS_PRIVATE', 'GH_REFRESH_PRIVATE', 'CLIENT_PRIVATE', 'DELIVERY_PRIVATE', 'CONTROLLER_PRIVATE']) {
+  for (const secret of ['ACCESS-PRIVATE', 'REFRESH-PRIVATE', 'GH_ACCESS_PRIVATE', 'GH_REFRESH_PRIVATE', 'CLIENT_PRIVATE', 'DELIVERY_PRIVATE', 'CONTROLLER_PRIVATE', 'QUOTED_"_PRIVATE']) {
     assert.equal((await f.call({ ...args, body: secret }, 'secret-' + secret)).status, 503);
   }
   assert.equal(f.sent(), 0); assert.equal([...f.rows.values()].filter(r => /^proposal_[a-f0-9]{64}$/u.test(String(r.RowKey))).length, 0);

@@ -16,6 +16,7 @@ export interface ControlRoute {
   conversation: { id: string; tenantId: string; conversationType: 'personal' | 'groupChat' };
 }
 export type ControlReply = { kind: 'no-access' } | { kind: 'discovery'; targets: { id: string; label: string }[] } |
+  { kind: 'pr-approval'; targetId: string; proposal: string; rev: 1; digest: string } |
   { kind: 'connected' | 'switching'; targetId: string; label: string } |
   { kind: 'signin' | 'github-signin'; targetId: string; challengeId: string; recipient: import('../outbound/types.js').ControlRecipient } |
   { kind: 'signed-in' | 'github-signed-in'; targetId: string; recipient: import('../outbound/types.js').ControlRecipient } |

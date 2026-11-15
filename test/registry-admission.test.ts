@@ -9,6 +9,8 @@ import { bindingName } from '../src/directory/codec.js';
 import { openDirectory } from '../src/directory/store.js';
 import { DirectoryError } from '../src/directory/types.js';
 import { AccountError } from '../src/accounts/store.js';
+import type { ProposalVersion } from '../src/accounts/pull-request-proposal.js';
+import { proposalFixture } from './support/pull-request-proposal.js';
 import type { TaskGrant } from '../src/accounts/grants.js';
 import { grantReference } from '../src/accounts/grants.js';
 import type { AccountChallenge, BrowserAttempt } from '../src/accounts/store.js';
@@ -39,12 +41,14 @@ async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<ty
     check: async (c: ConnectionRecord, _ctx: KubernetesContext) => { checks.push('check:' + target.id); await checkGate; if (failCheck) throw new BindingCheckError(failureCategory); return evidence(c); } } }));
   const authority = { allowed: () => allowed, revalidate: async () => allowed, lost: new AbortController().signal };
   const logs: string[] = [];
-  const sink = createRegistryAdmission({ config, directory, slots, authority, active: () => allowed,
+  const makeSink = () => createRegistryAdmission({ config, directory, slots, authority, active: () => allowed,
     ...(delegated ? { delegated } : {}),
     authorizer: { authorize: async () => { authorized++; return eligible; } }, log: (category, target) => logs.push(category + ':' + target) });
-  sink.bindControlSender({ send: async (route, message) => {
+  const sink = makeSink();
+  const bindSender = (s: typeof sink) => s.bindControlSender({ send: async (route, message) => {
     sent.push({ text: JSON.stringify(message), route }); await sendGate; return outcome;
   } });
+  bindSender(sink);
   const event = { ...expectedEvent, text: 'help' }; const baseRoute = { serviceUrl: 'https://teams-service.example.invalid/', channelId: 'msteams' as const,
     bot: { id: '28:fixture-app', role: 'bot' as const } };
   const route: ReplyRoute = chatKind === 'groupChat' ? { ...baseRoute, conversation: { id: event.contextId, tenantId: scope.tenantId, conversationType: 'groupChat' }, requester: event.sender } :
@@ -57,7 +61,7 @@ async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<ty
       identityDigest: target.identityDigest!, bindingName: bindingName(scope, conversationId, target.identityDigest!), state: 'reserved' };
     return directory.markProvisioned(await directory.reserveConnection(conn, context()), evidence(conn), context());
   };
-  return { sink, directory, scope, config, slots, event, route, run, provision, sent, admitted, checks, logs, authorized: () => authorized,
+  return { sink, restart: () => { const s = makeSink(); bindSender(s); return s; }, directory, scope, config, slots, event, route, run, provision, sent, admitted, checks, logs, authorized: () => authorized,
     policy: (value: PolicyAdmission) => { eligible = value; }, outcome: (value: ProviderResult) => { outcome = value; },
     fail: (value: boolean, category: BindingCheckError['category'] = 'binding-conflict') => { failCheck = value; failureCategory = category; }, checkGate: (value: Promise<void>) => { checkGate = value; },
     sendGate: (value: Promise<void>) => { sendGate = value; }, revoke: () => { allowed = false; } };
@@ -247,7 +251,7 @@ function delegatedFixture() {
   const attempt = { challenge: ch, state: 'synthetic-private-state', nonce: 'synthetic-private-nonce', verifier: 'synthetic-private-verifier' };
   const accounts = {
     providerIdentity: async () => undefined,
-    getProposal: async () => undefined, reserveProposal: async () => { throw new Error('not a proposal'); },
+    getProposal: async (): Promise<ProposalVersion | undefined> => undefined, reserveProposal: async () => { throw new Error('not a proposal'); },
     replaceProposal: async () => { throw new Error('not a proposal'); },
     reserveGrant: async (input: TaskGrant) => input,
     getGrant: async (_ref: string) => undefined as TaskGrant | undefined,
@@ -282,6 +286,27 @@ function delegatedFixture() {
     exchanges: () => exchanges, verifies: () => verifies, disconnects: () => disconnects,
     gate: (value: Promise<void>) => { gate = value; } };
 }
+
+test('uncertain_card_send_never_resends_after_restart and refresh scopes identity, policy, expiry and supersession', async t => {
+  const d = delegatedFixture(); await d.delegated.accounts.complete(); const f = await fixture(t, 2, d.delegated, 'groupChat'); await f.provision('primary', f.event.contextId, 'groupChat');
+  const p = { ...proposalFixture(), ...f.scope, objectId: d.ch.objectId, conversationId: f.event.contextId, route: f.route,
+    targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest!, createdAt: Date.now(), expiresAt: Date.now() + 3_600_000 };
+  d.delegated.accounts.getProposal = async () => ({ proposal: p, etag: 'W/"1"' });
+  f.outcome({ kind: 'unknown' }); assert.equal(await f.sink.postProposal(p, context()), 'uncertain'); assert.equal(f.sent.length, 1);
+  const restarted = f.restart(); assert.equal(await restarted.postProposal(p, context()), 'uncertain'); assert.equal(f.sent.length, 1);
+  const input = { type: 'invoke', name: 'adaptiveCard/action', id: 'refresh', channelId: 'msteams',
+    conversation: { id: p.conversationId, tenantId: p.tenantId, conversationType: 'groupChat' }, from: { id: p.senderMRI, aadObjectId: p.objectId },
+    value: { action: { type: 'Action.Execute', verb: 'pr-refresh', data: { proposal: p.id, rev: 1, digest: p.payloadDigest } } } };
+  const sender = await restarted.cardAction!(input, context()); assert.equal(sender.status, 200); assert.match(JSON.stringify(sender.body), /Approval actions are not enabled yet/);
+  const other = await restarted.cardAction!({ ...input, from: { id: '29:other', aadObjectId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' } },
+    { ...context(), subject: { ...context().subject, objectId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', chatKind: 'groupChat' } });
+  assert.equal(other.status, 200); assert.match(JSON.stringify(other.body), /Waiting for/); assert.ok(!JSON.stringify(other.body).includes('pr-approve'));
+  assert.equal((await restarted.cardAction!({ ...input, conversation: { ...input.conversation, id: 'foreign' } }, context())).status, 403);
+  assert.equal((await restarted.cardAction!({ ...input, value: { action: { ...input.value.action, verb: 'pr-approve' } } }, context())).status, 403);
+  p.state = 'superseded'; assert.match(JSON.stringify((await restarted.cardAction!(input, context())).body), /Replaced/);
+  p.state = 'expired'; assert.match(JSON.stringify((await restarted.cardAction!(input, context())).body), /Expired/);
+  f.policy({ kind: 'no-access', text: '' }); assert.equal((await restarted.cardAction!(input, context())).status, 403);
+});
 
 test('delegated admission reserves sender generation before inbox and refuses immutable grant conflicts or missing authenticated sender', async t => {
   const d = delegatedFixture(); await d.delegated.accounts.complete(); const f = await fixture(t, 2, d.delegated); await f.provision();

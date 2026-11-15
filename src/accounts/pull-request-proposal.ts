@@ -25,6 +25,9 @@ export const proposalIdentity = (ref: string, taskUID: string, operation: string
   proposalHash(['teams-pr-proposal-v1', grantRef(ref), identity(taskUID), 'github-propose-pull-request', operationKey(operation)]);
 export const proposalSelectorId = (p: Proposal) => proposalHash(['teams-pr-selector-v1', p.appId, p.tenantId, p.conversationId, p.objectId]);
 export const proposalArgs = (p: Proposal) => ({ owner: p.owner, repo: p.repo, base: p.base, head: p.head, title: p.title, body: p.body });
+// Check decoded display strings too: JSON escaping must not hide a configured credential.
+export const proposalOutput = (p: Proposal) => JSON.stringify(p) + '\n' +
+  [p.title, p.body, p.displayName, p.githubLogin, p.owner, p.repo, p.base, p.head, ...p.files.map(f => f.path)].join('\n');
 export function proposalDigest(p: Proposal): string {
   const { payloadDigest: _digest, state: _state, claim: _claim, cardActivityId: _card, prNumber: _number, prUrl: _url, ...frozen } = p;
   return proposalHash(frozen);

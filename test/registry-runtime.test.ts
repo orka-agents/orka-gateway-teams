@@ -647,7 +647,13 @@ test('native registry wires optional GitHub custody and checks its secret before
   const tools = ['workiq', 'github-read-file', 'github-list-issues', 'github-create-issue', 'github-create-pull-request'];
   const ref = grantReference(target.config.scope, target, 'event-github-tools', 'reply-github-tools');
   await seed.reserveGrant({ ref, objectId: oid, provider: 'workiq', generation: 1, githubGeneration: 2, targetId: target.id,
-    targetDigest: target.identityDigest!, eventId: 'event-github-tools', tools }, accountContext()); await seed.close();
+    targetDigest: target.identityDigest!, eventId: 'event-github-tools', tools }, accountContext());
+  const proposalRef = grantReference(target.config.scope, target, 'proposal-event', 'proposal-reply');
+  await seed.reserveGrant({ ref: proposalRef, objectId: oid, provider: 'workiq', generation: 1, githubGeneration: 2, targetId: target.id,
+    targetDigest: target.identityDigest!, eventId: 'proposal-event', tools: ['github-propose-pull-request'],
+    proposalOrigin: { conversationId: message.conversation.id, replyTarget: 'proposal-reply', objectId: oid, senderMRI: message.from.id, displayName: 'Example Sender', activityId: 'proposal-event',
+      route: { serviceUrl: message.serviceUrl, channelId: 'msteams', bot: { id: message.recipient.id, role: 'bot' },
+        conversation: { id: message.conversation.id, tenantId: miConfig.tenantId, conversationType: 'personal' } } } }, accountContext()); await seed.close();
   const passBody = { protocolVersion: 'orka.gateway.v1', grantRef: ref, namespaceUID: 'namespace', gatewayUID: target.gatewayUid, taskUID: 'task', tools,
     deadline: new Date(Date.now() + 60000).toISOString() };
   const execute = async () => {
@@ -661,6 +667,28 @@ test('native registry wires optional GitHub custody and checks its secret before
   };
   runtime = await startRegistryRuntime(config, deps); await execute(); assert.equal(api.requests.length, 1);
   await runtime.stop(); await runtime.done; runtime = await startRegistryRuntime(config, deps); await execute(); assert.equal(api.requests.length, 1);
+  // Synthetic preview walk at the composed runtime boundary, with only GETs to GitHub.
+  api.behavior((req, res) => res.end(JSON.stringify(req.path.includes('/git/ref/') ? { ref: 'refs/heads/orka/fix', object: { type: 'commit', sha: 'a'.repeat(40) } } :
+    { total_commits: 1, base_commit: { sha: 'b'.repeat(40) }, commits: [{ commit: { author: { name: 'Orka Publisher', email: 'publisher@orka.ai' } } }], files: [{ filename: 'src/lease.ts', additions: 3, deletions: 1 }] })));
+  const previewPass = { ...passBody, grantRef: proposalRef, tools: ['github-propose-pull-request'] };
+  const preview = async (operation: string) => {
+    const issued = await fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/task-passes`, { method: 'POST', headers: { authorization: 'Bearer controller-primary', 'content-type': 'application/json' }, body: JSON.stringify(previewPass) });
+    assert.equal(issued.status, 200); const pass = await issued.json() as { pass: string };
+    const result = await fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/task-tools/github-propose-pull-request`, { method: 'POST', headers: { authorization: 'Bearer ' + pass.pass, 'content-type': 'application/json', 'Idempotency-Key': operation },
+      body: JSON.stringify({ owner: 'acme', repo: 'repo', base: 'bootstrap', head: 'orka/fix', title: 'Retry the lease read' }) });
+    assert.equal(result.status, 200); assert.deepEqual(await result.json(), { text: 'Approval card sent to the requester.' });
+  };
+  const beforePreview = sent.length; const beforeApi = api.requests.length;
+  await preview('preview'); assert.equal(sent.length, beforePreview + 1); const card = JSON.parse(sent.at(-1)!).attachments[0].content;
+  assert.match(JSON.stringify(card), /Approval actions are not enabled yet/); assert.deepEqual(card.refresh.userIds, [message.from.id]);
+  assert.ok(api.requests.slice(beforeApi).every(req => req.method === 'GET'));
+  await preview('preview'); assert.equal(sent.length, beforePreview + 1);
+  const refresh = { ...message, type: 'invoke', name: 'adaptiveCard/action', value: { action: card.refresh.action } };
+  assert.equal((await post(runtime.port, f.auth.token(), refresh)).status, 200);
+  await runtime.stop(); await runtime.done; runtime = await startRegistryRuntime(config, deps);
+  await preview('preview'); assert.equal(sent.length, beforePreview + 1);
+  await preview('replacement'); const replaced = await post(runtime.port, f.auth.token(), refresh);
+  assert.equal(replaced.status, 200); assert.match(await replaced.text(), /Replaced/);
   message.id = 'disconnect-github'; message.text = 'disconnect github'; assert.equal((await post(runtime.port, f.auth.token(), message)).status, 200);
   assert.match(sent.at(-1)!, /GitHub account is disconnected/);
   await runtime.stop(); await runtime.done; assert.equal(remote.sockets(), 0);

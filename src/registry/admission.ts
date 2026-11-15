@@ -1,4 +1,9 @@
 import { randomBytes } from 'node:crypto';
+import { proposalOutput } from '../accounts/pull-request-proposal.js';
+import type { Proposal } from '../accounts/pull-request-proposal.js';
+import { object } from '../storage/table/codec.js';
+import { buildPullRequestCard } from '../teams/pull-request-card.js';
+import { MAX_OUTGOING_MESSAGE_BYTES } from '../teams/format.js';
 import { identity } from '../delivery/identity.js';
 import { AccountError } from '../accounts/store.js';
 import { grantReference, githubTools } from '../accounts/grants.js';
@@ -28,13 +33,14 @@ import type { RegistryConfig, RegistryTarget } from './config.js';
 type Category = BindingCheckError['category'] | 'graph-unavailable' | 'signin-required' | 'signin-complete';
 interface DelegatedOptions { accounts: AccountStore; auth: ReturnType<typeof createDelegatedAuth>; apiUri: string; connectionName: string; publicOrigin?: string }
 interface Slot { target: RegistryTarget; inbox: Pick<IngressPort, 'admit'>; provisioner: ReturnType<typeof createBindingProvisioner> }
-interface Options { github?: { accounts: AccountStore; auth: ReturnType<typeof createGitHub> }; delegated?: DelegatedOptions; config: RegistryConfig; directory: Directory; slots: readonly Slot[]; authority: LeaseAuthority; active(): boolean;
+interface Options { safeOutput?(text: string): boolean; github?: { accounts: AccountStore; auth: ReturnType<typeof createGitHub> }; delegated?: DelegatedOptions; config: RegistryConfig; directory: Directory; slots: readonly Slot[]; authority: LeaseAuthority; active(): boolean;
   authorizer: Pick<ReturnType<typeof createGroupAuthorizer>, 'authorize'>; log(category: Category, targetId?: string): void }
 
 /** Four complete consumers share the directory's four places, including control settlement.
  * No waiting queue, cached Binding authority, replacement target or second sender. */
 export function createRegistryAdmission(options: Options): AdmissionSink & {
   bindControlSender(sender: Pick<ProviderSender, 'send'>): void;
+  postProposal(proposal: Proposal, ctx: DirectoryContext): Promise<'delivered' | 'uncertain' | 'unavailable'>;
   preflight(targetId: string, claim: Readonly<IngressClaim>, signal: AbortSignal): Promise<boolean>;
 } {
   const { directory, authority, authorizer } = options;
@@ -120,12 +126,73 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     const route = saved.route; const receiver = options.config.targets[0]!.config.receiver;
     if (!receiver.serviceUrls.includes(route.serviceUrl) || !receiver.recipientIds.includes(route.bot.id) ||
         route.conversation.tenantId !== scope.tenantId || route.conversation.id !== saved.conversationId) throw new DirectoryError('corrupt');
-    const armed = await directory.armControl(keyOf(saved), ctx); assertActive(ctx);
     if (!sender) throw new DirectoryError('unready');
-    const outcome = await sender.send(route, formatControl(saved.reply, options.delegated, route.conversation.conversationType), { signal: ctx.signal, deadline: ctx.deadline, authority });
+    const message = saved.reply.kind === 'pr-approval' ? await proposalMessage(saved, ctx) : formatControl(saved.reply, options.delegated, route.conversation.conversationType);
+    const armed = await directory.armControl(keyOf(saved), ctx); assertActive(ctx);
+    const sendAuthority = saved.reply.kind === 'pr-approval' ? { ...authority, allowed: () => authority.allowed() && active(ctx) && ctx.authorizeWrite?.() !== false } : authority;
+    const outcome = await sender.send(route, message, { signal: ctx.signal, deadline: ctx.deadline, authority: sendAuthority });
     assertActive(ctx);
     await directory.settleControl(keyOf(saved), armed.attemptUUID, outcome.kind === 'delivered' ? outcome : { kind: outcome.kind === 'retryable' ? 'no-effect' : 'unknown' }, ctx);
     return outcome.kind === 'retryable' ? { kind: 'full' } : { kind: 'accepted', replyTarget: '' };
+  }
+  async function safeProposal(p: Proposal, text: string, ctx: DirectoryContext) {
+    if (!options.delegated || options.safeOutput?.(text) === false) return false;
+    return await options.delegated.accounts.safeOutput({ objectId: p.objectId }, p.generation, text, ctx) &&
+      (!options.github || options.github.auth.safeOutput(text) && await options.github.accounts.safeOutput({ objectId: p.objectId }, p.githubGeneration, text, ctx));
+  }
+  async function proposalMessage(saved: ControlRecord, ctx: DirectoryContext): Promise<ProviderMessage> {
+    if (saved.reply.kind !== 'pr-approval' || !options.delegated) throw new DirectoryError('unready');
+    const p = (await options.delegated.accounts.getProposal(saved.reply.proposal, ctx))?.proposal;
+    if (!p || p.state !== 'pending' || p.payloadDigest !== saved.reply.digest || p.revision !== saved.reply.rev || p.conversationId !== saved.conversationId || p.targetId !== saved.reply.targetId) throw new DirectoryError('unready');
+    const message: ProviderMessage = { type: 'message', replyToId: p.activityId, attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: buildPullRequestCard(p, 'room', false) }] };
+    if (Buffer.byteLength(JSON.stringify(message)) > MAX_OUTGOING_MESSAGE_BYTES || !await safeProposal(p, proposalOutput(p), ctx) || !await safeProposal(p, JSON.stringify(message), ctx)) throw new DirectoryError('unready');
+    return message;
+  }
+  async function proposalConnection(p: Proposal, subject: ExchangeContext['subject'], ctx: DirectoryContext) {
+    if (p.appId !== scope.appId || p.tenantId !== scope.tenantId || subject.tenantId !== scope.tenantId) return undefined;
+    const connection = await directory.getConnection(p.conversationId, ctx); const slot = slots.get(p.targetId); assertActive(ctx);
+    if (!connection || !slot || connection.state !== 'provisioned' || connection.targetId !== p.targetId || connection.identityDigest !== p.targetDigest || slot.target.identityDigest !== p.targetDigest) return undefined;
+    const policy = await authorizer.authorize({ ...subject, chatKind: connection.chatKind }, ctx, p.targetId); assertActive(ctx);
+    if (policy.kind !== 'eligible' || !policy.targets.some(t => t.id === p.targetId)) return undefined;
+    await check(slot, connection, ctx); return { connection, targets: policy.targets };
+  }
+  async function postProposal(p: Proposal, supplied: DirectoryContext): Promise<'delivered' | 'uncertain' | 'unavailable'> {
+    if (consumers >= 4 || !options.delegated || p.route.conversation.conversationType === 'channel') return 'unavailable'; consumers++;
+    const ctx = { ...supplied, authorizeWrite: () => active(supplied) && supplied.authorizeWrite?.() !== false };
+    const activityId = `pr:${p.id}:${p.revision}`; const key = { kind: 'control' as const, conversationId: p.conversationId, activityId };
+    try {
+      assertActive(ctx); const bound = await proposalConnection(p, { tenantId: p.tenantId, objectId: p.objectId, chatKind: p.route.conversation.conversationType === 'groupChat' ? 'groupChat' : 'personal' }, ctx);
+      if (!bound) return 'unavailable';
+      await control({ schema: 1, kind: 'control', scope, conversationId: p.conversationId, activityId, chatKind: bound.connection.chatKind,
+        fingerprint: controlFingerprint(scope, p.conversationId, activityId, p.objectId, `${p.id}:${p.revision}:${p.payloadDigest}`, p.targetDigest),
+        currentTargetDigest: p.targetDigest, desiredTargetDigest: p.targetDigest,
+        route: { serviceUrl: p.route.serviceUrl, channelId: 'msteams', bot: p.route.bot, conversation: { ...p.route.conversation, conversationType: bound.connection.chatKind } },
+        reply: { kind: 'pr-approval', targetId: p.targetId, proposal: p.id, rev: p.revision, digest: p.payloadDigest }, state: 'ready' }, bound.targets, false, ctx, bound.connection);
+      const receipt = await directory.getControl(key, ctx); assertActive(ctx);
+      if (receipt?.state !== 'delivered') return receipt && receipt.state !== 'ready' && receipt.state !== 'rejected' ? 'uncertain' : 'unavailable';
+      try { const version = await options.delegated.accounts.getProposal(p.id, ctx);
+        if (version && !version.proposal.cardActivityId) await options.delegated.accounts.replaceProposal(version, { ...version.proposal, cardActivityId: receipt.providerMessageId }, ctx);
+      } catch { /* The directory receipt remains authoritative. */ }
+      return 'delivered';
+    } catch { return 'uncertain'; }
+    finally { consumers--; }
+  }
+  async function cardAction(input: unknown, supplied: ExchangeContext): Promise<{ status: number; body: unknown }> {
+    const denied = { status: 403, body: {} }; if (consumers >= 4 || !options.delegated) return denied; consumers++;
+    const ctx = { ...supplied, authorizeWrite: () => active(supplied) };
+    try {
+      assertActive(ctx); if (!record(input) || input.type !== 'invoke' || input.name !== 'adaptiveCard/action' || !record(input.conversation) || !record(input.from)) return denied;
+      const value = object(input.value, ['action', 'trigger']); const action = object(value.action, ['type', 'verb', 'data', 'id']); const data = object(action.data, ['proposal', 'rev', 'digest']);
+      if (action.type !== 'Action.Execute' || action.verb !== 'pr-refresh' || data.rev !== 1 || typeof data.proposal !== 'string' || typeof data.digest !== 'string' ||
+        !supplied.subject.objectId || input.from.aadObjectId !== supplied.subject.objectId) return denied;
+      const p = (await options.delegated.accounts.getProposal(data.proposal, ctx))?.proposal;
+      if (!p || p.conversationId !== input.conversation.id || p.tenantId !== input.conversation.tenantId || p.payloadDigest !== data.digest || p.revision !== data.rev ||
+        !await proposalConnection(p, supplied.subject, ctx)) return denied;
+      const card = buildPullRequestCard(p, supplied.subject.objectId === p.objectId ? 'sender' : 'room', false);
+      if (!await safeProposal(p, proposalOutput(p), ctx) || !await safeProposal(p, JSON.stringify(card), ctx)) return denied;
+      assertActive(ctx); return { status: 200, body: { cardInvokeResponse: { statusCode: 200, type: 'application/vnd.microsoft.card.adaptive', value: card } } };
+    } catch { return denied; }
+    finally { consumers--; }
   }
   async function admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>, supplied?: AdmissionContext): Promise<AdmissionResult> {
     if (route.conversation.conversationType === 'channel') return { kind: 'conflict' };
@@ -387,6 +454,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     scope: options.config.targets[0]!.config.scope, admit,
     ...(browser ? { browser } : {}),
     ...(options.delegated ? { exchange } : {}),
+    postProposal, cardAction,
     bindControlSender(value) { if (sender) throw new Error('Control sender already bound'); sender = value; },
     async preflight(targetId, claim, signal) {
       if (consumers >= 4) return false; consumers++;

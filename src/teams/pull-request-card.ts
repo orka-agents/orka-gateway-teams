@@ -1,0 +1,56 @@
+import type { IAdaptiveCard, ITextBlock } from '@microsoft/teams.cards';
+import type { Proposal } from '../accounts/pull-request-proposal.js';
+import { object } from '../storage/table/codec.js';
+import { MAX_OUTGOING_MESSAGE_BYTES } from './format.js';
+
+const label = (s: string, max: number) => Array.from(s).slice(0, max).join('').replace(/&/gu, '&amp;').replace(/</gu, '&lt;')
+  .replace(/>/gu, '&gt;').replace(/([\\`*_{}\[\]()#+.!|~-])/gu, '\\$1') + (Array.from(s).length > max ? '… (truncated)' : '');
+/** Preview only. Decision actions are deliberately absent until the decision handler ships. */
+export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', _decisionsEnabled: boolean): IAdaptiveCard {
+  const block = (text: string, heading = false): ITextBlock => ({ type: 'TextBlock', text, wrap: true, ...(heading ? { weight: 'Bolder', size: 'Medium' } : {}) });
+  const state = p.state === 'expired' ? 'Expired. Ask again to get a new card.' : p.state === 'superseded' ? 'Replaced by a newer request.' :
+    p.state === 'pending' ? viewer === 'sender' ? 'Approval actions are not enabled yet.' : `Waiting for ${label(p.displayName, 80)} to approve. Approval actions are not enabled yet.` : 'This request is no longer pending.';
+  const body: ITextBlock[] = [block('Pull request proposal', true), block(state),
+    block(`Asked by ${label(p.displayName, 80)} · expires ${new Date(p.expiresAt).toISOString()}`),
+    block(`Title (written by the agent): ${label(p.title, 180)}`, true), block(`${label(p.owner, 100)}/${label(p.repo, 100)}`),
+    block(`${label(p.head, 180)} → ${label(p.base, 180)}`),
+    block(`${p.commits} commit(s) · ${p.fileCount}${p.filesComplete ? '' : '+ returned'} files · +${p.additions} −${p.deletions} · head ${p.headSHA.slice(0, 7)}${p.filesComplete ? '' : ' (file list and line totals incomplete)'}`),
+    ...p.files.map(f => block(`${label(f.path, 100)}  +${f.additions} −${f.deletions}`)),
+    ...(p.fileCount > p.files.length ? [block(`+${p.fileCount - p.files.length} more${p.filesComplete ? '' : ' returned files'}`)] : []),
+    block('Description (written by the agent)', true), block(label(p.body || 'No description supplied.', 240)),
+    block(`Opens as you (@${label(p.githubLogin, 39)}) on GitHub. Merging stays with the repository's reviewers.`)];
+  return { type: 'AdaptiveCard', version: '1.5', fallbackText: 'Pull request proposal. Approval actions are not enabled yet.', body,
+    refresh: { action: { type: 'Action.Execute', verb: 'pr-refresh', data: { proposal: p.id, rev: p.revision, digest: p.payloadDigest } }, userIds: [p.senderMRI] },
+    actions: [...(Array.from(p.body).length > 240 ? [{ type: 'Action.ShowCard' as const, title: Array.from(p.body).length > 1800 ? 'Show more description (truncated)' : 'Show full description',
+      card: { type: 'AdaptiveCard' as const, version: '1.5' as const, body: [block(label(p.body, 1800))] } }] : []),
+      { type: 'Action.OpenUrl', title: 'View changes', url: `https://github.com/${encodeURIComponent(p.owner)}/${encodeURIComponent(p.repo)}/compare/${encodeURIComponent(p.base)}...${p.headSHA}` }] };
+}
+/** Closed projection: SDK/arbitrary card properties cannot become an HTTP invoke response. */
+export function cardInvokeResponse(input: unknown): { statusCode: 200; type: 'application/vnd.microsoft.card.adaptive'; value: IAdaptiveCard } | undefined {
+  try {
+    if (!input || typeof input !== 'object' || !('statusCode' in input) || input.statusCode !== 200 || !('type' in input) ||
+      input.type !== 'application/vnd.microsoft.card.adaptive' || !('value' in input)) return undefined;
+    if (Buffer.byteLength(JSON.stringify(input.value)) > MAX_OUTGOING_MESSAGE_BYTES) return undefined;
+    const card = JSON.parse(JSON.stringify(input.value)) as unknown;
+    const string = (s: unknown) => { if (typeof s !== 'string' || Buffer.byteLength(s) > MAX_OUTGOING_MESSAGE_BYTES) throw new Error(); };
+    const validate = (input: unknown, nested = false) => {
+      const c = object(input, ['type', 'version', 'fallbackText', 'body', 'actions', 'refresh']);
+      if (c.type !== 'AdaptiveCard' || c.version !== '1.5' || !Array.isArray(c.body) || c.body.length > 32) throw new Error();
+      if (c.fallbackText !== undefined) string(c.fallbackText);
+      for (const b of c.body) { const t = object(b, ['type', 'text', 'wrap', 'weight', 'size']);
+        if (t.type !== 'TextBlock' || t.wrap !== true || t.weight !== undefined && t.weight !== 'Bolder' || t.size !== undefined && t.size !== 'Medium') throw new Error(); string(t.text); }
+      if (c.actions !== undefined) {
+        if (nested || !Array.isArray(c.actions) || c.actions.length > 2) throw new Error();
+        for (const a of c.actions) { const v = object(a, ['type', 'title', ...(a.type === 'Action.ShowCard' ? ['card'] : ['url'])]); string(v.title);
+          if (v.type === 'Action.ShowCard') validate(v.card, true);
+          else if (v.type !== 'Action.OpenUrl' || typeof v.url !== 'string' || !/^https:\/\/github\.com\/[A-Za-z0-9%_.-]+\/[A-Za-z0-9%_.-]+\/compare\/[A-Za-z0-9%_.-]+\.\.\.[a-f0-9]{40}$/u.test(v.url)) throw new Error(); }
+      }
+      if (c.refresh !== undefined) {
+        if (nested) throw new Error(); const r = object(c.refresh, ['action', 'userIds']); const a = object(r.action, ['type', 'verb', 'data']); const d = object(a.data, ['proposal', 'rev', 'digest']);
+        if (a.type !== 'Action.Execute' || a.verb !== 'pr-refresh' || d.rev !== 1 || !/^[a-f0-9]{64}$/u.test(String(d.proposal)) || !/^[a-f0-9]{64}$/u.test(String(d.digest)) ||
+          !Array.isArray(r.userIds) || r.userIds.length !== 1) throw new Error(); string(r.userIds[0]);
+      }
+    };
+    validate(card); return { statusCode: 200, type: 'application/vnd.microsoft.card.adaptive', value: card as IAdaptiveCard };
+  } catch { return undefined; }
+}

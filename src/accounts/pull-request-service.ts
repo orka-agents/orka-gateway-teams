@@ -4,7 +4,7 @@ import { AccountError } from './store.js';
 import type { TaskGrant } from './grants.js';
 import type { createGitHub } from './github.js';
 import { githubArguments, GitHubError } from './github.js';
-import { proposalIdentity, proposalDigest, proposalArgs } from './pull-request-proposal.js';
+import { proposalIdentity, proposalDigest, proposalArgs, proposalOutput } from './pull-request-proposal.js';
 import type { Proposal } from './pull-request-proposal.js';
 import { canonicalJSON } from '../directory/codec.js';
 
@@ -29,9 +29,9 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
           generation: grant.generation, githubGeneration: grant.githubGeneration, targetId: grant.targetId, targetDigest: grant.targetDigest,
           grantRef: grant.ref, taskUID: grant.binding.taskUID, createdAt, expiresAt: createdAt + 3_600_000, payloadDigest: '' } as Proposal;
         p.payloadDigest = proposalDigest(p);
-        if (!await safeOutput(JSON.stringify(p))) throw new GitHubError();
+        if (!await safeOutput(proposalOutput(p))) throw new GitHubError();
       }
-      if (!await safeOutput(JSON.stringify(p))) throw new GitHubError();
+      if (!await safeOutput(proposalOutput(p))) throw new GitHubError();
       p = await options.accounts.reserveProposal({ ...p, state: 'pending' }, operation, ctx);
       if (p.state !== 'pending') return { text: 'This approval request is no longer pending. Ask again for a new card.' };
       const sent = await options.postProposal(p, ctx);
