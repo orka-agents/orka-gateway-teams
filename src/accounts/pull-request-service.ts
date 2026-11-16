@@ -34,15 +34,7 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
     } else p = current;
     await options.decisions!.postDecision(p, ctx);
   }
-  async function settle(p: Proposal, outcome: ProposalOutcome, operation: DirectoryContext) {
-    if (active(operation)) return finish(p, outcome, operation);
-    // Native operation work has drained. A separate bounded settlement may only save/send the outcome, never retry GitHub.
-    const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 4000); timer.unref();
-    const ctx = { signal: AbortSignal.any([controller.signal, shutdown.signal, options.decisions!.authority.lost]), deadline: performance.now() + 4000,
-      authorizeWrite: () => active(ctx) };
-    try { if (active(ctx)) await finish(p, outcome, ctx); } finally { clearTimeout(timer); }
-  }
-  async function opening(p: Proposal, ctx: DirectoryContext) {
+  async function opening(p: Proposal, ctx: DirectoryContext, settlement: DirectoryContext) {
     const guards: ReturnType<AccountStore['watch']>[] = []; let reserving = false; let sent = false; let token: string | undefined;
     const bound = { ...ctx, authorizeWrite: () => active(ctx) && guards.every(g => g.active()) };
     let outcome: ProposalOutcome;
@@ -82,7 +74,7 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
       if (e instanceof GitHubError && e.code === 'unauthorized' && token) try { await options.githubAccounts.invalidate({ objectId: p.objectId }, p.githubGeneration, token, ctx); } catch { /* No retry. */ }
     } finally { for (const g of guards) g.release(); }
     // Settlement uses runtime authority, not a credential guard invalidated by disconnect.
-    await settle(p, outcome!, ctx);
+    await finish(p, outcome!, settlement);
   }
   async function reconcile(p: Proposal, ctx: DirectoryContext, owned = false) {
     if (!active(ctx) || !owned && effectIds.has(p.id)) return;
@@ -119,8 +111,11 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 30000); timer.unref();
     const ctx = { signal: AbortSignal.any([controller.signal, shutdown.signal, options.decisions!.authority.lost]), deadline: performance.now() + 30000,
       authorizeWrite: () => active(ctx) };
-    const pending = (readOnly ? reconcile(p, ctx, true) : opening(p, ctx)).catch(() => { /* Retained claim/write evidence is reconciled, never re-POSTed. */ })
-      .finally(() => { clearTimeout(timer); effects.delete(pending); effectIds.delete(p.id); places--; });
+    // Reserve the last four seconds of the same thirty-second lifetime for outcome settlement, not more GitHub work.
+    const operation = new AbortController(); const operationTimer = setTimeout(() => operation.abort(), 26000); operationTimer.unref();
+    const work = { ...ctx, signal: AbortSignal.any([ctx.signal, operation.signal]), deadline: ctx.deadline - 4000 };
+    const pending = (readOnly ? reconcile(p, ctx, true) : opening(p, work, ctx)).catch(() => { /* Retained claim/write evidence is reconciled, never re-POSTed. */ })
+      .finally(() => { clearTimeout(timer); clearTimeout(operationTimer); effects.delete(pending); effectIds.delete(p.id); places--; });
     effects.add(pending);
   }
   async function decide(expected: Proposal, decision: 'approve' | 'reject', activityId: string, supplied: ExchangeContext): Promise<Proposal> {

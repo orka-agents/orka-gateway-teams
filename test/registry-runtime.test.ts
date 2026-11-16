@@ -713,7 +713,7 @@ test('native registry wires optional GitHub custody and checks its secret before
   const beforeApproval = api.requests.filter(r => r.method === 'POST').length;
   const approve = { ...refresh, id: 'approve-proposal', value: { action: action('pr-approve', approval) } };
   const immediate = await post(runtime.port, f.auth.token(), approve); assert.equal(immediate.status, 200); assert.match(await immediate.text(), /Opening/);
-  await eventually(() => sent.some(s => s.includes('https://github.com/acme/repo/pull/12')));
+  await eventually(() => sent.some(s => JSON.parse(s).attachments[0].content.actions?.some((a: { url?: string }) => a.url === 'https://github.com/acme/repo/pull/12')));
   assert.equal(api.requests.filter(r => r.method === 'POST').length, beforeApproval + 1);
   assert.deepEqual(api.requests.at(-1)!.body, { base: 'bootstrap', head: 'orka/fix', title: 'Retry the lease read', body: '' });
   assert.equal((await post(runtime.port, f.auth.token(), approve)).status, 200);

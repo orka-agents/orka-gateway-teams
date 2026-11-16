@@ -92,7 +92,7 @@ test('operation_deadline_settles_uncertain_after_native_work_drains', { timeout:
   });
   t.mock.timers.enable({ apis: ['setTimeout'] }); t.after(() => t.mock.timers.reset());
   await f.decide(); await reached.promise;
-  t.mock.timers.tick(30001); t.mock.timers.reset();
+  t.mock.timers.tick(26001); t.mock.timers.reset();
   const p = await f.settled(); assert.equal(p.state, 'uncertain');
   assert.equal(f.requests.filter(r => r.method === 'POST').length, 1);
 });
