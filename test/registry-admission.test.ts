@@ -318,6 +318,19 @@ for (const kind of ['personal', 'groupChat'] as const) test(`${kind}: group_revi
   f.policy({ kind: 'unavailable', category: 'graph-unavailable' }); assert.equal(await f.sink.admitRevision(p, ctx), 'full'); assert.equal(f.turns.length, 1);
   f.policy({ kind: 'no-access', text: '' }); assert.equal(await f.sink.admitRevision(p, ctx), 'conflict'); assert.equal(f.turns.length, 1);
 });
+test('expired revision operation stays retryable and a fresh authenticated attempt can admit the saved note', async t => {
+  const d = delegatedFixture(); await d.delegated.accounts.complete(); const f = await fixture(t, 2, d.delegated); await f.provision();
+  const p = { ...proposalFixture(), ...f.scope, conversationId: f.event.contextId, objectId: d.ch.objectId, senderMRI: '29:fixture-person', route: f.route,
+    targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest!, state: 'revise-requested' as const,
+    claim: { decision: 'revise' as const, tenantId: f.scope.tenantId, objectId: d.ch.objectId, invokeActivityId: 'saved-invoke', decidedAt: Date.now(), note: 'saved note', revisionReplyTarget: 'saved-reply' } };
+  const ctx = { ...context(), delegatedTenant: true, controlRecipient: { id: p.senderMRI } };
+  assert.equal(await f.sink.admitRevision(p, { ...ctx, deadline: performance.now() - 1 }), 'full');
+  const cancelled = new AbortController(); cancelled.abort();
+  assert.equal(await f.sink.admitRevision(p, { ...ctx, signal: cancelled.signal }), 'full');
+  assert.equal(f.turns.length, 0);
+  assert.equal(await f.sink.admitRevision(p, ctx), 'delivered');
+  assert.equal(f.turns.length, 1); assert.equal(f.turns[0]!.event.replyTarget, 'saved-reply');
+});
 test('signin_control_is_not_revision_delivered; authenticated sender follow-up rechecks sign-in without changing event identity', async t => {
   const d = delegatedFixture(); const f = await fixture(t, 2, d.delegated); await f.provision();
   const p = { ...proposalFixture(), ...f.scope, conversationId: f.event.contextId, objectId: d.ch.objectId, senderMRI: '29:fixture-person', route: f.route,

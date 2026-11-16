@@ -44,9 +44,11 @@ test('revision cards show pending/signin/conflict rather than claiming delivery;
   const p = proposalFixture();
   for (const status of ['pending', 'full', 'signin-required', 'conflict', 'delivered'] as const) {
     const wire = JSON.stringify(buildPullRequestCard({ ...p, state: 'revise-requested', revisionAdmission: status,
-      claim: { decision: 'revise', tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: 'invoke', decidedAt: p.createdAt, note: '**test**', revisionReplyTarget: 'new-reply' } }, 'sender', true));
+      claim: { decision: 'revise', tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: 'invoke', decidedAt: p.createdAt, note: '**test** <at>someone</at>', revisionReplyTarget: 'new-reply' } }, 'sender', true));
     assert.match(wire, status === 'delivered' ? /asked for changes/ : status === 'signin-required' ? /Sign in, then send your revision again/ : status === 'conflict' ? /not sent/ : /Sending your revision/);
     assert.equal(wire.includes('asked for changes'), status === 'delivered'); assert.ok(!wire.includes('pr-revise'));
+    assert.ok(!wire.includes('**test**')); assert.ok(!wire.includes('<at>'));
+    if (status === 'delivered') assert.ok(wire.includes('&lt;at&gt;someone&lt;/at&gt;'));
   }
 });
 test('card_escapes_untrusted_labels_and_fits_20KiB', () => {

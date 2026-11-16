@@ -239,7 +239,8 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
   }
   async function admitRevision(p: Proposal, ctx: ExchangeContext): Promise<Exclude<RevisionAdmission, 'pending'>> {
     const claim = p.claim; const kind = p.route.conversation.conversationType;
-    if (!active(ctx) || p.state !== 'revise-requested' || claim?.decision !== 'revise' || kind === 'channel' ||
+    if (!active(ctx)) return 'full';
+    if (p.state !== 'revise-requested' || claim?.decision !== 'revise' || kind === 'channel' ||
       ctx.subject.tenantId !== p.tenantId || ctx.subject.objectId !== p.objectId || ctx.subject.chatKind !== kind ||
       p.appId !== scope.appId || p.tenantId !== scope.tenantId || !ctx.delegatedTenant || ctx.controlRecipient?.id !== p.senderMRI) return 'conflict';
     const connection = await directory.getConnection(p.conversationId, ctx); const slot = slots.get(p.targetId);

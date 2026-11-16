@@ -421,6 +421,10 @@ A sign-in control reply is not inbox delivery: sign in, then send the revision
 again by authenticated sender refresh/redelivery. Neither sign-in completion nor
 startup automatically resumes it. Retries reuse the saved event, sender profile,
 route and reply target; new click text cannot replace the winning note.
+If the inbox accepts the turn but its proposal-status write is lost, a later
+expired token or changed account generation can prevent confirming that delivery.
+The card may then ask for sign-in or report a conflict despite the accepted turn;
+check the conversation before sending the same request again.
 
 The revision uses current policy, sign-in and a fresh normal grant in the same
 conversation/session, without the old Task's pass or tool authority. Command
