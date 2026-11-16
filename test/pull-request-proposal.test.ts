@@ -68,6 +68,35 @@ test('replacement_cannot_erase_unprojected_claim_or_note', async t => {
   const old = (await f.store.getProposal(p.id, context()))!.proposal;
   assert.equal(old.claim?.note, 'keep this private note'); assert.equal(old.claim?.revisionReplyTarget, 'revision-reply');
 });
+test('double_click_has_one_winner and new_proposal_and_approve_share_selector', async t => {
+  const f = await grantsFixture(t); const p = proposalFixture(); await f.store.reserveProposal(p, 'operation', context());
+  const claim = { decision: 'approve' as const, tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: 'invoke-1', decidedAt: f.now() };
+  const results = await Promise.allSettled([f.store.claimProposal(p, claim, context()), f.open().claimProposal(p, claim, context())]);
+  assert.equal(results.filter(r => r.status === 'fulfilled' && r.value).length, 1);
+  assert.equal((await f.store.getProposal(p.id, context()))?.proposal.state, 'approving');
+  await f.store.reserveProposal(proposalFixture('second'), 'second', context());
+  const old = (await f.store.getProposal(p.id, context()))!.proposal;
+  assert.deepEqual(old.claim, claim); assert.equal(old.state, 'approving');
+  assert.equal(await f.store.claimProposal(p, claim, context()), false);
+});
+test('expired_boundary_cannot_claim and replacement_before_decision_wins', async t => {
+  const f = await grantsFixture(t); const p = proposalFixture(); await f.store.reserveProposal(p, 'operation', context());
+  const claim = { decision: 'reject' as const, tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: 'invoke-1', decidedAt: f.now() };
+  await f.store.reserveProposal(proposalFixture('second'), 'second', context());
+  assert.equal(await f.store.claimProposal(p, claim, context()), false);
+  const q = (await f.store.getProposal(proposalFixture('second').id, context()))!.proposal;
+  f.advance(3_600_000);
+  assert.equal(await f.store.claimProposal(q, { ...claim, decidedAt: f.now() }, context()), false);
+  assert.equal((await f.store.getProposal(q.id, context()))?.proposal.state, 'expired');
+});
+test('claim_rejects_wrong_actor_digest_and_future_claim_time', async t => {
+  const f = await grantsFixture(t); const p = proposalFixture(); await f.store.reserveProposal(p, 'operation', context());
+  const claim = { decision: 'approve' as const, tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: 'invoke', decidedAt: f.now() };
+  for (const bad of [{ ...claim, objectId: 'other' }, { ...claim, tenantId: 'other' }, { ...claim, decidedAt: f.now() + 1 }])
+    assert.equal(await f.store.claimProposal(p, bad, context()), false);
+  assert.equal(await f.store.claimProposal({ ...p, payloadDigest: 'f'.repeat(64) }, claim, context()), false);
+  assert.equal((await f.store.getProposal(p.id, context()))?.proposal.state, 'pending');
+});
 test('old_grant_round_trip_unchanged and child_inherits_origin_not_parent_tool_authority', async t => {
   const f = await grantsFixture(t); assert.deepEqual(taskGrant(f.input), f.input);
   const p = proposalFixture(); const { conversationId, replyTarget, route, senderMRI, objectId, displayName, activityId } = p;

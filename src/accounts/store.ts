@@ -8,8 +8,8 @@ import type { DirectoryBinding, DirectoryContext, DirectoryDependencies } from '
 import { DirectoryError } from '../directory/types.js';
 import { etag, integer, object, uuid } from '../storage/table/codec.js';
 
-import { decodeProposal, decodeSelector, proposalIdentity, proposalSelectorId, proposalArgs, proposalDigest, projectClaim } from './pull-request-proposal.js';
-import type { Proposal, ProposalVersion, ProposalSelector } from './pull-request-proposal.js';
+import { decodeProposal, decodeSelector, proposalIdentity, proposalSelectorId, proposalArgs, proposalDigest, projectClaim, claimEvidence } from './pull-request-proposal.js';
+import type { Proposal, ProposalVersion, ProposalSelector, ClaimEvidence } from './pull-request-proposal.js';
 
 export interface AccountSubject { objectId: string }
 export interface AccountTokens { accessToken: string; expiresAt: number; refreshToken?: string; assertion?: string; assertionExpiresAt?: number;
@@ -302,6 +302,22 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         await persist(selector, { kind: 'proposal-selector', id: proposalSelectorId(p), objectId: p.objectId,
           generation: p.generation, proposalId: p.id, revision: 1, state: 'pending' }, c);
         return (await proposalVersion(p.id, c))!.proposal;
+      });
+    },
+    claimProposal(expected: Proposal, evidence: ClaimEvidence, ctx: DirectoryContext): Promise<boolean> {
+      return run(ctx, async c => {
+        const claim = claimEvidence(evidence); const row = await read(proposalKey(expected.id), c);
+        if (row?.value.kind !== 'proposal') return false;
+        const p = row.value.proposal; const selector = await read(selectorKey(proposalSelectorId(p)), c);
+        if (p.state !== 'pending' || p.payloadDigest !== expected.payloadDigest || p.revision !== expected.revision ||
+          claim.tenantId !== p.tenantId || claim.objectId !== p.objectId || claim.decidedAt < p.createdAt || claim.decidedAt > now() ||
+          now() >= p.expiresAt || selector?.value.kind !== 'proposal-selector' || selector.value.state !== 'pending' ||
+          selector.value.proposalId !== p.id || selector.value.revision !== p.revision) return false;
+        try { await persist(selector, { ...selector.value, state: 'claimed', claim }, c); }
+        catch (e) { if (e instanceof AccountError && e.code === 'conflict') return false; throw e; }
+        // Selector is the decision arbiter. A failed projection is recovered, never permission to retry the effect.
+        await persist(row, { ...row.value, proposal: projectClaim(p, claim) }, c);
+        return true;
       });
     },
     replaceProposal(expected: ProposalVersion, next: Proposal, ctx: DirectoryContext): Promise<ProposalVersion> {

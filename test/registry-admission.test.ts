@@ -252,7 +252,7 @@ function delegatedFixture() {
   const accounts = {
     providerIdentity: async () => undefined,
     getProposal: async (): Promise<ProposalVersion | undefined> => undefined, reserveProposal: async () => { throw new Error('not a proposal'); },
-    replaceProposal: async () => { throw new Error('not a proposal'); },
+    replaceProposal: async () => { throw new Error('not a proposal'); }, claimProposal: async () => { throw new Error('not a proposal'); },
     reserveGrant: async (input: TaskGrant) => input,
     getGrant: async (_ref: string) => undefined as TaskGrant | undefined,
     watch: () => { throw new Error('not a tool handoff'); },
