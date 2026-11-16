@@ -19,7 +19,9 @@ import type { TaskGrant } from '../src/accounts/grants.js';
 import { grantReference } from '../src/accounts/grants.js';
 import type { AccountChallenge, BrowserAttempt } from '../src/accounts/store.js';
 import type { ConnectionRecord } from '../src/directory/types.js';
+import { createGroupAuthorizer } from '../src/policy/admission.js';
 import type { PolicyAdmission } from '../src/policy/admission.js';
+import { snapshotGroupPolicy } from '../src/policy/config.js';
 import type { AdmissionContext } from '../src/ingress/server.js';
 import { createExternalEventId } from '../src/teams/ids.js';
 import type { EventEnvelope } from '../src/protocol/types.js';
@@ -37,6 +39,7 @@ async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<ty
   const config = snapshotRegistry(input); const scope = { appId: config.targets[0]!.config.scope.appId, tenantId: expectedEvent.accountId };
   const memory = memoryDirectoryTable(); const directory = await openDirectory(memory.table, context()); t.after(() => directory.close());
   let eligible: PolicyAdmission = { kind: 'eligible', targets: config.targets.map(t => ({ id: t.id, label: t.label })) };
+  let policyAuthorizer: Pick<ReturnType<typeof createGroupAuthorizer>, 'authorize'> | undefined;
   let authorized = 0; let outcome: ProviderResult = { kind: 'delivered', providerMessageId: 'receipt' }; let allowed = true;
   const turns: { event: Readonly<EventEnvelope>; route: Readonly<ReplyRoute> }[] = [];
   const sent: { text: string; route: unknown }[] = []; const admitted: string[] = []; const checks: string[] = []; let failCheck = false; let failureCategory: BindingCheckError['category'] = 'binding-conflict';
@@ -50,7 +53,7 @@ async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<ty
   const logs: string[] = [];
   const makeSink = () => createRegistryAdmission({ config, directory, slots, authority, active: () => allowed,
     ...(delegated ? { delegated } : {}),
-    authorizer: { authorize: async () => { authorized++; return eligible; } }, log: (category, target) => logs.push(category + ':' + target) });
+    authorizer: { authorize: async (...args) => { authorized++; return policyAuthorizer ? policyAuthorizer.authorize(...args) : eligible; } }, log: (category, target) => logs.push(category + ':' + target) });
   const sink = makeSink();
   const bindSender = (s: typeof sink) => s.bindControlSender({ send: async (route, message) => {
     sent.push({ text: JSON.stringify(message), route }); await sendGate; return outcome;
@@ -69,6 +72,7 @@ async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<ty
     return directory.markProvisioned(await directory.reserveConnection(conn, context()), evidence(conn), context());
   };
   return { sink, restart: () => { const s = makeSink(); bindSender(s); return s; }, directory, scope, config, slots, event, route, run, provision, sent, admitted, turns, checks, logs, authorized: () => authorized,
+    authorizeWith: (value: typeof policyAuthorizer) => { policyAuthorizer = value; },
     policy: (value: PolicyAdmission) => { eligible = value; }, outcome: (value: ProviderResult) => { outcome = value; },
     fail: (value: boolean, category: BindingCheckError['category'] = 'binding-conflict') => { failCheck = value; failureCategory = category; }, checkGate: (value: Promise<void>) => { checkGate = value; },
     sendGate: (value: Promise<void>) => { sendGate = value; }, revoke: () => { allowed = false; } };
@@ -533,6 +537,21 @@ test('browser completion correlates the saved sign-in control and asks only for 
   await f.run('new work'); assert.equal(f.admitted.length, 1);
 });
 
+test('user-rule removal after draining blocks a retained browser callback before linking or work', async t => {
+  const d = delegatedFixture(); const f = await fixture(t, 2, { ...d.delegated, publicOrigin: 'https://signin.example.invalid' });
+  const makeAuthorizer = (listed: boolean) => createGroupAuthorizer(snapshotGroupPolicy({ schemaVersion: 1, policies: [
+    { schemaVersion: 1, targetId: 'primary', frontAgent: 'front', rules: listed ? [{ userObjectId: d.ch.objectId, chatKinds: ['personal'] }] : [] },
+  ] }, registryInput()));
+  const original = makeAuthorizer(true); f.authorizeWith(original);
+  await f.provision(); await f.run('work', 'work');
+  assert.equal(typeof await f.sink.browser!.begin(d.ch.id, context()), 'string');
+  await original.close();
+  const removed = makeAuthorizer(false); t.after(() => removed.close()); f.authorizeWith(removed);
+  const restarted = f.restart();
+  assert.equal(await restarted.browser!.callback(new URLSearchParams({ state: 'synthetic-private-state', code: 'synthetic-private-code' }), context()), false);
+  assert.equal((await d.delegated.accounts.inspect()).linked, false); assert.equal(f.admitted.length, 0);
+  assert.equal(f.sent.length, 1); assert.doesNotMatch(JSON.stringify({ sent: f.sent, logs: f.logs }), /synthetic-private/);
+});
 test('browser wrong account, OAuth error, missing original control and changed policy never link or replay work', async t => {
   for (const reason of ['account', 'error', 'control', 'policy', 'connection'] as const) {
     const d = delegatedFixture(); const f = await fixture(t, 2, { ...d.delegated, publicOrigin: 'https://signin.example.invalid' });

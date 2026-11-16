@@ -1,5 +1,5 @@
 import type { PolicyRequestContext } from '../auth/graph-identity.js';
-import { tlsVerificationEnabled } from '../ingress/config.js';
+import { ConfigurationError, tlsVerificationEnabled } from '../ingress/config.js';
 import { subscribeAuditAbort } from '../storage/table/audit.js';
 import type { GroupPolicy, PolicyChatKind } from './config.js';
 import { uuid } from './config.js';
@@ -28,7 +28,8 @@ export function readPolicySubject(activity: unknown, tenantId: string): PolicySu
 interface CompleteMembership { readonly groups: readonly string[]; readonly wall: number; readonly mono: number }
 
 /** In-memory policy only: no admission receipt, connection, Task, log or Teams send. */
-export function createGroupAuthorizer(policy: GroupPolicy, membership: GraphMembershipClient) {
+export function createGroupAuthorizer(policy: GroupPolicy, membership?: GraphMembershipClient) {
+  if (policy.groupIds.length && !membership) throw new ConfigurationError();
   const cache = new Map<string, CompleteMembership>(); const work = new Set<Promise<PolicyAdmission>>();
   const shutdown = new AbortController(); let closing: Promise<void> | undefined;
   let lastWall = Date.now(); let lastMono = performance.now();
@@ -66,7 +67,7 @@ export function createGroupAuthorizer(policy: GroupPolicy, membership: GraphMemb
               const controller = new AbortController(); const abort = () => controller.abort();
               const caller = subscribeAuditAbort(signal, abort); const owner = subscribeAuditAbort(shutdown.signal, abort);
               if (signal.aborted || shutdown.signal.aborted) abort();
-              try { groups = await membership.lookup(objectId, policy.groupIds, { signal: controller.signal, deadline }); }
+              try { groups = await membership!.lookup(objectId, policy.groupIds, { signal: controller.signal, deadline }); }
               finally { caller(); owner(); }
             }
             entry = Object.freeze({ groups, ...started });
@@ -75,7 +76,8 @@ export function createGroupAuthorizer(policy: GroupPolicy, membership: GraphMemb
           }
           if (!eligible() || !fresh(entry, clock())) return unavailable;
           cache.delete(key); if (cache.size >= 1024) cache.delete(cache.keys().next().value!); cache.set(key, entry);
-          const targets = policy.targets.filter(t => t.rules.some(r => r.chatKinds.includes(kind) && entry!.groups.includes(r.groupId)))
+          const targets = policy.targets.filter(t => t.rules.some(r => r.chatKinds.includes(kind) &&
+            ('userObjectId' in r ? r.userObjectId === objectId : entry!.groups.includes(r.groupId))))
             .map(t => Object.freeze({ id: t.id, label: t.label }));
           if (!targets.length || (targetId !== undefined && !targets.some(t => t.id === targetId))) return noAccess;
           return Object.freeze({ kind: 'eligible', targets: Object.freeze(targets) });
@@ -86,7 +88,7 @@ export function createGroupAuthorizer(policy: GroupPolicy, membership: GraphMemb
     close() {
       if (!closing) {
         shutdown.abort();
-        closing = Promise.allSettled([...work, membership.close()]).then(() => { cache.clear(); });
+        closing = Promise.allSettled([...work, membership?.close()]).then(() => { cache.clear(); });
       }
       return closing;
     },

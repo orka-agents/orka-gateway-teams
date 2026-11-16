@@ -130,8 +130,16 @@ test('synthetic identity response explicitly declares JSON content', async t => 
   await response.arrayBuffer(); assert.equal(response.headers.get('content-type'), 'application/json');
 });
 
-test('native live discovery, connection, current sender admission and recurring relay checks', async t => {
-  const f = await fixture(t); const graph = await policyFixture(t, f); let orka = 0;
+function userPolicyFixture(f: Awaited<ReturnType<typeof fixture>>, users = ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa']) {
+  writeFileSync(f.config.groupPolicyFile, JSON.stringify({ schemaVersion: 1,
+    policies: f.config.targets.map(target => ({ schemaVersion: 1, targetId: target.id, frontAgent: 'front',
+      rules: users.map(userObjectId => ({ userObjectId, chatKinds: ['personal'] })) })) }));
+  let calls = 0;
+  const forbidden = () => { calls++; throw new Error('Graph must not run'); };
+  return { deps: { ...f.deps, graphIdentityRequest: forbidden, graphRequest: forbidden }, calls: () => calls };
+}
+for (const mode of ['group', 'user']) test(`${mode} policy: native live discovery, connection, current sender admission and recurring relay checks`, async t => {
+  const f = await fixture(t); const graph = mode === 'group' ? await policyFixture(t, f) : userPolicyFixture(f); let orka = 0;
   const upstream = await httpsFixture(t, async (req, res) => {
     let text = ''; for await (const chunk of req) text += chunk;
     const event = JSON.parse(text); orka++; res.writeHead(202); res.end(JSON.stringify({ status: 'accepted', eventId: event.externalEventId, state: 'Queued' }));
@@ -150,7 +158,7 @@ test('native live discovery, connection, current sender admission and recurring 
   await eventually(() => orka === 1); assert.ok(f.kubernetesCalls() >= before + 12, 'admission and relay each perform fresh checks');
   input.id = 'denied-sender'; input.from.aadObjectId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
   assert.equal((await post(runtime.port, f.auth.token(), input)).status, 200); assert.match(messages.at(-1)!, /You don't have access/); assert.equal(orka, 1);
-  assert.equal(graph.calls(), 2);
+  assert.equal(graph.calls(), mode === 'group' ? 2 : 0);
   const scope = { appId: f.config.targets[0]!.config.scope.appId, tenantId: f.config.targets[0]!.config.scope.tenantId };
   const rows = [...f.directory.rows.values()].map(row => decodeEntity(scope, row).value);
   assert.equal(rows.filter(row => row.kind === 'conn' && row.state === 'provisioned').length, 1);
@@ -507,8 +515,8 @@ test('SSO redelivery cannot grant authority to a retained pre-SSO event with its
   } finally { await reopened.close(); }
 });
 
-test('native registry SSO stores only ciphertext, authenticates invokes, survives restart and disconnects without replaying old work', async t => {
-  const f = await fixture(t); const graph = await policyFixture(t, f); const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
+for (const mode of ['group', 'user']) test(`${mode} policy: native registry SSO stores only ciphertext, authenticates invokes, survives restart and disconnects without replaying old work`, async t => {
+  const f = await fixture(t); const graph = mode === 'group' ? await policyFixture(t, f) : userPolicyFixture(f); const pair = generateKeyPairSync('rsa', { modulusLength: 2048 });
   const oid = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'; const keyFile = join(f.files, 'account-key');
   writeFileSync(keyFile, 'ab'.repeat(32), { mode: 0o600 });
   for (const target of f.config.targets) { target.config.receiver = { ...miConfig, managedIdentityHost: 'azure-container-apps' }; Object.assign(target, { taskPassToken: `controller-${target.id}` }); }
@@ -590,10 +598,12 @@ test('native registry SSO stores only ciphertext, authenticates invokes, survive
   assert.equal(external.includes('synthetic-private-workiq'), false); assert.equal(external.includes(invoke.value.token), false);
   for (const row of f.accounts.rows.values()) { const payload = Buffer.from(String(row.Payload), 'base64').toString();
     assert.equal(payload.includes('synthetic-private-workiq'), false); assert.equal(payload.includes(invoke.value.token), false); }
+  if (mode === 'user') assert.equal(graph.calls(), 0);
 });
 
-test('native registry wires optional GitHub custody and checks its secret before ownership', async t => {
-  const f = await fixture(t, true, 1); const graph = await policyFixture(t, f);
+for (const mode of ['group', 'user']) test(`${mode} policy: native registry wires optional GitHub custody and checks its secret before ownership`, async t => {
+  const f = await fixture(t, true, 1); const graph = mode === 'group' ? await policyFixture(t, f) : userPolicyFixture(f,
+    ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb']);
   const { githubFixture } = await import('./support/github.js'); const remote = await githubFixture(t);
   const { toolsFixture } = await import('./support/github-tools.js'); const api = await toolsFixture(t);
   const keyFile = join(f.files, 'account-key'); const clientSecretFile = join(f.files, 'github-secret');
@@ -743,6 +753,17 @@ test('native registry wires optional GitHub custody and checks its secret before
   });
   const beforeApproval = api.requests.filter(r => r.method === 'POST').length;
   const approve = { ...refresh, id: 'approve-proposal', value: { action: action('pr-approve', approval) } };
+  if (mode === 'user') {
+    await runtime.stop(); await runtime.done;
+    userPolicyFixture(f, ['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb']);
+    runtime = await startRegistryRuntime(config, deps);
+    assert.equal((await post(runtime.port, f.auth.token(), approve)).status, 403);
+    const revokedRead = await post(runtime.port, f.auth.token(), { ...refresh, value: { action: next.refresh.action } });
+    assert.equal(revokedRead.status, 403);
+    assert.equal(api.requests.filter(r => r.method === 'POST').length, beforeApproval);
+    await runtime.stop(); await runtime.done;
+    userPolicyFixture(f); runtime = await startRegistryRuntime(config, deps);
+  }
   const immediate = await post(runtime.port, f.auth.token(), approve); assert.equal(immediate.status, 200); assert.match(await immediate.text(), /Opening/);
   await eventually(() => sent.some(s => JSON.parse(s).attachments[0].content.actions?.some((a: { url?: string }) => a.url === 'https://github.com/acme/repo/pull/12')));
   assert.equal(api.requests.filter(r => r.method === 'POST').length, beforeApproval + 1);
@@ -754,5 +775,6 @@ test('native registry wires optional GitHub custody and checks its secret before
   message.id = 'disconnect-github'; message.text = 'disconnect github'; assert.equal((await post(runtime.port, f.auth.token(), message)).status, 200);
   assert.match(sent.at(-1)!, /GitHub account is disconnected/);
   await runtime.stop(); await runtime.done; assert.equal(remote.sockets(), 0);
+  if (mode === 'user') assert.equal(graph.calls(), 0);
   assert.doesNotMatch(JSON.stringify({ sent, directory: [...f.directory.rows.values()], accounts: [...f.accounts.rows.values()] }), /PRIVATE/);
 });

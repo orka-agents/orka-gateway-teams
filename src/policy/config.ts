@@ -7,10 +7,12 @@ import { auditFields } from '../storage/table/audit.js';
 
 export type PolicyChatKind = 'personal' | 'groupChat';
 export interface GroupRule { readonly groupId: string; readonly chatKinds: readonly PolicyChatKind[] }
+export interface UserRule { readonly userObjectId: string; readonly chatKinds: readonly PolicyChatKind[] }
+export type PolicyRule = GroupRule | UserRule;
 export interface GroupPolicy {
-  readonly tenantId: string; readonly graphIdentityClientId: string; readonly digest: string;
+  readonly tenantId: string; readonly graphIdentityClientId?: string; readonly digest: string;
   readonly groupIds: readonly string[];
-  readonly targets: readonly Readonly<{ id: string; label: string; rules: readonly GroupRule[] }>[];
+  readonly targets: readonly Readonly<{ id: string; label: string; rules: readonly PolicyRule[] }>[];
 }
 export function uuid(value: unknown): string {
   if (typeof value !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)) throw new ConfigurationError();
@@ -22,27 +24,33 @@ export function snapshotGroupPolicy(input: unknown, registry: RegistryConfig): G
     const registered = snapshotRegistry(registry);
     const root = auditFields(input, ['schemaVersion', 'graphIdentityClientId', 'policies']);
     const tenantId = uuid(registered.targets[0]!.config.scope.tenantId);
-    const graphIdentityClientId = uuid(root.graphIdentityClientId);
+    const graphIdentityClientId = Object.hasOwn(root, 'graphIdentityClientId') ? uuid(root.graphIdentityClientId) : undefined;
     if (root.schemaVersion !== 1 || !Array.isArray(root.policies) || root.policies.length > 32) throw new ConfigurationError();
-    const policies = new Map<string, readonly GroupRule[]>(); const groups = new Set<string>(); let count = 0;
+    const policies = new Map<string, readonly PolicyRule[]>(); const groups = new Set<string>(); let count = 0;
     for (const item of root.policies) {
       const p = auditFields(item, ['schemaVersion', 'targetId', 'frontAgent', 'rules']);
       const target = registered.targets.find(t => t.id === p.targetId);
       if (p.schemaVersion !== 1 || !target || policies.has(target.id) || p.frontAgent !== target.frontAgent.name || !Array.isArray(p.rules)) throw new ConfigurationError();
-      const rules = p.rules.map((item): GroupRule => {
+      const rules = p.rules.map((item): PolicyRule => {
         if (++count > 256) throw new ConfigurationError();
-        const rule = auditFields(item, ['groupId', 'chatKinds']); const groupId = uuid(rule.groupId);
+        const rule = auditFields(item, ['groupId', 'userObjectId', 'chatKinds']);
+        const isGroup = Object.hasOwn(rule, 'groupId');
+        if (isGroup === Object.hasOwn(rule, 'userObjectId')) throw new ConfigurationError();
+        const id = uuid(isGroup ? rule.groupId : rule.userObjectId);
         if (!Array.isArray(rule.chatKinds) || !rule.chatKinds.length || rule.chatKinds.length > 2 ||
             rule.chatKinds.some(k => k !== 'personal' && k !== 'groupChat') || new Set(rule.chatKinds).size !== rule.chatKinds.length) throw new ConfigurationError();
-        groups.add(groupId);
-        return Object.freeze({ groupId, chatKinds: Object.freeze([...rule.chatKinds].sort() as PolicyChatKind[]) });
+        if (isGroup) groups.add(id);
+        // Keep the existing group-rule encoding stable for retained policy digests.
+        return Object.freeze({ ...(isGroup ? { groupId: id } : { userObjectId: id }),
+          chatKinds: Object.freeze([...rule.chatKinds].sort() as PolicyChatKind[]) });
       }).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b), 'en'));
       policies.set(target.id, Object.freeze(rules));
     }
+    if (groups.size && graphIdentityClientId === undefined) throw new ConfigurationError();
     const targets = registered.targets.map(t => Object.freeze({ id: t.id, label: t.label, rules: policies.get(t.id) ?? Object.freeze([]) }));
     const digest = createHash('sha256').update(JSON.stringify(['teams-group-policy-v1', tenantId,
       targets.map(t => [t.id, t.rules]).sort((a, b) => String(a[0]).localeCompare(String(b[0]), 'en'))])).digest('hex');
-    return Object.freeze({ tenantId, graphIdentityClientId, digest, groupIds: Object.freeze([...groups].sort()), targets: Object.freeze(targets) });
+    return Object.freeze({ tenantId, ...(graphIdentityClientId === undefined ? {} : { graphIdentityClientId }), digest, groupIds: Object.freeze([...groups].sort()), targets: Object.freeze(targets) });
   } catch { throw new ConfigurationError(); }
 }
 export function readGroupPolicy(file: string, registry: RegistryConfig): GroupPolicy {
