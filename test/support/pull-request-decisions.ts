@@ -22,14 +22,15 @@ export async function decisionsFixture(t: TestContext) {
     if (req.method === 'GET') return void res.end('[]');
     res.statusCode = 201; res.end(JSON.stringify(result()));
   });
-  const make = (store = f.store) => {
+  const make = (store = f.store, admitRevision?: NonNullable<Parameters<typeof createPullRequestService>[0]['decisions']>['admitRevision']) => {
     const service = createPullRequestService({ accounts: store, githubAccounts: gh, github, scope: binding, now: f.now,
       postProposal: async () => 'delivered', decisions: { authority: f.authority, connected: async () => connected,
-        postDecision: async p => { replies.push(structuredClone(p)); } } });
+        ...(admitRevision ? { admitRevision } : {}), postDecision: async p => { replies.push(structuredClone(p)); } } });
     t.after(() => service.close()); return service;
   };
   const service = make(); const p = proposalFixture(); await f.store.reserveProposal(p, 'operation', context());
-  const ctx = () => ({ ...context(), subject: { tenantId: p.tenantId, objectId: p.objectId, chatKind: 'personal' as const } });
+  const ctx = () => ({ ...context(), delegatedTenant: true, controlRecipient: { id: p.senderMRI },
+    subject: { tenantId: p.tenantId, objectId: p.objectId, chatKind: 'personal' as const } });
   const decide = (decision: 'approve' | 'reject' = 'approve', current = p, supplied = ctx()) => service.decide(current, decision, 'invoke', supplied);
   const settled = async () => { await eventually(() => replies.length > 0); return (await f.store.getProposal(p.id, context()))!.proposal; };
   return { ...f, ...remote, tableRequests: f.requests, gh, github, service, make, p, ctx, decide, settled, replies, result,

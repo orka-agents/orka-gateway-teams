@@ -32,7 +32,8 @@ export interface ReceiverDependencies { sdkCloud?: CloudEnvironment; fetchKeys?:
   botToken?: Token; providerPost?: ProviderPost; providerGet?: ProviderGet; certificateNetwork?: INetworkModule; managedIdentity?: ManagedIdentityDependencies }
 export interface AdmissionContext { readonly signal: AbortSignal; readonly deadline: number; readonly subject: PolicySubject;
   readonly activityId: string; readonly commandText?: string; readonly delegatedTenant?: boolean; readonly controlRecipient?: ControlRecipient }
-export interface ExchangeContext { readonly signal: AbortSignal; readonly deadline: number; readonly subject: PolicySubject }
+export interface ExchangeContext { readonly signal: AbortSignal; readonly deadline: number; readonly subject: PolicySubject;
+  readonly delegatedTenant?: boolean; readonly controlRecipient?: ControlRecipient }
 export interface ExchangeResponse { status: 200 | 412; body: { id: string; connectionName: string; failureDetail?: 'signin-required' } }
 export interface AdmissionSink { readonly scope: IngressStore['scope']; readonly browser?: BrowserSignin;
   bindControlSender?(sender: Pick<ProviderSender, 'send'>): void;
@@ -130,7 +131,9 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
     if (input.type === 'invoke' && input.name === 'adaptiveCard/action' && sink.cardAction) {
       const subject = readPolicySubject(input, config.tenantId);
       if (!subject.objectId || !controlRecipient(input)) return { status: 403 };
-      try { return await sink.cardAction(input, { ...adapter.requestContext, subject }); } catch { return { status: 403 }; }
+      try { return await sink.cardAction(input, Object.freeze({ ...adapter.requestContext, subject,
+        delegatedTenant: record(input.channelData) && record(input.channelData.tenant) && input.channelData.tenant.id === config.tenantId,
+        controlRecipient: controlRecipient(input)! })); } catch { return { status: 403 }; }
     }
     const converted = convertActivity(input as unknown as Activity, { tenantId: config.tenantId, replyTarget: randomUUID() });
     if (converted.kind === 'invalid') return { status: 400 };

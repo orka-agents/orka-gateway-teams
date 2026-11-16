@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { canonicalJSON } from '../src/directory/codec.js';
-import { proposalDigest, decodeProposal } from '../src/accounts/pull-request-proposal.js';
+import { proposalDigest, decodeProposal, projectClaim } from '../src/accounts/pull-request-proposal.js';
 import { taskGrant } from '../src/accounts/grants.js';
 import { binding, context } from './support/directory-table.js';
 import { grantsFixture } from './support/task-grants.js';
@@ -19,6 +19,17 @@ test('proposal_survives_reopen_without_plaintext', async t => {
   await f.store.close(); const reopened = f.open();
   assert.deepEqual((await reopened.getProposal(p.id, context()))?.proposal, saved);
   f.advance(3_600_001); assert.equal((await reopened.getProposal(p.id, context()))?.proposal.state, 'expired');
+});
+test('revision admission is mutable evidence outside the frozen digest, decoded only on a winning revision', () => {
+  const p = proposalFixture(); const claimed = projectClaim(p, { decision: 'revise', tenantId: p.tenantId, objectId: p.objectId,
+    invokeActivityId: 'invoke', decidedAt: p.createdAt, note: 'saved note', revisionReplyTarget: 'saved-reply' });
+  for (const revisionAdmission of ['pending', 'delivered', 'full', 'signin-required', 'conflict'] as const) {
+    const revised = { ...claimed, revisionAdmission }; assert.equal(proposalDigest(revised), p.payloadDigest);
+    assert.deepEqual(decodeProposal(revised), revised);
+  }
+  for (const revised of [{ ...claimed, revisionAdmission: 'accepted' }, { ...p, revisionAdmission: 'delivered' },
+    { ...claimed, claim: undefined }, { ...claimed, revisionAdmission: { delivered: true } },
+    { ...claimed, claim: { ...claimed.claim, token: 'forged' } }]) assert.throws(() => decodeProposal(revised));
 });
 test('proposal_row_swap_rejected', async t => {
   const f = await grantsFixture(t); const p = proposalFixture();

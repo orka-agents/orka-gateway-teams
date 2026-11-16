@@ -616,7 +616,15 @@ test('native registry wires optional GitHub custody and checks its secret before
       iss: `https://login.microsoftonline.com/${miConfig.tenantId}/v2.0` }, signing.privateKey, { algorithm: 'RS256', keyid: 'github-runtime' });
     res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ access_token: 'MS_ACCESS_PRIVATE', refresh_token: 'MS_REFRESH_PRIVATE', token_type: 'Bearer', expires_in: 3600, scope: WORK_IQ_SCOPE, id_token }));
   });
-  const sent: string[] = []; const native = https.request;
+  const sent: string[] = []; const native = https.request; const revisionEvents: EventEnvelope[] = [];
+  const upstream = await httpsFixture(t, async (req, res) => {
+    let body = ''; for await (const chunk of req) body += chunk;
+    const event = JSON.parse(body) as EventEnvelope; revisionEvents.push(event);
+    res.writeHead(202); res.end(JSON.stringify({ status: 'accepted', eventId: event.externalEventId, state: 'Queued' }));
+  });
+  t.mock.method(https, 'request', (url: URL, options: https.RequestOptions, cb: any) => url.hostname === 'orka.example.invalid' ?
+    native(new URL(url.pathname, upstream.baseUrl), { ...options, ca: upstream.ca, servername: 'localhost' }, cb) : native(url, options, cb));
+  syncBuiltinESMExports(); t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   const deps: RegistryRuntimeDependencies = { ...base, githubRequest: ((url: URL, options: https.RequestOptions, cb: Parameters<typeof https.request>[2]) =>
     url.pathname.startsWith('/repos/') ? api.request(url, options, cb!) : remote.request(url, options, cb!)) as typeof https.request,
     managedIdentity: { acaRequest: f.identity.request, entraNetwork: entraNetwork() },
@@ -670,7 +678,7 @@ test('native registry wires optional GitHub custody and checks its secret before
   // Synthetic preview walk at the composed runtime boundary, with only GETs to GitHub.
   api.behavior((req, res) => res.end(JSON.stringify(req.path.includes('/git/ref/') ? { ref: 'refs/heads/orka/fix', object: { type: 'commit', sha: 'a'.repeat(40) } } :
     { total_commits: 1, base_commit: { sha: 'b'.repeat(40) }, commits: [{ commit: { author: { name: 'Orka Publisher', email: 'publisher@orka.ai' } } }], files: [{ filename: 'src/lease.ts', additions: 3, deletions: 1 }] })));
-  const previewPass = { ...passBody, grantRef: proposalRef, tools: ['github-propose-pull-request'] };
+  let previewPass = { ...passBody, grantRef: proposalRef, tools: ['github-propose-pull-request'] };
   const preview = async (operation: string) => {
     const issued = await fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/task-passes`, { method: 'POST', headers: { authorization: 'Bearer controller-primary', 'content-type': 'application/json' }, body: JSON.stringify(previewPass) });
     assert.equal(issued.status, 200); const pass = await issued.json() as { pass: string };
@@ -701,7 +709,30 @@ test('native registry wires optional GitHub custody and checks its secret before
   assert.equal((await post(runtime.port, f.auth.token(), stranger)).status, 403);
   const reject = { ...refresh, id: 'reject-proposal', value: { action: action('pr-reject') } };
   assert.equal((await post(runtime.port, f.auth.token(), reject)).status, 200);
-  await eventually(() => sent.some(s => s.includes("I didn't open")));
+  await eventually(() => sent.some(s => s.includes("I didn't open"))); assert.equal(revisionEvents.length, 0);
+  await preview('revision'); const revisionCard = JSON.parse(sent.at(-1)!).attachments[0].content;
+  const senderRevision = await post(runtime.port, f.auth.token(), { ...refresh, value: { action: revisionCard.refresh.action } });
+  const senderCard = (await senderRevision.json() as any).value;
+  const reviseAction = senderCard.actions.find((a: any) => a.title === 'Revise')!.card.actions[0];
+  const revise = { ...refresh, id: 'revision-first-invoke', value: { action: { ...reviseAction, data: { ...reviseAction.data, note: 'also add a regression test' } } } };
+  const sending = await post(runtime.port, f.auth.token(), revise); assert.equal(sending.status, 200); assert.match(await sending.text(), /Sending your revision/);
+  await eventually(() => revisionEvents.length === 1);
+  const event = revisionEvents[0]!; assert.equal(event.contextId, message.conversation.id); assert.equal(event.sender.id, message.from.id);
+  assert.equal(event.text, 'Change the proposed pull request for orka/fix: also add a regression test');
+  assert.equal(event.eventType, 'delegatedText'); assert.deepEqual(Object.keys(event.metadata!), ['gatewayGrantRef']);
+  const freshRef = grantReference(target.config.scope, target, event.externalEventId, event.replyTarget!);
+  assert.equal(event.metadata!.gatewayGrantRef, freshRef); assert.notEqual(freshRef, proposalRef);
+  const sentRevision = await post(runtime.port, f.auth.token(), { ...refresh, value: { action: revisionCard.refresh.action } });
+  assert.match(await sentRevision.text(), /asked for changes/);
+  assert.equal((await post(runtime.port, f.auth.token(), { ...revise, id: 'new-invoke', value: { action: { ...reviseAction, data: { ...reviseAction.data, note: 'do not replace first note' } } } })).status, 200);
+  await runtime.stop(); await runtime.done; runtime = await startRegistryRuntime(config, deps);
+  const beforeRetry = revisionEvents.length; assert.equal((await post(runtime.port, f.auth.token(), revise)).status, 200); assert.equal(revisionEvents.length, beforeRetry);
+  previewPass = { ...previewPass, grantRef: freshRef, taskUID: 'revision-task' };
+  await preview('revision-replacement'); const replacementAfterRevision = JSON.parse(sent.at(-1)!).attachments[0].content;
+  assert.notEqual(replacementAfterRevision.refresh.action.data.proposal, revisionCard.refresh.action.data.proposal);
+  // Replacement publishes a new card; a decided older card retains its first note rather than becoming pending again.
+  const oldRevision = await post(runtime.port, f.auth.token(), { ...refresh, value: { action: revisionCard.refresh.action } });
+  assert.match(await oldRevision.text(), /asked for changes/); assert.equal(revisionEvents.length, 1);
   await preview('approval'); const next = JSON.parse(sent.at(-1)!).attachments[0].content;
   const current = await post(runtime.port, f.auth.token(), { ...refresh, value: { action: next.refresh.action } });
   const approval = (await current.json() as any).value;
