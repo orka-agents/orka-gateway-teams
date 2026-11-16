@@ -76,18 +76,18 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
     // Settlement uses runtime authority, not a credential guard invalidated by disconnect.
     await finish(p, outcome!, settlement);
   }
-  async function reconcile(p: Proposal, ctx: DirectoryContext, owned = false) {
+  async function reconcile(p: Proposal, ctx: DirectoryContext, owned = false, settlement = ctx) {
     if (!active(ctx) || !owned && effectIds.has(p.id)) return;
     if (!owned) effectIds.add(p.id);
     try {
     const version = await options.accounts.getProposal(p.id, ctx); if (!version) return; p = version.proposal;
     if (version.needsProjection) await options.accounts.replaceProposal(version, p, ctx);
     if (!await generations(p, ctx) || !await options.decisions!.connected(p, ctx)) return;
-    if (!['approving', 'uncertain'].includes(p.state)) { await finish(p, undefined, ctx); return; }
+    if (!['approving', 'uncertain'].includes(p.state)) { await finish(p, undefined, settlement); return; }
     const saved = await options.accounts.proposalWriteOutcome(p, ctx);
-    if (saved) { await finish(p, saved, ctx); return; }
+    if (saved) { await finish(p, saved, settlement); return; }
     const fence = await options.accounts.fenceUnsentProposal(p, ctx);
-    if (fence === 'abandoned') { await finish(p, { kind: 'failed' }, ctx); return; }
+    if (fence === 'abandoned') { await finish(p, { kind: 'failed' }, settlement); return; }
     let outcome: ProposalOutcome = { kind: 'uncertain' };
     const guards: ReturnType<AccountStore['watch']>[] = [];
     const bound = { ...ctx, authorizeWrite: () => active(ctx) && guards.every(g => g.active()) };
@@ -103,7 +103,7 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
       }
     } catch { /* Missing, ambiguous or unreadable evidence never grants another POST. */ }
     finally { for (const g of guards) g.release(); }
-    await finish(p, outcome, ctx);
+    await finish(p, outcome, settlement);
     } finally { if (!owned) effectIds.delete(p.id); }
   }
   function launch(p: Proposal, readOnly = false) {
@@ -114,7 +114,7 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
     // Reserve the last four seconds of the same thirty-second lifetime for outcome settlement, not more GitHub work.
     const operation = new AbortController(); const operationTimer = setTimeout(() => operation.abort(), 26000); operationTimer.unref();
     const work = { ...ctx, signal: AbortSignal.any([ctx.signal, operation.signal]), deadline: ctx.deadline - 4000 };
-    const pending = (readOnly ? reconcile(p, ctx, true) : opening(p, work, ctx)).catch(() => { /* Retained claim/write evidence is reconciled, never re-POSTed. */ })
+    const pending = (readOnly ? reconcile(p, work, true, ctx) : opening(p, work, ctx)).catch(() => { /* Retained claim/write evidence is reconciled, never re-POSTed. */ })
       .finally(() => { clearTimeout(timer); clearTimeout(operationTimer); effects.delete(pending); effectIds.delete(p.id); places--; });
     effects.add(pending);
   }

@@ -69,6 +69,18 @@ test('startup_recovery_cannot_cancel_a_live_claim_during_projection', async t =>
   await pending; assert.equal((await f.settled()).state, 'opened');
   assert.equal(f.requests.filter(r => r.method === 'POST').length, 1);
 });
+test('refresh_reconciliation_reserves_settlement_time_inside_the_same_lifetime', { timeout: 10000 }, async t => {
+  const f = await decisionsFixture(t); const p = await claim(f, true);
+  const reached = Array.from({ length: 4 }, () => deferred<import('node:http').ServerResponse>());
+  f.behavior((_req, res) => { reached[f.requests.length - 1]?.resolve(res); });
+  t.mock.timers.enable({ apis: ['setTimeout'] }); t.after(() => t.mock.timers.reset());
+  f.service.refresh(p);
+  const user = await reached[0]!.promise; t.mock.timers.tick(7000); user.end('{"id":123}');
+  const unrelated = { ...f.result(), head: { ...f.result().head, ref: 'other' } };
+  for (const i of [1, 2]) { const res = await reached[i]!.promise; t.mock.timers.tick(7000); res.end(JSON.stringify(Array.from({ length: 100 }, () => unrelated))); }
+  await reached[3]!.promise; t.mock.timers.tick(5001); t.mock.timers.reset();
+  assert.equal((await f.settled()).state, 'uncertain'); assert.ok(f.requests.every(r => r.method === 'GET'));
+});
 test('shutdown_drains_held_lookup_before_store_close and recovery never posts', async t => {
   const f = await decisionsFixture(t); await claim(f, true); let held = false;
   f.behavior(() => { held = true; });
