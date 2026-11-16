@@ -1,4 +1,5 @@
 import type { IAdaptiveCard, ITextBlock } from '@microsoft/teams.cards';
+import { proposalDecisionText } from '../accounts/pull-request-proposal.js';
 import type { Proposal } from '../accounts/pull-request-proposal.js';
 import { object } from '../storage/table/codec.js';
 import { MAX_OUTGOING_MESSAGE_BYTES } from './format.js';
@@ -13,11 +14,12 @@ function boundedLabel(s: string, max: number): { text: string; truncated: boolea
   return { text: escaped(low) + (low < points.length ? '… (truncated)' : ''), truncated: low < points.length };
 }
 const label = (s: string, max: number) => boundedLabel(s, max).text;
-/** Preview only. Decision actions are deliberately absent until the decision handler ships. */
-export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', _decisionsEnabled: boolean): IAdaptiveCard {
+/** Only the server-verified sender receives decision actions; invokes still recheck authority. */
+export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolean): IAdaptiveCard {
   const block = (text: string, heading = false): ITextBlock => ({ type: 'TextBlock', text, wrap: true, ...(heading ? { weight: 'Bolder', size: 'Medium' } : {}) });
   const state = p.state === 'expired' ? 'Expired. Ask again to get a new card.' : p.state === 'superseded' ? 'Replaced by a newer request.' :
-    p.state === 'pending' ? viewer === 'sender' ? 'Approval actions are not enabled yet.' : `Waiting for ${label(p.displayName, 80)} to approve. Approval actions are not enabled yet.` : 'This request is no longer pending.';
+    p.state === 'pending' ? viewer === 'sender' ? decisionsEnabled ? 'Approve or reject this pull request.' : 'Approval actions are not enabled yet.' : `Waiting for ${label(p.displayName, 80)} to approve.${decisionsEnabled ? '' : ' Approval actions are not enabled yet.'}` :
+    p.state === 'approving' ? 'Approved. Opening the pull request…' : p.state === 'rejected' ? label(proposalDecisionText(p), 2400) : label(proposalDecisionText(p) || 'This request is no longer pending.', 2400);
   const preview = boundedLabel(p.body || 'No description supplied.', 240); const expanded = boundedLabel(p.body, 1800);
   const body: ITextBlock[] = [block('Pull request proposal', true), block(state),
     block(`Asked by ${label(p.displayName, 80)} · expires ${new Date(p.expiresAt).toISOString()}`),
@@ -28,10 +30,13 @@ export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', _de
     ...(p.fileCount > p.files.length ? [block(`+${p.fileCount - p.files.length} more${p.filesComplete ? '' : ' returned files'}`)] : []),
     block('Description (written by the agent)', true), block(preview.text),
     block(`Opens as you (@${label(p.githubLogin, 39)}) on GitHub. Merging stays with the repository's reviewers.`)];
-  return { type: 'AdaptiveCard', version: '1.5', fallbackText: 'Pull request proposal. Approval actions are not enabled yet.', body,
+  return { type: 'AdaptiveCard', version: '1.5', fallbackText: decisionsEnabled ? 'Pull request proposal.' : 'Pull request proposal. Approval actions are not enabled yet.', body,
     refresh: { action: { type: 'Action.Execute', verb: 'pr-refresh', data: { proposal: p.id, rev: p.revision, digest: p.payloadDigest } }, userIds: [p.senderMRI] },
-    actions: [...(preview.truncated ? [{ type: 'Action.ShowCard' as const, title: expanded.truncated ? 'Show more description (truncated)' : 'Show full description',
+    actions: [...(decisionsEnabled && viewer === 'sender' && p.state === 'pending' ? (['approve', 'reject'] as const).map(decision => ({
+      type: 'Action.Execute' as const, title: decision === 'approve' ? 'Approve' : 'Reject', verb: `pr-${decision}`,
+      data: { proposal: p.id, rev: p.revision, digest: p.payloadDigest } })) : []), ...(preview.truncated ? [{ type: 'Action.ShowCard' as const, title: expanded.truncated ? 'Show more description (truncated)' : 'Show full description',
       card: { type: 'AdaptiveCard' as const, version: '1.5' as const, body: [block(expanded.text)] } }] : []),
+      ...(p.outcome?.kind === 'opened' ? [{ type: 'Action.OpenUrl' as const, title: 'Open pull request', url: p.outcome.url }] : []),
       { type: 'Action.OpenUrl', title: 'View changes', url: `https://github.com/${encodeURIComponent(p.owner)}/${encodeURIComponent(p.repo)}/compare/${p.baseSHA}...${p.headSHA}` }] };
 }
 /** Closed projection: SDK/arbitrary card properties cannot become an HTTP invoke response. */
@@ -49,10 +54,13 @@ export function cardInvokeResponse(input: unknown): { statusCode: 200; type: 'ap
       for (const b of c.body) { const t = object(b, ['type', 'text', 'wrap', 'weight', 'size']);
         if (t.type !== 'TextBlock' || t.wrap !== true || t.weight !== undefined && t.weight !== 'Bolder' || t.size !== undefined && t.size !== 'Medium') throw new Error(); string(t.text); }
       if (c.actions !== undefined) {
-        if (nested || !Array.isArray(c.actions) || c.actions.length > 2) throw new Error();
-        for (const a of c.actions) { const v = object(a, ['type', 'title', ...(a.type === 'Action.ShowCard' ? ['card'] : ['url'])]); string(v.title);
-          if (v.type === 'Action.ShowCard') validate(v.card, true);
-          else if (v.type !== 'Action.OpenUrl' || typeof v.url !== 'string' || !/^https:\/\/github\.com\/[A-Za-z0-9%_.-]+\/[A-Za-z0-9%_.-]+\/compare\/[A-Za-z0-9%_.-]+\.\.\.[a-f0-9]{40}$/u.test(v.url)) throw new Error(); }
+        if (nested || !Array.isArray(c.actions) || c.actions.length > 4) throw new Error();
+        for (const a of c.actions) { const v = object(a, ['type', 'title', ...(a.type === 'Action.ShowCard' ? ['card'] : a.type === 'Action.Execute' ? ['verb', 'data'] : ['url'])]); string(v.title);
+          if (v.type === 'Action.Execute') {
+            const d = object(v.data, ['proposal', 'rev', 'digest']);
+            if (!['pr-approve', 'pr-reject'].includes(String(v.verb)) || d.rev !== 1 || !/^[a-f0-9]{64}$/u.test(String(d.proposal)) || !/^[a-f0-9]{64}$/u.test(String(d.digest))) throw new Error();
+          } else if (v.type === 'Action.ShowCard') validate(v.card, true);
+          else if (v.type !== 'Action.OpenUrl' || typeof v.url !== 'string' || !/^https:\/\/github\.com\/[A-Za-z0-9%_.-]+\/[A-Za-z0-9%_.-]+\/(?:compare\/[A-Za-z0-9%_.-]+\.\.\.[a-f0-9]{40}|pull\/[1-9][0-9]*)$/u.test(v.url)) throw new Error(); }
       }
       if (c.refresh !== undefined) {
         if (nested) throw new Error(); const r = object(c.refresh, ['action', 'userIds']); const a = object(r.action, ['type', 'verb', 'data']); const d = object(a.data, ['proposal', 'rev', 'digest']);

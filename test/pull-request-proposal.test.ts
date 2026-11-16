@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { canonicalJSON } from '../src/directory/codec.js';
 import { proposalDigest, decodeProposal } from '../src/accounts/pull-request-proposal.js';
 import { taskGrant } from '../src/accounts/grants.js';
 import { binding, context } from './support/directory-table.js';
@@ -67,6 +68,62 @@ test('replacement_cannot_erase_unprojected_claim_or_note', async t => {
   await f.store.reserveProposal(proposalFixture('second'), 'second', context());
   const old = (await f.store.getProposal(p.id, context()))!.proposal;
   assert.equal(old.claim?.note, 'keep this private note'); assert.equal(old.claim?.revisionReplyTarget, 'revision-reply');
+});
+test('double_click_has_one_winner and new_proposal_and_approve_share_selector', async t => {
+  const f = await grantsFixture(t); const p = proposalFixture(); await f.store.reserveProposal(p, 'operation', context());
+  const claim = { decision: 'approve' as const, tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: 'invoke-1', decidedAt: f.now() };
+  const results = await Promise.allSettled([f.store.claimProposal(p, claim, context()), f.open().claimProposal(p, claim, context())]);
+  assert.equal(results.filter(r => r.status === 'fulfilled' && r.value).length, 1);
+  assert.equal((await f.store.getProposal(p.id, context()))?.proposal.state, 'approving');
+  await f.store.reserveProposal(proposalFixture('second'), 'second', context());
+  const old = (await f.store.getProposal(p.id, context()))!.proposal;
+  assert.deepEqual(old.claim, claim); assert.equal(old.state, 'approving');
+  assert.equal(await f.store.claimProposal(p, claim, context()), false);
+});
+test('expired_boundary_cannot_claim and replacement_before_decision_wins', async t => {
+  const f = await grantsFixture(t); const p = proposalFixture(); await f.store.reserveProposal(p, 'operation', context());
+  const claim = { decision: 'reject' as const, tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: 'invoke-1', decidedAt: f.now() };
+  await f.store.reserveProposal(proposalFixture('second'), 'second', context());
+  assert.equal(await f.store.claimProposal(p, claim, context()), false);
+  const q = (await f.store.getProposal(proposalFixture('second').id, context()))!.proposal;
+  f.advance(3_600_000);
+  assert.equal(await f.store.claimProposal(q, { ...claim, decidedAt: f.now() }, context()), false);
+  assert.equal((await f.store.getProposal(q.id, context()))?.proposal.state, 'expired');
+});
+test('proposal_owned_write_grants_one_send_and_never_borrows_Task_authority', async t => {
+  const f = await grantsFixture(t); const p = proposalFixture(); await f.store.reserveProposal(p, 'operation', context());
+  await assert.rejects(f.store.reserveProposalWrite(p, context()));
+  await f.store.claimProposal(p, { decision: 'approve', tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: 'invoke', decidedAt: f.now() }, context());
+  const claimed = (await f.store.getProposal(p.id, context()))!.proposal;
+  const r = await f.store.reserveProposalWrite(claimed, context()); assert.equal(r.kind, 'send');
+  assert.equal((await f.open().reserveProposalWrite(claimed, context())).kind, 'uncertain');
+  const outcome = { kind: 'opened' as const, number: 12, url: 'https://github.com/example/project/pull/12', headSHA: p.headSHA };
+  await f.store.completeProposalWrite(claimed, outcome, context());
+  assert.deepEqual(await f.open().reserveProposalWrite(claimed, context()), { kind: 'done', outcome });
+});
+test('legacy_near_limit_preview_retains_digest_and_files_when_claim_and_result_are_added', async t => {
+  const f = await grantsFixture(t); const p = proposalFixture(); p.body = 'b'.repeat(16384);
+  p.files = Array.from({ length: 8 }, (_, i) => ({ path: String(i) + 'x'.repeat(4090), additions: 1, deletions: 1 })); p.fileCount = 8;
+  const bytes = () => Buffer.byteLength(canonicalJSON({ kind: 'proposal', objectId: p.objectId, generation: p.generation, proposal: p }));
+  p.payloadDigest = proposalDigest(p);
+  p.files[7]!.path = p.files[7]!.path.slice(0, p.files[7]!.path.length - (bytes() - (48 * 1024 - 8))); p.payloadDigest = proposalDigest(p);
+  assert.ok(bytes() <= 48 * 1024 && bytes() > 48 * 1024 - 32);
+  const saved = await f.store.reserveProposal(p, 'operation', context()); assert.deepEqual(saved.files, p.files);
+  assert.equal(await f.store.claimProposal(p, { decision: 'approve', tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: 'i'.repeat(256), decidedAt: f.now() }, context()), true);
+  const version = (await f.store.getProposal(p.id, context()))!;
+  const outcome = { kind: 'opened' as const, number: 12, url: 'https://github.com/example/project/pull/12', headSHA: p.headSHA };
+  await f.store.replaceProposal(version, { ...version.proposal, state: 'opened', outcome }, context());
+  const reopened = (await f.open().getProposal(p.id, context()))!.proposal;
+  assert.equal(reopened.payloadDigest, p.payloadDigest); assert.deepEqual(reopened.files, p.files); assert.equal(reopened.outcome?.kind, 'opened');
+  assert.ok([...f.rows.values()].every(row => Buffer.from(String(row.Payload), 'base64').length <= 65536));
+});
+test('claim_rejects_wrong_actor_digest_and_future_claim_time', async t => {
+  const f = await grantsFixture(t); const p = proposalFixture(); await f.store.reserveProposal(p, 'operation', context());
+  const claim = { decision: 'approve' as const, tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: 'invoke', decidedAt: f.now() };
+  for (const bad of [{ ...claim, objectId: 'other' }, { ...claim, tenantId: 'other' }, { ...claim, decidedAt: f.now() + 1 }])
+    assert.equal(await f.store.claimProposal(p, bad, context()), false);
+  assert.equal(await f.store.claimProposal({ ...p, payloadDigest: 'f'.repeat(64) }, claim, context()), false);
+  assert.equal((await f.store.getProposal(p.id, context()))?.proposal.state, 'pending');
 });
 test('old_grant_round_trip_unchanged and child_inherits_origin_not_parent_tool_authority', async t => {
   const f = await grantsFixture(t); assert.deepEqual(taskGrant(f.input), f.input);

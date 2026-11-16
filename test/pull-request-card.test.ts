@@ -11,6 +11,20 @@ for (const viewer of ['room', 'sender'] as const) test(`${viewer}_preview_has_no
   assert.match(wire, new RegExp(p.baseSHA + '\\.\\.\\.' + p.headSHA));
   assert.match(wire, /Opens as you/); assert.match(wire, /Description \(written by the agent\)/);
 });
+test('sender_can_approve_or_reject_only_pending_and_closed_projection_keeps_actions', () => {
+  const p = proposalFixture();
+  const card = buildPullRequestCard(p, 'sender', true);
+  assert.deepEqual(card.actions!.filter(a => a.type === 'Action.Execute').map(a => a.verb), ['pr-approve', 'pr-reject']);
+  assert.ok(!JSON.stringify(card).includes('pr-revise'));
+  assert.ok(cardInvokeResponse({ statusCode: 200, type: 'application/vnd.microsoft.card.adaptive', value: card }));
+  for (const state of ['approving', 'opened', 'rejected', 'expired', 'superseded', 'uncertain', 'failed', 'branch-moved'] as const) {
+    const current = buildPullRequestCard({ ...p, state }, 'sender', true);
+    assert.equal(current.actions!.filter(a => a.type === 'Action.Execute').length, 0);
+  }
+  assert.equal(buildPullRequestCard(p, 'room', true).actions!.filter(a => a.type === 'Action.Execute').length, 0);
+  const forged = structuredClone(card); (forged.actions![0] as any).verb = 'pr-revise';
+  assert.equal(cardInvokeResponse({ statusCode: 200, type: 'application/vnd.microsoft.card.adaptive', value: forged }), undefined);
+});
 test('card_escapes_untrusted_labels_and_fits_20KiB', () => {
   const p = proposalFixture(); p.displayName = '[Admin](https://evil.invalid)'; p.title = '**Do it**'; p.body = '[x](https://evil.invalid)'.repeat(700);
   p.files = Array.from({ length: 10 }, () => ({ path: '\\'.repeat(4000), additions: 1, deletions: 1 })); p.fileCount = 300; p.filesComplete = false;

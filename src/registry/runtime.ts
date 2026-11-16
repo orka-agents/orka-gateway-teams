@@ -69,6 +69,7 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   let stopRuntime: (() => Promise<void>) | undefined; let closing: Promise<void> | undefined;
   let directory: Directory | undefined; let directoryTable: DirectoryTable | undefined; let accounts: AccountStore | undefined;
   let githubAccounts: AccountStore | undefined;
+  let proposals: ReturnType<typeof createPullRequestService> | undefined;
   let admission: ReturnType<typeof createRegistryAdmission> | undefined; let tasks: TaskService | undefined;
   const authority: LeaseAuthority = {
     allowed: () => !loss.signal.aborted && !abort.signal.aborted && authorities.every(a => a.allowed()),
@@ -88,7 +89,7 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
     // Handler/relay work drains first, then all native policy/provisioner work,
     // then directory requests, while every V3 lease and token source remain owned.
     const results: PromiseSettledResult<unknown>[] = await Promise.allSettled([authorizer.close(), ...readers.map(r => r.close())]);
-    results.push(...await Promise.allSettled([tasks?.close()]));
+    results.push(...await Promise.allSettled([tasks?.close(), proposals?.close()]));
     results.push(...await Promise.allSettled([delegatedAuth?.close(), github?.close(), accounts?.close(), githubAccounts?.close()])); key?.fill(0);
     results.push(...await Promise.allSettled([Promise.resolve().then(() => directory?.close() ?? directoryTable?.close())]));
     unsubscribe(); results.push(...await Promise.allSettled(handles.map(h => Promise.resolve().then(() => h.close()))));
@@ -142,9 +143,11 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
       accounts = createAccountStore({ account: shared.config.storage.account, table: config.sso.accountTable,
         appId: shared.config.scope.appId, tenantId: shared.config.scope.tenantId }, key!,
       { token: provider.token, ...(deps.tableRequest ? { request: deps.tableRequest } : {}) }, authority); key!.fill(0);
-      const proposals = github && githubAccounts ? createPullRequestService({ accounts, githubAccounts, github,
+      proposals = github && githubAccounts ? createPullRequestService({ accounts, githubAccounts, github,
         scope: { appId: shared.config.scope.appId, tenantId: shared.config.scope.tenantId },
-        postProposal: (p, ctx) => admission ? admission.postProposal(p, ctx) : Promise.resolve('unavailable') }) : undefined;
+        postProposal: (p, ctx) => admission ? admission.postProposal(p, ctx) : Promise.resolve('unavailable'),
+        decisions: { authority, connected: (p, ctx) => admission ? admission.checkProposal(p, ctx) : Promise.resolve(false),
+          postDecision: async (p, ctx) => { if (admission) await admission.postDecision(p, ctx); } } }) : undefined;
       tasks = createTaskService({ accounts, auth: delegatedAuth!, authority, ...(proposals ? { proposals } : {}),
         ...(github && githubAccounts ? { github: { accounts: githubAccounts, auth: github } } : {}),
         targets: config.targets.map(t => ({ id: t.id, gatewayUid: t.gatewayUid, identityDigest: t.identityDigest!, taskPassToken: t.taskPassToken! })),
@@ -152,7 +155,7 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
         ...(deps.workiqRequest ? { workiq: { request: deps.workiqRequest } } : {}),
         log: category => { process.stderr.write(`teams-ingress: ${category}\n`); } });
     }
-    admission = createRegistryAdmission({ config, directory, authority, active, authorizer,
+    admission = createRegistryAdmission({ config, directory, authority, active, authorizer, ...(proposals ? { proposals } : {}),
       safeOutput: text => !config.targets.some(t => [t.taskPassToken, t.config.bearerToken, t.config.outbound!.bearerToken,
         t.config.receiver.clientSecret].some(s => s && text.includes(s))),
       ...(github && githubAccounts ? { github: { accounts: githubAccounts, auth: github } } : {}),
@@ -171,6 +174,8 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
       dispatcher: receiver!.outbounds!.get(s.target.id)!, scope: { appId: s.target.config.scope.appId, tenantId: s.target.config.scope.tenantId },
     })), active, tasks);
     assertStarting(); if (!authority.allowed()) throw new Error('Registry authority lost'); ready = true;
+    // Receiver has bound the existing control sender; this single pass cannot block readiness or retry startup.
+    void proposals?.recover({ signal: abort.signal, deadline: performance.now() + shared.config.storage.audit.maxDurationMs });
   } catch {
     ready = false; abort.abort();
     await Promise.allSettled([api?.stop(), receiver?.stop()]); await closeStores(); signal?.removeEventListener('abort', cancel);

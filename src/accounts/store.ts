@@ -8,8 +8,8 @@ import type { DirectoryBinding, DirectoryContext, DirectoryDependencies } from '
 import { DirectoryError } from '../directory/types.js';
 import { etag, integer, object, uuid } from '../storage/table/codec.js';
 
-import { decodeProposal, decodeSelector, proposalIdentity, proposalSelectorId, proposalArgs, proposalDigest, projectClaim } from './pull-request-proposal.js';
-import type { Proposal, ProposalVersion, ProposalSelector } from './pull-request-proposal.js';
+import { decodeProposal, decodeSelector, proposalIdentity, proposalSelectorId, proposalArgs, proposalDigest, projectClaim, claimEvidence, proposalHash, proposalOutcome } from './pull-request-proposal.js';
+import type { Proposal, ProposalVersion, ProposalSelector, ClaimEvidence, ProposalOutcome } from './pull-request-proposal.js';
 
 export interface AccountSubject { objectId: string }
 export interface AccountTokens { accessToken: string; expiresAt: number; refreshToken?: string; assertion?: string; assertionExpiresAt?: number;
@@ -33,15 +33,20 @@ type Grant = TaskGrant & { kind: 'grant' };
 type Binding = { kind: 'binding'; ref: string; objectId: string; generation: number; binding: GrantBinding };
 type Write = { kind: 'write'; id: string; ref: string; tool: string; objectId: string; generation: number; githubGeneration: number;
   argsDigest: string; ownerUUID: string; state: 'reserved' | 'done'; text?: string; taskUID?: string };
+type ProposalWrite = { kind: 'proposal-write'; id: string; proposalId: string; revision: 1; argsDigest: string; objectId: string; generation: number;
+  githubGeneration: number; owner: string; repo: string; ownerUUID: string; state: 'reserved' | 'done' | 'abandoned'; outcome?: ProposalOutcome };
 type ProposalRow = { kind: 'proposal'; objectId: string; generation: number; proposal: Proposal; predecessor?: string };
 type SelectorRow = ProposalSelector & { kind: 'proposal-selector' };
-type Document = Account | Challenge | Grant | Binding | Write | ProposalRow | SelectorRow;
+type Document = Account | Challenge | Grant | Binding | Write | ProposalWrite | ProposalRow | SelectorRow;
 // The native transport cannot accept a plaintext document or a token-bearing value.
 type Ciphertext = { generation: number; ciphertext: Buffer };
 type CipherRow = { row: string; etag: string; value: Ciphertext };
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 function bad(code: AccountError['code'] = 'corrupt'): never { throw new AccountError(code); }
 const minute = 60_000; const idle = 30 * 86_400_000;
+// Initial previews retain the legacy 48 KiB budget; metadata has headroom, including on retained near-limit rows.
+// 60 KiB plus generation/IV/tag (36 bytes) remains below Table's 64 KiB binary-property bound.
+const previewBytes = 48 * 1024; const proposalBytes = 60 * 1024;
 
 /** Borrows registry authority; it never creates a table, acquires a lease or retries a write. */
 export function createAccountStore(binding: DirectoryBinding, key: Buffer, dependencies: DirectoryDependencies,
@@ -83,7 +88,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
   const proposalKey = (id: string) => ({ row: `proposal_${hash([provider, grantRef(id)])}` });
   const selectorKey = (id: string) => ({ row: `proposal_selector_${hash([provider, grantRef(id)])}` });
   const docKey = (v: Document) => v.kind === 'proposal' ? proposalKey(v.proposal.id) : v.kind === 'proposal-selector' ? selectorKey(v.id) : v.kind === 'account' ? accountKey(v.objectId) : v.kind === 'grant' ? grantKey(v.ref) :
-    v.kind === 'binding' ? bindingKey(v.ref, v.binding.taskUID) : v.kind === 'write' ? writeKey(v.id) : idKey(v.id);
+    v.kind === 'binding' ? bindingKey(v.ref, v.binding.taskUID) : v.kind === 'write' || v.kind === 'proposal-write' ? writeKey(v.id) : idKey(v.id);
   function validTokens(input: unknown): AccountTokens {
     const v = object(input, ['accessToken', 'expiresAt', 'refreshToken', 'assertion', 'assertionExpiresAt',
       ...(provider === 'github' ? ['providerUserId', 'refreshExpiresAt'] : [])]);
@@ -115,6 +120,11 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     } else if (v.kind === 'binding') {
       object(v, ['kind', 'ref', 'objectId', 'generation', 'binding']); grantRef(v.ref);
       if (!grantBinding(v.binding).parentTaskUID) bad();
+    } else if (v.kind === 'proposal-write') {
+      object(v, ['kind', 'id', 'proposalId', 'revision', 'argsDigest', 'objectId', 'generation', 'githubGeneration', 'owner', 'repo', 'ownerUUID', 'state', 'outcome']);
+      grantRef(v.id); grantRef(v.proposalId); grantRef(v.argsDigest); uuid(v.ownerUUID); identity(v.owner); identity(v.repo); integer(v.githubGeneration, 1, Number.MAX_SAFE_INTEGER);
+      if (provider !== 'workiq' || v.revision !== 1 || !['reserved', 'done', 'abandoned'].includes(v.state)) bad();
+      if (v.state === 'done') proposalOutcome(v, v.outcome); else if (v.outcome !== undefined) bad();
     } else if (v.kind === 'write') {
       object(v, ['kind', 'id', 'ref', 'tool', 'objectId', 'generation', 'githubGeneration', 'argsDigest', 'ownerUUID', 'state', 'text', 'taskUID']);
       if (v.taskUID !== undefined) identity(v.taskUID);
@@ -148,7 +158,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
   function seal(value: Document): Ciphertext {
     validate(value); const row = docKey(value).row; const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', secret, iv); cipher.setAAD(aad(row, value.generation));
-    const data = Buffer.from(canonicalJSON(value)); if (data.length > 48 * 1024) bad('invalid-input');
+    const data = Buffer.from(canonicalJSON(value)); if (data.length > (value.kind === 'proposal' ? proposalBytes : previewBytes)) bad('invalid-input');
     const ciphertext = Buffer.concat([iv, cipher.update(data), cipher.final(), cipher.getAuthTag()]);
     return { generation: value.generation, ciphertext };
   }
@@ -177,7 +187,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         for (const [k, type] of Object.entries(types)) if (v[`${k}@odata.type`] !== undefined && v[`${k}@odata.type`] !== type) bad();
         if (v.PartitionKey !== partition || typeof v.RowKey !== 'string' || !/^(?:account|challenge|grant|binding|write|proposal|proposal_selector)_[a-f0-9]{64}$/u.test(v.RowKey) ||
           (expected && v.RowKey !== expected.row) || v.V !== 1 || v.Armed !== false || v['Payload@odata.type'] !== 'Edm.Binary' ||
-          typeof v.Payload !== 'string' || v.Payload.length > 66_000) bad();
+          typeof v.Payload !== 'string' || v.Payload.length > (v.RowKey.startsWith('proposal_') ? 84_000 : 66_000)) bad();
         const data = Buffer.from(v.Payload, 'base64');
         if (data.length < 37 || data.toString('base64') !== v.Payload || v.Digest !== hash(['teams-accounts-row-v1', partition, v.RowKey, v.Payload])) bad();
         const generation = Number(data.readBigUInt64BE()); integer(generation, 1, Number.MAX_SAFE_INTEGER);
@@ -268,9 +278,66 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     const selected = selector?.kind === 'proposal-selector' && selector.proposalId === p.id && selector.revision === p.revision;
     if (p.state === 'pending') p = selected && selector.state === 'claimed' ? projectClaim(p, selector.claim!) :
       { ...p, state: !selected ? 'superseded' : now() >= p.expiresAt ? 'expired' : 'pending' };
-    return { proposal: p, etag: row.etag };
+    return { proposal: p, etag: row.etag, ...(p.claim && !row.value.proposal.claim ? { needsProjection: true as const } : {}) };
+  }
+  const proposalWriteId = (p: Proposal) => proposalHash(['teams-proposal-write-v1', p.id, p.revision, p.payloadDigest]);
+  async function approved(p: Proposal, c: DirectoryContext) {
+    const saved = await proposalVersion(p.id, c); const v = saved?.proposal;
+    if (!v || v.payloadDigest !== p.payloadDigest || v.claim?.decision !== 'approve' || canonicalJSON(v.claim) !== canonicalJSON(p.claim)) bad('conflict');
+    return v;
   }
   return {
+    visitRecoverableProposals(ctx: DirectoryContext, visit: (p: Proposal) => Promise<void>): Promise<void> {
+      return run(ctx, async c => {
+        if (provider !== 'workiq') bad('invalid-input'); const seen = new Set<string>();
+        await table.visitProposals(c, async encrypted => {
+          const doc = unseal(encrypted);
+          const id = doc.kind === 'proposal' ? doc.proposal.id : doc.kind === 'proposal-selector' && doc.state === 'claimed' ? doc.proposalId : undefined;
+          if (!id || seen.has(id)) return;
+          const version = await proposalVersion(id, c); const p = version?.proposal;
+          if (!p?.claim || p.claim.decision === 'revise') return;
+          // The service owns projection repair, after excluding its live claims/effects.
+          seen.add(id); await visit(p); check(c);
+        });
+      });
+    },
+    proposalWriteOutcome(p: Proposal, ctx: DirectoryContext): Promise<ProposalOutcome | undefined> {
+      return run(ctx, async c => {
+        await approved(p, c); const row = await read(writeKey(proposalWriteId(p)), c);
+        return row?.value.kind === 'proposal-write' && row.value.state === 'done' ? proposalOutcome(p, row.value.outcome) : undefined;
+      });
+    },
+    fenceUnsentProposal(p: Proposal, ctx: DirectoryContext): Promise<'abandoned' | 'uncertain'> {
+      return run(ctx, async c => {
+        const v = await approved(p, c); const id = proposalWriteId(v); const previous = await read(writeKey(id), c);
+        if (previous) return previous.value.kind === 'proposal-write' && previous.value.state === 'abandoned' ? 'abandoned' : 'uncertain';
+        try {
+          await persist(undefined, { kind: 'proposal-write', id, proposalId: v.id, revision: 1, argsDigest: v.payloadDigest, objectId: v.objectId,
+            generation: v.generation, githubGeneration: v.githubGeneration, owner: v.owner, repo: v.repo, ownerUUID, state: 'abandoned' }, c);
+          return 'abandoned';
+        } catch { return 'uncertain'; }
+      });
+    },
+    reserveProposalWrite(p: Proposal, ctx: DirectoryContext): Promise<{ kind: 'send' } | { kind: 'done'; outcome: ProposalOutcome } | { kind: 'uncertain' }> {
+      return run(ctx, async c => {
+        const v = await approved(p, c); const id = proposalWriteId(v); const previous = await read(writeKey(id), c);
+        if (previous) {
+          if (previous.value.kind !== 'proposal-write' || previous.value.argsDigest !== v.payloadDigest) bad('conflict');
+          return previous.value.state === 'done' ? { kind: 'done', outcome: proposalOutcome(v, previous.value.outcome) } : { kind: 'uncertain' };
+        }
+        if (v.state !== 'approving') bad('conflict');
+        await persist(undefined, { kind: 'proposal-write', id, proposalId: v.id, revision: 1, argsDigest: v.payloadDigest, objectId: v.objectId,
+          generation: v.generation, githubGeneration: v.githubGeneration, owner: v.owner, repo: v.repo, ownerUUID, state: 'reserved' }, c);
+        return { kind: 'send' };
+      });
+    },
+    completeProposalWrite(p: Proposal, outcome: ProposalOutcome, ctx: DirectoryContext): Promise<void> {
+      return run(ctx, async c => {
+        await approved(p, c); const row = await read(writeKey(proposalWriteId(p)), c);
+        if (row?.value.kind !== 'proposal-write' || row.value.ownerUUID !== ownerUUID || row.value.state !== 'reserved') bad('conflict');
+        await persist(row, { ...row.value, state: 'done', outcome: proposalOutcome(p, outcome) }, c);
+      });
+    },
     getProposal(id: string, ctx: DirectoryContext): Promise<ProposalVersion | undefined> { return run(ctx, c => proposalVersion(id, c)); },
     reserveProposal(input: Proposal, operation: string, ctx: DirectoryContext): Promise<Proposal> {
       return run(ctx, async c => {
@@ -284,7 +351,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
           const candidate: ProposalRow = { kind: 'proposal', objectId: p.objectId, generation: p.generation, proposal: p,
             ...(selector ? { predecessor: selector.etag } : {}) };
           // Preserve complete verified totals, omitting trailing previews if the encrypted document would overflow.
-          while (Buffer.byteLength(canonicalJSON(candidate)) > 48 * 1024 && p.files.length) { p.files.pop(); p.payloadDigest = proposalDigest(p); }
+          while (Buffer.byteLength(canonicalJSON(candidate)) > previewBytes && p.files.length) { p.files.pop(); p.payloadDigest = proposalDigest(p); }
           row = await persist(undefined, candidate, c, v => v.kind === 'proposal' && canonicalJSON(proposalArgs(v.proposal)) === canonicalJSON(proposalArgs(p)));
         }
         if (row.value.kind !== 'proposal') bad();
@@ -302,6 +369,22 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         await persist(selector, { kind: 'proposal-selector', id: proposalSelectorId(p), objectId: p.objectId,
           generation: p.generation, proposalId: p.id, revision: 1, state: 'pending' }, c);
         return (await proposalVersion(p.id, c))!.proposal;
+      });
+    },
+    claimProposal(expected: Proposal, evidence: ClaimEvidence, ctx: DirectoryContext): Promise<boolean> {
+      return run(ctx, async c => {
+        const claim = claimEvidence(evidence); const row = await read(proposalKey(expected.id), c);
+        if (row?.value.kind !== 'proposal') return false;
+        const p = row.value.proposal; const selector = await read(selectorKey(proposalSelectorId(p)), c);
+        if (p.state !== 'pending' || p.payloadDigest !== expected.payloadDigest || p.revision !== expected.revision ||
+          claim.tenantId !== p.tenantId || claim.objectId !== p.objectId || claim.decidedAt < p.createdAt || claim.decidedAt > now() ||
+          now() >= p.expiresAt || selector?.value.kind !== 'proposal-selector' || selector.value.state !== 'pending' ||
+          selector.value.proposalId !== p.id || selector.value.revision !== p.revision) return false;
+        try { await persist(selector, { ...selector.value, state: 'claimed', claim }, c); }
+        catch (e) { if (e instanceof AccountError && e.code === 'conflict') return false; throw e; }
+        // Selector is the decision arbiter. A failed projection is recovered, never permission to retry the effect.
+        await persist(row, { ...row.value, proposal: projectClaim(p, claim) }, c);
+        return true;
       });
     },
     replaceProposal(expected: ProposalVersion, next: Proposal, ctx: DirectoryContext): Promise<ProposalVersion> {

@@ -11,13 +11,15 @@ export interface ProposalFacts { headSHA: string; baseSHA: string; githubId: str
   files: { path: string; additions: number; deletions: number }[]; fileCount: number; additions: number; deletions: number; filesComplete: boolean }
 export interface ClaimEvidence { decision: 'approve' | 'reject' | 'revise'; tenantId: string; objectId: string; invokeActivityId: string;
   decidedAt: number; note?: string; revisionReplyTarget?: string }
+export type ProposalResult = { kind: 'opened'; number: number; url: string; headSHA: string; existing?: true };
+export type ProposalOutcome = ProposalResult | { kind: 'branch-moved' | 'permission' | 'signin-required' | 'validation' | 'failed' | 'uncertain' };
 export interface Proposal extends ProposalOrigin, ProposalFacts {
   id: string; revision: 1; state: 'pending' | 'approving' | 'opened' | 'rejected' | 'revise-requested' | 'superseded' | 'expired' | 'branch-moved' | 'failed' | 'uncertain';
   appId: string; tenantId: string; generation: number; githubGeneration: number; targetId: string; targetDigest: string; grantRef: string; taskUID: string;
   owner: string; repo: string; base: string; head: string; title: string; body: string; createdAt: number; expiresAt: number; payloadDigest: string;
-  claim?: ClaimEvidence; cardActivityId?: string; prNumber?: number; prUrl?: string;
+  claim?: ClaimEvidence; cardActivityId?: string; prNumber?: number; prUrl?: string; outcome?: ProposalOutcome;
 }
-export interface ProposalVersion { proposal: Proposal; etag: string }
+export interface ProposalVersion { proposal: Proposal; etag: string; needsProjection?: true }
 export interface ProposalSelector { id: string; objectId: string; generation: number; proposalId: string; revision: 1;
   state: 'pending' | 'claimed'; claim?: ClaimEvidence }
 export const proposalHash = (v: unknown) => createHash('sha256').update(canonicalJSON(v)).digest('hex');
@@ -29,7 +31,7 @@ export const proposalArgs = (p: Proposal) => ({ owner: p.owner, repo: p.repo, ba
 export const proposalOutput = (p: Proposal) => JSON.stringify(p) + '\n' +
   [p.title, p.body, p.displayName, p.githubLogin, p.owner, p.repo, p.base, p.head, ...p.files.map(f => f.path)].join('\n');
 export function proposalDigest(p: Proposal): string {
-  const { payloadDigest: _digest, state: _state, claim: _claim, cardActivityId: _card, prNumber: _number, prUrl: _url, ...frozen } = p;
+  const { payloadDigest: _digest, state: _state, claim: _claim, cardActivityId: _card, prNumber: _number, prUrl: _url, outcome: _outcome, ...frozen } = p;
   return proposalHash(frozen);
 }
 const originKeys = ['conversationId', 'replyTarget', 'route', 'senderMRI', 'objectId', 'displayName', 'activityId'];
@@ -60,7 +62,7 @@ export function decodeSelector(input: unknown): ProposalSelector {
 export function decodeProposal(input: unknown): Proposal {
   const v = object(input, [...originKeys, 'id', 'revision', 'state', 'appId', 'tenantId', 'generation', 'githubGeneration', 'targetId', 'targetDigest',
     'grantRef', 'taskUID', 'owner', 'repo', 'base', 'head', 'title', 'body', 'headSHA', 'baseSHA', 'githubId', 'githubLogin', 'commits', 'files',
-    'fileCount', 'additions', 'deletions', 'filesComplete', 'createdAt', 'expiresAt', 'payloadDigest', 'claim', 'cardActivityId', 'prNumber', 'prUrl']);
+    'fileCount', 'additions', 'deletions', 'filesComplete', 'createdAt', 'expiresAt', 'payloadDigest', 'claim', 'cardActivityId', 'prNumber', 'prUrl', 'outcome']);
   proposalOrigin(Object.fromEntries(originKeys.map(k => [k, v[k]]))); validateScope({ appId: v.appId, tenantId: v.tenantId });
   for (const k of ['id', 'targetDigest', 'grantRef', 'payloadDigest']) grantRef(v[k]);
   for (const k of ['targetId', 'taskUID']) identity(v[k]);
@@ -76,7 +78,29 @@ export function decodeProposal(input: unknown): Proposal {
     p.expiresAt !== p.createdAt + 3_600_000 || p.route.conversation.tenantId !== p.tenantId || proposalDigest(p) !== p.payloadDigest) throw new Error('Invalid proposal');
   if (p.claim !== undefined) claimEvidence(p.claim); if (p.cardActivityId !== undefined) identity(p.cardActivityId);
   if (p.prNumber !== undefined) integer(p.prNumber, 1, Number.MAX_SAFE_INTEGER); if (p.prUrl !== undefined) text(p.prUrl);
+  if (p.outcome !== undefined) proposalOutcome(p, p.outcome);
   return p;
+}
+export function proposalOutcome(p: Pick<Proposal, 'owner' | 'repo'>, input: unknown): ProposalOutcome {
+  const v = object(input, ['kind', 'number', 'url', 'headSHA', 'existing']);
+  if (v.kind === 'opened') {
+    integer(v.number, 1, Number.MAX_SAFE_INTEGER);
+    if (v.url !== `https://github.com/${p.owner}/${p.repo}/pull/${v.number}` || typeof v.headSHA !== 'string' || !/^[a-f0-9]{40}$/u.test(v.headSHA) || v.existing !== undefined && v.existing !== true) throw new Error('Invalid result');
+  } else if (!['branch-moved', 'permission', 'signin-required', 'validation', 'failed', 'uncertain'].includes(String(v.kind)) || Object.keys(v).length !== 1) throw new Error('Invalid outcome');
+  return v as unknown as ProposalOutcome;
+}
+export function proposalDecisionText(p: Proposal): string {
+  const o = p.outcome; const repo = `${p.owner}/${p.repo}`;
+  if (o?.kind === 'opened') return `${o.existing ? "There's already a PR for this branch:" : 'Opened'} #${o.number} in ${repo}: ${p.title}. ${o.url}` +
+    (o.headSHA !== p.headSHA ? ` The branch changed while the PR was opening; it now points at ${o.headSHA.slice(0, 7)}, not the ${p.headSHA.slice(0, 7)} you approved.` : '');
+  if (p.state === 'rejected') return "OK, I didn't open it.";
+  if (o?.kind === 'branch-moved') return 'The branch changed after you approved, so nothing was opened. Ask again for a new card.';
+  if (o?.kind === 'permission') return `Your GitHub account can't open pull requests in ${repo}, so nothing was opened.`;
+  if (o?.kind === 'signin-required') return 'Your account link has expired. Sign in, then ask again for a new card.';
+  if (o?.kind === 'validation') return 'GitHub rejected the pull request details. Nothing was opened; ask again for a new card.';
+  if (o?.kind === 'failed') return 'Nothing was opened; ask again for a new card.';
+  if (p.state === 'uncertain') return `I couldn't confirm the PR opened. Check https://github.com/${p.owner}/${p.repo}/tree/${encodeURIComponent(p.head)} before asking again.`;
+  return '';
 }
 export function projectClaim(p: Proposal, claim: ClaimEvidence): Proposal {
   return { ...p, claim, state: claim.decision === 'approve' ? 'approving' : claim.decision === 'reject' ? 'rejected' : 'revise-requested' };

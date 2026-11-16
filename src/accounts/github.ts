@@ -7,7 +7,7 @@ import { tlsVerificationEnabled } from '../ingress/config.js';
 import { object as fields } from '../storage/table/codec.js';
 import { githubTools } from './grants.js';
 import type { GitHubTool } from './grants.js';
-import type { ProposalFacts } from './pull-request-proposal.js';
+import type { Proposal, ProposalFacts, ProposalResult } from './pull-request-proposal.js';
 
 export class GitHubError extends Error { constructor(readonly code = 'unavailable') { super('GitHub sign-in unavailable'); } }
 export function githubArguments(tool: GitHubTool, input: unknown): Record<string, string> {
@@ -75,11 +75,14 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
           res.on('end', () => {
             try {
               active(ctx);
-              if (api && res.statusCode === 401) throw new GitHubError('unauthorized');
-              if (res.statusCode !== (api?.body ? 201 : 200) || !res.complete || res.headers['content-encoding'] !== undefined && res.headers['content-encoding'] !== 'identity' ||
+              if (!res.complete || res.headers['content-encoding'] !== undefined && res.headers['content-encoding'] !== 'identity' ||
                 !/^application\/json(?:\s*;\s*charset=utf-8)?$/iu.test(res.headers['content-type'] ?? '')) throw failure();
               const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
-              if ((!object(value) && !Array.isArray(value)) || object(value) && 'error' in value) throw failure(); result = value;
+              if (api && res.statusCode === 401) throw new GitHubError('unauthorized');
+              if (api?.body && res.statusCode === 422) throw new GitHubError('validation');
+              if (api && res.statusCode === 403 && object(value) && value.message === 'Resource not accessible by integration' &&
+                res.headers['retry-after'] === undefined && res.headers['x-ratelimit-remaining'] !== '0') throw new GitHubError('permission');
+              if (res.statusCode !== (api?.body ? 201 : 200) || (!object(value) && !Array.isArray(value)) || object(value) && 'error' in value) throw failure(); result = value;
             } catch (e) { failed = true; if (e instanceof GitHubError) reason = e; }
             req?.destroy();
           });
@@ -104,7 +107,54 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
     })().catch(() => { throw failure(); });
     work.add(pending); void pending.then(() => work.delete(pending), () => work.delete(pending)); return pending;
   }
+  function apiWork<T>(token: string, ctx: DirectoryContext, action: () => Promise<T>): Promise<T> {
+    const pending = Promise.resolve().then(() => { active(ctx); if (!credential(token) || work.size > 4) throw failure(); return action(); });
+    work.add(pending); void pending.then(() => work.delete(pending), () => work.delete(pending)); return pending;
+  }
+  const root = (p: Proposal) => `/repos/${encodeURIComponent(p.owner)}/${encodeURIComponent(p.repo)}`;
+  function pullResult(p: Proposal, v: unknown): ProposalResult {
+    if (!object(v) || !Number.isSafeInteger(v.number) || (v.number as number) < 1 || !object(v.head) || !object(v.base) ||
+      !object(v.head.repo) || !object(v.base.repo) || v.head.ref !== p.head || v.base.ref !== p.base ||
+      String(v.head.repo.full_name).toLowerCase() !== `${p.owner}/${p.repo}`.toLowerCase() || String(v.base.repo.full_name).toLowerCase() !== `${p.owner}/${p.repo}`.toLowerCase() ||
+      typeof v.head.sha !== 'string' || !/^[a-f0-9]{40}$/u.test(v.head.sha)) throw failure();
+    const url = `https://github.com/${p.owner}/${p.repo}/pull/${v.number}`;
+    if (typeof v.html_url !== 'string' || v.html_url.toLowerCase() !== url.toLowerCase()) throw failure();
+    return { kind: 'opened', number: v.number as number, url, headSHA: v.head.sha };
+  }
   return {
+    readUserId(token: string, ctx: DirectoryContext): Promise<string> {
+      return apiWork(token, ctx, async () => { const v = await json(token, {}, ctx, { path: '/user' }); active(ctx);
+        if (!object(v) || !Number.isSafeInteger(v.id) || (v.id as number) < 1) throw failure(); return String(v.id); });
+    },
+    readHead(p: Proposal, token: string, ctx: DirectoryContext): Promise<string> {
+      return apiWork(token, ctx, async () => {
+        const v = await json(token, {}, ctx, { path: `${root(p)}/git/ref/heads/${p.head.split('/').map(encodeURIComponent).join('/')}` }); active(ctx);
+        if (!object(v) || v.ref !== `refs/heads/${p.head}` || !object(v.object) || v.object.type !== 'commit' || typeof v.object.sha !== 'string' || !/^[a-f0-9]{40}$/u.test(v.object.sha)) throw failure();
+        return v.object.sha;
+      });
+    },
+    findPullRequest(p: Proposal, token: string, ctx: DirectoryContext, all = false): Promise<ProposalResult | undefined> {
+      return apiWork(token, ctx, async () => {
+        let match: ProposalResult | undefined;
+        for (let page = 1; page <= 1000; page++) {
+          const query = new URLSearchParams({ head: `${p.owner}:${p.head}`, base: p.base, state: all ? 'all' : 'open', per_page: '100', page: String(page) });
+          const values = await json(token, {}, ctx, { path: `${root(p)}/pulls?${query}` }); active(ctx);
+          if (!Array.isArray(values) || values.length > 100) throw failure();
+          for (const v of values) {
+            if (!object(v) || !object(v.head) || !object(v.base) || !object(v.head.repo) || !object(v.base.repo)) throw failure();
+            if (v.head.ref !== p.head || v.base.ref !== p.base || String(v.head.repo.full_name).toLowerCase() !== `${p.owner}/${p.repo}`.toLowerCase() ||
+              String(v.base.repo.full_name).toLowerCase() !== `${p.owner}/${p.repo}`.toLowerCase()) continue;
+            if (match) throw new GitHubError('ambiguous'); match = { ...pullResult(p, v), existing: true };
+          }
+          if (values.length < 100) return match;
+        }
+        throw failure();
+      });
+    },
+    openProposedPullRequest(p: Proposal, token: string, ctx: DirectoryContext): Promise<ProposalResult> {
+      return apiWork(token, ctx, async () => { const v = await json(token, {}, ctx, { path: `${root(p)}/pulls`,
+        body: { base: p.base, head: p.head, title: p.title, body: p.body } }); active(ctx); return pullResult(p, v); });
+    },
     safeOutput: (text: string) => !text.includes(config.clientSecret),
     readProposalFacts(args: Record<string, string>, token: string, ctx: DirectoryContext): Promise<ProposalFacts> {
       const pending = (async () => {

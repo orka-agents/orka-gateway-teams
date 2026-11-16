@@ -154,8 +154,9 @@ export function createNativeTable<K extends object, V, R>(input: DirectoryBindin
       return p.value.map(v => codec.decode(v));
     } catch { throw corrupt(); }
   }
-  function query(key?: K, armedOnly = false, next?: { partition?: string; row?: string }): string {
-    const filter = `PartitionKey eq '${codec.partition}'${key ? ` and RowKey eq '${codec.key(key).row}'` : armedOnly ? ' and Armed eq true' : ''}`;
+  function query(key?: K, armedOnly = false, next?: { partition?: string; row?: string }, proposalsOnly = false): string {
+    const filter = `PartitionKey eq '${codec.partition}'${key ? ` and RowKey eq '${codec.key(key).row}'` : armedOnly ? ' and Armed eq true' : ''}` +
+      (proposalsOnly ? " and RowKey ge 'proposal_' and RowKey lt 'proposal`'" : '');
     // Four maximum payloads plus bounded FULLmetadata fit the 512 KiB response cap.
     const params = new URLSearchParams({ '$filter': filter, '$top': key ? '1' : '4' });
     if (next?.partition !== undefined) params.set('NextPartitionKey', next.partition);
@@ -177,6 +178,28 @@ export function createNativeTable<K extends object, V, R>(input: DirectoryBindin
       } catch (error) { if (!handed) throw error; return { kind: 'uncertain' }; }
       if (response.status === 409 || response.status === 412) return { kind: 'conflict' };
       return { kind: (response.status === 204 || (tag === undefined && response.status === 201)) && !response.body.length ? 'ack' : 'uncertain' };
+    });
+  }
+  function list(context: DirectoryContext, armedOnly = false, visit?: (row: R) => Promise<void>, proposalsOnly = false) {
+    return run(context, async ctx => {
+      const rows: R[] = []; const seenRows = new Set<string>(); const seenCursors = new Set<string>();
+      let next: ReturnType<typeof cursor>; let size = 0;
+      for (let count = 0; count < 1000; count++) {
+        const response = await native(query(undefined, armedOnly, next, proposalsOnly), 'GET', ctx);
+        if (response.status !== 200) throw failed();
+        size += response.body.length;
+        if (size > 32 * 1024 * 1024) throw unready();
+        for (const row of page(response, 4)) {
+          const key = codec.row(row);
+          if (seenRows.has(key) || armedOnly && !codec.armed(row) || proposalsOnly && (key < 'proposal_' || key >= 'proposal`')) throw corrupt();
+          seenRows.add(key); if (seenRows.size > 100000) throw unready();
+          // Recover as we traverse: an exhausted later page must not erase progress.
+          if (visit) { await visit(row); usable(ctx); } else rows.push(row);
+        }
+        next = cursor(response); if (!next) return rows;
+        const serialized = JSON.stringify(next); if (seenCursors.has(serialized)) throw unready(); seenCursors.add(serialized);
+      }
+      throw unready();
     });
   }
   return Object.freeze({
@@ -211,27 +234,9 @@ export function createNativeTable<K extends object, V, R>(input: DirectoryBindin
       try { etag(tag); } catch { return Promise.reject(new DirectoryError('invalid-input')); }
       return mutation(key, value, context, tag);
     },
-    list(context: DirectoryContext, armedOnly = false, visit?: (row: R) => Promise<void>) {
-      return run(context, async ctx => {
-        const rows: R[] = []; const seenRows = new Set<string>(); const seenCursors = new Set<string>();
-        let next: ReturnType<typeof cursor>; let size = 0;
-        for (let count = 0; count < 1000; count++) {
-          const response = await native(query(undefined, armedOnly, next), 'GET', ctx);
-          if (response.status !== 200) throw failed();
-          size += response.body.length;
-          if (size > 32 * 1024 * 1024) throw unready();
-          for (const row of page(response, 4)) {
-            if (seenRows.has(codec.row(row)) || (armedOnly && !codec.armed(row))) throw corrupt();
-            seenRows.add(codec.row(row)); if (seenRows.size > 100000) throw unready();
-            // Recover as we traverse: an exhausted later page must not erase progress.
-            if (visit) { await visit(row); usable(ctx); } else rows.push(row);
-          }
-          next = cursor(response); if (!next) return rows;
-          const serialized = JSON.stringify(next); if (seenCursors.has(serialized)) throw unready(); seenCursors.add(serialized);
-        }
-        throw unready();
-      });
-    },
+    list,
+    // Fixed internal account-row range, never caller-controlled OData.
+    visitProposals: (context: DirectoryContext, visit: (row: R) => Promise<void>) => list(context, false, visit, true),
     close() {
       closed = true;
       for (const controller of cancellations) controller.abort();

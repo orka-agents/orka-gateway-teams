@@ -252,7 +252,9 @@ function delegatedFixture() {
   const accounts = {
     providerIdentity: async () => undefined,
     getProposal: async (): Promise<ProposalVersion | undefined> => undefined, reserveProposal: async () => { throw new Error('not a proposal'); },
-    replaceProposal: async () => { throw new Error('not a proposal'); },
+    replaceProposal: async () => { throw new Error('not a proposal'); }, claimProposal: async () => { throw new Error('not a proposal'); },
+    reserveProposalWrite: async () => { throw new Error('not a proposal'); }, completeProposalWrite: async () => { throw new Error('not a proposal'); },
+    visitRecoverableProposals: async () => {}, proposalWriteOutcome: async () => undefined, fenceUnsentProposal: async (): Promise<'uncertain'> => 'uncertain',
     reserveGrant: async (input: TaskGrant) => input,
     getGrant: async (_ref: string) => undefined as TaskGrant | undefined,
     watch: () => { throw new Error('not a tool handoff'); },
@@ -312,6 +314,28 @@ test('uncertain_card_send_never_resends_after_restart and refresh scopes identit
   f.policy({ kind: 'no-access', text: '' }); assert.equal((await restarted.cardAction!(input, context())).status, 403);
 });
 
+test('unknown_decision_reply_not_resent_after_restart and plaintext control stores only result references', async t => {
+  const d = delegatedFixture(); await d.delegated.accounts.complete(); const f = await fixture(t, 2, d.delegated); await f.provision();
+  const p = { ...proposalFixture(), ...f.scope, objectId: d.ch.objectId, conversationId: f.event.contextId, route: f.route,
+    targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest!, state: 'opened' as const,
+    outcome: { kind: 'opened' as const, number: 12, url: 'https://github.com/example/project/pull/12', headSHA: 'a'.repeat(40) } };
+  d.delegated.accounts.getProposal = async () => ({ proposal: p, etag: 'W/"1"' });
+  f.outcome({ kind: 'unknown' }); await f.sink.postDecision(p, context()); assert.equal(f.sent.length, 1);
+  await f.restart().postDecision(p, context()); assert.equal(f.sent.length, 1);
+  const receipt = await f.directory.getControl({ kind: 'control', conversationId: p.conversationId,
+    activityId: `pr:${p.id}:1:${(await import('../src/accounts/pull-request-proposal.js')).proposalHash(p.outcome)}` }, context());
+  assert.equal(receipt?.state, 'unknown'); assert.equal(receipt?.reply.kind, 'pr-decision');
+  assert.ok(!JSON.stringify(receipt).includes(p.title)); assert.ok(!JSON.stringify(receipt).includes(p.outcome.url));
+});
+test('expired_account_decision_sends_only_fixed_signin_notice_without_old_private_facts', async t => {
+  const d = delegatedFixture(); await d.delegated.accounts.complete(); const f = await fixture(t, 2, d.delegated); await f.provision();
+  const p = { ...proposalFixture(), ...f.scope, objectId: d.ch.objectId, conversationId: f.event.contextId, route: f.route,
+    targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest!, state: 'failed' as const, outcome: { kind: 'signin-required' as const } };
+  d.delegated.accounts.getProposal = async () => ({ proposal: p, etag: 'W/"1"' });
+  d.delegated.accounts.safeOutput = async () => false;
+  await f.sink.postDecision(p, context()); assert.equal(f.sent.length, 1); assert.match(f.sent[0]!.text, /Sign in/);
+  for (const privateValue of [p.title, p.body, p.githubLogin, p.head]) assert.ok(!f.sent[0]!.text.includes(privateValue));
+});
 test('delegated admission reserves sender generation before inbox and refuses immutable grant conflicts or missing authenticated sender', async t => {
   const d = delegatedFixture(); await d.delegated.accounts.complete(); const f = await fixture(t, 2, d.delegated); await f.provision();
   const reserved: TaskGrant[] = [];
