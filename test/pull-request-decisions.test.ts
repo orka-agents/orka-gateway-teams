@@ -110,6 +110,13 @@ test('http_422_is_no_effect_and_read_only_lookup and definite permission differs
     if (status === 422) assert.equal(f.requests.at(-1)!.method, 'GET');
   }
 });
+test('revoked_user_token_invalidates_only_frozen_generation_and_requests_signin', async t => {
+  const f = await decisionsFixture(t);
+  f.behavior((req, res) => { assert.equal(req.path, '/user'); res.statusCode = 401; res.end('{"message":"Bad credentials"}'); });
+  await f.decide(); const p = await f.settled(); assert.equal(p.outcome?.kind, 'signin-required');
+  assert.deepEqual(await f.gh.inspect(f.subject, context()), { generation: 3, linked: false });
+  assert.equal(f.requests.filter(r => r.method === 'POST').length, 0);
+});
 test('service_close_aborts_and_drains_effects', async t => {
   const f = await decisionsFixture(t); let reached = false;
   f.behavior(() => { reached = true; }); await f.decide(); await eventually(() => reached);

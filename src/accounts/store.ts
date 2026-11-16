@@ -44,6 +44,9 @@ type CipherRow = { row: string; etag: string; value: Ciphertext };
 const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
 function bad(code: AccountError['code'] = 'corrupt'): never { throw new AccountError(code); }
 const minute = 60_000; const idle = 30 * 86_400_000;
+// Initial previews retain the legacy 48 KiB budget; metadata has headroom, including on retained near-limit rows.
+// 60 KiB plus generation/IV/tag (36 bytes) remains below Table's 64 KiB binary-property bound.
+const previewBytes = 48 * 1024; const proposalBytes = 60 * 1024;
 
 /** Borrows registry authority; it never creates a table, acquires a lease or retries a write. */
 export function createAccountStore(binding: DirectoryBinding, key: Buffer, dependencies: DirectoryDependencies,
@@ -155,7 +158,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
   function seal(value: Document): Ciphertext {
     validate(value); const row = docKey(value).row; const iv = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', secret, iv); cipher.setAAD(aad(row, value.generation));
-    const data = Buffer.from(canonicalJSON(value)); if (data.length > 48 * 1024) bad('invalid-input');
+    const data = Buffer.from(canonicalJSON(value)); if (data.length > (value.kind === 'proposal' ? proposalBytes : previewBytes)) bad('invalid-input');
     const ciphertext = Buffer.concat([iv, cipher.update(data), cipher.final(), cipher.getAuthTag()]);
     return { generation: value.generation, ciphertext };
   }
@@ -184,7 +187,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         for (const [k, type] of Object.entries(types)) if (v[`${k}@odata.type`] !== undefined && v[`${k}@odata.type`] !== type) bad();
         if (v.PartitionKey !== partition || typeof v.RowKey !== 'string' || !/^(?:account|challenge|grant|binding|write|proposal|proposal_selector)_[a-f0-9]{64}$/u.test(v.RowKey) ||
           (expected && v.RowKey !== expected.row) || v.V !== 1 || v.Armed !== false || v['Payload@odata.type'] !== 'Edm.Binary' ||
-          typeof v.Payload !== 'string' || v.Payload.length > 66_000) bad();
+          typeof v.Payload !== 'string' || v.Payload.length > (v.RowKey.startsWith('proposal_') ? 84_000 : 66_000)) bad();
         const data = Buffer.from(v.Payload, 'base64');
         if (data.length < 37 || data.toString('base64') !== v.Payload || v.Digest !== hash(['teams-accounts-row-v1', partition, v.RowKey, v.Payload])) bad();
         const generation = Number(data.readBigUInt64BE()); integer(generation, 1, Number.MAX_SAFE_INTEGER);
@@ -348,7 +351,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
           const candidate: ProposalRow = { kind: 'proposal', objectId: p.objectId, generation: p.generation, proposal: p,
             ...(selector ? { predecessor: selector.etag } : {}) };
           // Preserve complete verified totals, omitting trailing previews if the encrypted document would overflow.
-          while (Buffer.byteLength(canonicalJSON(candidate)) > 48 * 1024 && p.files.length) { p.files.pop(); p.payloadDigest = proposalDigest(p); }
+          while (Buffer.byteLength(canonicalJSON(candidate)) > previewBytes && p.files.length) { p.files.pop(); p.payloadDigest = proposalDigest(p); }
           row = await persist(undefined, candidate, c, v => v.kind === 'proposal' && canonicalJSON(proposalArgs(v.proposal)) === canonicalJSON(proposalArgs(p)));
         }
         if (row.value.kind !== 'proposal') bad();

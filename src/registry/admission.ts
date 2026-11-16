@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import type { createPullRequestService } from '../accounts/pull-request-service.js';
-import { proposalOutput, proposalHash } from '../accounts/pull-request-proposal.js';
+import { proposalOutput, proposalHash, proposalDecisionText } from '../accounts/pull-request-proposal.js';
 import type { Proposal } from '../accounts/pull-request-proposal.js';
 import { object } from '../storage/table/codec.js';
 import { buildPullRequestCard } from '../teams/pull-request-card.js';
@@ -149,8 +149,14 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     const reply = saved.reply as Extract<ControlReply, { kind: 'pr-approval' | 'pr-decision' }>;
     const p = (await options.delegated.accounts.getProposal(reply.proposal, ctx))?.proposal;
     if (!p || reply.kind === 'pr-approval' && p.state !== 'pending' || reply.kind === 'pr-decision' && reply.outcome !== proposalHash(p.outcome ?? p.state) || p.payloadDigest !== reply.digest || p.revision !== reply.rev || p.conversationId !== saved.conversationId || p.targetId !== reply.targetId) throw new DirectoryError('unready');
-    const message: ProviderMessage = { type: 'message', replyToId: p.activityId, attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: buildPullRequestCard(p, 'room', !!options.proposals) }] };
-    if (Buffer.byteLength(JSON.stringify(message)) > MAX_OUTGOING_MESSAGE_BYTES || !await safeProposal(p, proposalOutput(p), ctx) || !await safeProposal(p, JSON.stringify(message), ctx)) throw new DirectoryError('unready');
+    const signin = p.outcome?.kind === 'signin-required';
+    // Revocation fences private previews. This fixed notice copies no old account/proposal strings.
+    const card = signin ? { type: 'AdaptiveCard' as const, version: '1.5' as const, body: [{ type: 'TextBlock' as const, wrap: true, text: proposalDecisionText(p) }] } : buildPullRequestCard(p, 'room', !!options.proposals);
+    const message: ProviderMessage = { type: 'message', replyToId: p.activityId, attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: card }] };
+    const wire = JSON.stringify(message);
+    const safe = signin ? options.safeOutput?.(wire) !== false && (!options.github || options.github.auth.safeOutput(wire)) :
+      await safeProposal(p, proposalOutput(p), ctx) && await safeProposal(p, wire, ctx);
+    if (Buffer.byteLength(wire) > MAX_OUTGOING_MESSAGE_BYTES || !safe) throw new DirectoryError('unready');
     return message;
   }
   async function proposalConnection(p: Proposal, subject: ExchangeContext['subject'], ctx: DirectoryContext) {

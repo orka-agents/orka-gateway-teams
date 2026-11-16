@@ -327,6 +327,15 @@ test('unknown_decision_reply_not_resent_after_restart and plaintext control stor
   assert.equal(receipt?.state, 'unknown'); assert.equal(receipt?.reply.kind, 'pr-decision');
   assert.ok(!JSON.stringify(receipt).includes(p.title)); assert.ok(!JSON.stringify(receipt).includes(p.outcome.url));
 });
+test('expired_account_decision_sends_only_fixed_signin_notice_without_old_private_facts', async t => {
+  const d = delegatedFixture(); await d.delegated.accounts.complete(); const f = await fixture(t, 2, d.delegated); await f.provision();
+  const p = { ...proposalFixture(), ...f.scope, objectId: d.ch.objectId, conversationId: f.event.contextId, route: f.route,
+    targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest!, state: 'failed' as const, outcome: { kind: 'signin-required' as const } };
+  d.delegated.accounts.getProposal = async () => ({ proposal: p, etag: 'W/"1"' });
+  d.delegated.accounts.safeOutput = async () => false;
+  await f.sink.postDecision(p, context()); assert.equal(f.sent.length, 1); assert.match(f.sent[0]!.text, /Sign in/);
+  for (const privateValue of [p.title, p.body, p.githubLogin, p.head]) assert.ok(!f.sent[0]!.text.includes(privateValue));
+});
 test('delegated admission reserves sender generation before inbox and refuses immutable grant conflicts or missing authenticated sender', async t => {
   const d = delegatedFixture(); await d.delegated.accounts.complete(); const f = await fixture(t, 2, d.delegated); await f.provision();
   const reserved: TaskGrant[] = [];

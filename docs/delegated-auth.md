@@ -394,7 +394,11 @@ preview count to fit the encrypted document budget; the card shows “+N more”
 are explicitly incomplete. Long labels/descriptions are visibly truncated to
 preserve the existing 20 KiB message budget; full diffs and patches are not stored.
 
-Proposals are encrypted and expire 60 minutes after durable preparation. A new
+Proposals are encrypted and expire 60 minutes after durable preparation. Preview
+preparation keeps its 48 KiB document budget, leaving room for later claim/result
+metadata within a 60 KiB proposal-document ceiling (still below the 64 KiB binary
+property limit after encryption). Retained near-limit previews keep their approved
+digest and file facts when metadata is added. A new
 proposal replaces the sender's previous pending proposal in that conversation.
 The operation header deduplicates the proposal and its control-send receipt,
 separately from direct GitHub-write reservations. Replay returns frozen facts;
@@ -411,7 +415,9 @@ need separate operator-approved qualification; synthetic tests do not prove them
 
 A decision uses the proposal's 60-minute authority, not the ended Task's pass or
 deadline. Both frozen account generations must still match. Relink, disconnect
-or invalidation requires a new proposal. Approval reacquires only that GitHub
+or invalidation requires a new proposal. A revoked GitHub token invalidates only
+the frozen account generation and sends a fixed sign-in notice without old
+private proposal details. Approval reacquires only that GitHub
 account, verifies its numeric `/user` identity, checks the current branch SHA and
 opens a ready PR with the stored title, description and refs. A branch moved
 before the check opens nothing. GitHub cannot pin PR creation to a SHA: a push

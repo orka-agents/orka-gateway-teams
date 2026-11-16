@@ -123,7 +123,7 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
   }
   return {
     readUserId(token: string, ctx: DirectoryContext): Promise<string> {
-      return apiWork(token, ctx, async () => { const v = await json(token, {}, ctx); active(ctx);
+      return apiWork(token, ctx, async () => { const v = await json(token, {}, ctx, { path: '/user' }); active(ctx);
         if (!object(v) || !Number.isSafeInteger(v.id) || (v.id as number) < 1) throw failure(); return String(v.id); });
     },
     readHead(p: Proposal, token: string, ctx: DirectoryContext): Promise<string> {
