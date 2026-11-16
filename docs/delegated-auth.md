@@ -374,19 +374,20 @@ Task output. Reservations/results are encrypted with the existing account key;
 retained operation history has no pruning/reset command. Started external calls
 may finish despite cancellation; an unknown outcome is not permission to resend.
 
-### Pull-request proposal preview
+### Pull-request proposal and sender decision
 
-`github-propose-pull-request` posts a read-only proposal card, never a GitHub PR.
+`github-propose-pull-request` posts a proposal card; the tool itself never creates a GitHub PR.
 Use it instead of `github-create-pull-request` when the sender should review the
 proposal in Teams. It is brokered `write` because it posts to the conversation;
 do **not** put it in `approvalRequiredTools`. Contents read suffices for its branch
-and comparison reads; Pull requests write is needed only for direct PR creation
-or a future approval handler. Contents write stays off. No Agent YAML is changed
+and comparison reads; Pull requests write is needed for either direct PR creation
+or sender-approved creation. Contents write stays off. No Agent YAML is changed
 automatically, and a historical grant cannot gain the tool or a missing origin.
 
 Only same-repository head/base refs are accepted. The gateway reads `/user`, pins
 the head SHA, and verifies every compared git author is
-`Orka Publisher <publisher@orka.ai>`, including later commit pages. The card shows
+`Orka Publisher <publisher@orka.ai>`, including later commit pages. This author
+identity can be spoofed; it is not cryptographic proof of publisher provenance. The card shows
 verified counts, up to ten file previews, agent-labelled title/description and a
 compare link pinned to both verified SHAs. Large filenames may reduce the retained
 preview count to fit the encrypted document budget; the card shows “+N more”. At the 300-file API boundary, returned file/line totals
@@ -400,14 +401,52 @@ separately from direct GitHub-write reservations. Replay returns frozen facts;
 an armed or unknown card send is never resent, including after restart. An
 unconfirmed arrival is reported honestly, not as a successful send.
 
-The shared card and sender refresh both say “Approval actions are not enabled
-yet”; neither offers Approve, Reject or Revise. Authenticated `pr-refresh` checks
-the current conversation, target and policy. Other allowed room members receive
-a read-only view. Refresh derives expiry/replacement from durable state, but live
-Teams per-user refresh and displayed-card replacement still need qualification.
+The shared card is read-only. Authenticated sender refresh offers **Approve** and
+**Reject** while the selected proposal is pending. Revise is not available. The
+server checks tenant, Entra object ID, conversation, current target and policy;
+Teams MRI selects the view, not authority. Other allowed members see waiting text
+and cannot decide. Refresh derives expiry/replacement from durable state. Live
+Teams per-user refresh, displayed-card replacement and interaction timing still
+need separate operator-approved qualification; synthetic tests do not prove them.
 
-Older strict account/directory readers do not understand proposal rows and
-`pr-approval` controls. Draining controls alone does not make downgrade safe:
+A decision uses the proposal's 60-minute authority, not the ended Task's pass or
+deadline. Both frozen account generations must still match. Relink, disconnect
+or invalidation requires a new proposal. Approval reacquires only that GitHub
+account, verifies its numeric `/user` identity, checks the current branch SHA and
+opens a ready PR with the stored title, description and refs. A branch moved
+before the check opens nothing. GitHub cannot pin PR creation to a SHA: a push
+between the check and POST can change the PR. The returned head is compared with
+the approved head and any mismatch is disclosed; the PR is not auto-closed.
+Reject opens nothing and sends no turn to Orka. Neither decision deletes a branch
+or merges a PR. The result appears in the conversation and on refresh, not in
+Orka's completed Task history. Agent tool configuration remains operator work.
+
+The encrypted current selector arbitrates replacement versus decision. A won
+claim survives replacement and restart. Four service-owned slots bound effects;
+invokes have a four-second decision budget and return an opening card without
+waiting for a GitHub POST. Claimed work has its own thirty-second deadline and
+is cancelled/drained on runtime shutdown or lost authority, not client disconnect.
+A deterministic encrypted write reservation grants at most one PR POST. Existing
+open PRs are linked without creating another. Complete validation failures and
+confirmed permission denials have fixed replies; generic rate limits, lost
+responses and ambiguous outcomes never grant a retry. Unknown Teams result sends
+are not resent; result controls contain only references to encrypted facts.
+
+On startup, after sender binding and readiness, one bounded recovery pass scans
+only proposal rows and reconciles retained decisions. GitHub recovery is GET-only:
+it does not POST a PR or renew an expired token through GitHub's token endpoint.
+A retained reservation without a confirmed result stays uncertain unless a unique
+PR matches the stored repository and head/base refs. That match proves a PR exists,
+not which call created it. No match or ambiguous lookup remains uncertain. Where
+no reservation is confirmed, recovery must first CREATE and read back a terminal
+abandoned reservation at the same key before reporting “Nothing was opened”. This
+fences a late original CREATE; one empty GET alone is insufficient. Authenticated
+sender refresh can resume read-only reconciliation after interrupted work. Expired
+or changed credentials cannot be replaced with another account to recover an old
+proposal. Check the linked branch manually before asking again after uncertainty.
+
+Older strict account/directory readers do not understand extended proposal/write
+rows and `pr-approval`/`pr-decision` controls. Draining controls alone does not make downgrade safe:
 retain a compatible binary for stored proposals. There is no automatic history
 deletion or migration/reset command.
 
