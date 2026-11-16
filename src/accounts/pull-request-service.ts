@@ -184,6 +184,7 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
       const id = proposalIdentity(grant.ref, grant.binding.taskUID, operation);
       let p = (await options.accounts.getProposal(id, ctx))?.proposal;
       if (p && canonicalJSON(proposalArgs(p)) !== canonicalJSON(canonicalArgs)) throw new AccountError('operation-conflict');
+      if (p?.claim?.decision === 'revise') return { text: 'This approval request is no longer pending. Ask again for a new card.' };
       if (!p) {
         const facts = await options.github.readProposalFacts(args, token, ctx);
         if (facts.githubId !== await options.githubAccounts.providerIdentity({ objectId: grant.objectId }, grant.githubGeneration, ctx)) throw new GitHubError();

@@ -425,6 +425,11 @@ If the inbox accepts the turn but its proposal-status write is lost, a later
 expired token or changed account generation can prevent confirming that delivery.
 The card may then ask for sign-in or report a conflict despite the accepted turn;
 check the conversation before sending the same request again.
+A grant reserved before an inbox-full response cannot be rebound after an account
+generation change; send a new ordinary message with the requested changes instead.
+A saved sign-in challenge also retains its original ten-minute expiry. If that
+link expires, send a new ordinary message to get a fresh sign-in prompt, then
+send the requested changes again. Refreshing the old card does not renew the link.
 
 The revision uses current policy, sign-in and a fresh normal grant in the same
 conversation/session, without the old Task's pass or tool authority. Command

@@ -158,6 +158,27 @@ test('propose_is_local_not_pulls_post and same_operation_replays_without_reads_o
   assert.ok(!JSON.stringify(p).includes('PRIVATE PATCH'));
   for (const invalid of [{ ...args, draft: true }, { ...args, head: 'other:branch' }, { ...args, base: '../main' }]) assert.notEqual((await f.call(invalid, 'invalid')).status, 200);
 });
+test('replaying the original proposal after Revise reports no longer pending without another card or GitHub read', async t => {
+  const f = await setup(t); assert.equal((await f.call()).status, 200);
+  const p = (await f.store.getProposal(proposalIdentity(f.grant.ref, 'task', 'operation'), context()))!.proposal;
+  assert.equal(await f.store.claimProposal(p, { decision: 'revise', tenantId: p.tenantId, objectId: p.objectId,
+    invokeActivityId: 'revise-invoke', decidedAt: f.now(), note: 'add a test', revisionReplyTarget: 'revision-reply' }, context()), true);
+  const requests = f.requests.length;
+  const replay = await f.call(); assert.equal(replay.status, 200); assert.match(JSON.stringify(replay.body), /no longer pending/);
+  assert.equal(f.sent(), 1); assert.equal(f.requests.length, requests);
+  const saved = (await f.store.getProposal(p.id, context()))!.proposal;
+  assert.equal(saved.state, 'revise-requested'); assert.equal(saved.claim?.note, 'add a test');
+});
+test('expired saved revision sign-in requires a fresh ordinary message challenge, not renewal of the old activity', async t => {
+  const f = await grantsFixture(t); const saved = await f.store.challenge(f.subject, 'chat-private', 'revision-invoke', context());
+  f.advance(600001);
+  const replay = await f.store.challenge(f.subject, 'chat-private', 'revision-invoke', context());
+  assert.equal(replay.id, saved.id); assert.ok(replay.expiresAt < f.now());
+  assert.equal(await f.store.claim(replay, context()), 'unavailable');
+  const fresh = await f.store.challenge(f.subject, 'chat-private', 'ordinary-message', context());
+  assert.notEqual(fresh.id, saved.id); assert.ok(fresh.expiresAt > f.now());
+  assert.equal(await f.store.claim(fresh, context()), 'claimed');
+});
 test('pagination_checks_later_authors and compare_requires_every_git_author', async t => {
   const f = await setup(t); f.total(101);
   for (const author of [null, { sha: 'a'.repeat(40), commit: { author: null } }, commit('Foreign'), commit('Orka Publisher', 'other@example.invalid')]) {
