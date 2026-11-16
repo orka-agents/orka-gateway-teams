@@ -73,7 +73,7 @@ test('native ACA to Graph to authorizer caches complete admission and refreshes 
   const registry = registryInput(); const policy = snapshotGroupPolicy({ schemaVersion: 1, graphIdentityClientId: objectId, policies: [
     { schemaVersion: 1, targetId: 'primary', frontAgent: 'front', rules: [{ groupId: groups[0], chatKinds: ['personal'] }] },
   ] }, registry);
-  const authorizer = createGroupAuthorizer(policy, createGraphMembershipClient(createGraphIdentity(policy.graphIdentityClientId, { request: local.request }), { request: f.request }));
+  const authorizer = createGroupAuthorizer(policy, createGraphMembershipClient(createGraphIdentity(objectId, { request: local.request }), { request: f.request }));
   t.after(() => authorizer.close());
   const subject = { tenantId: policy.tenantId, objectId, chatKind: 'personal' as const };
   assert.equal((await authorizer.authorize(subject, context(), 'primary')).kind, 'eligible');

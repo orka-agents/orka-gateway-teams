@@ -30,6 +30,59 @@ function fixture(t: test.TestContext) {
   const authorizer = createGroupAuthorizer(policy(), membership); t.after(() => authorizer.close());
   return { authorizer, membership, ignoreCancellation() { honorAbort = false; }, calls: () => calls, groups(value: readonly string[]) { groups = value; }, fail() { fail = true; }, hold(value: Promise<void>) { gate = value; } };
 }
+function userPolicy(mixed = false) { return snapshotGroupPolicy({ schemaVersion: 1,
+  ...(mixed ? { graphIdentityClientId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' } : {}), policies: [
+    { schemaVersion: 1, targetId: 'primary', frontAgent: 'front', rules: [{ userObjectId: objectId, chatKinds: ['personal'] }] },
+    ...(mixed ? [{ schemaVersion: 1, targetId: 'tools', frontAgent: 'front', rules: [{ groupId: groupB, chatKinds: ['personal'] }] }] : []),
+  ] }, registryInput()); }
+test('user-only grants exact authenticated tenant, user, target and chat kind with zero membership calls', async t => {
+  let calls = 0;
+  const authorizer = createGroupAuthorizer(userPolicy(), { lookup: async () => { calls++; throw new Error('Graph forbidden'); }, close: async () => {} });
+  t.after(() => authorizer.close());
+  assert.deepEqual(await authorizer.authorize({ ...subject(), objectId: objectId.toUpperCase() }, context(), 'primary'),
+    { kind: 'eligible', targets: [{ id: 'primary', label: 'primary' }] });
+  for (const denied of [
+    { ...subject(), objectId: groupB }, { ...subject(), tenantId: groupB }, { ...subject(), chatKind: 'groupChat' as const },
+    { tenantId, chatKind: 'personal' as const }, { ...subject(), objectId: '' }, { ...subject(), objectId: '*' },
+    { ...subject(), objectId: '../users' }, readPolicySubject({ from: { aadObjectId: objectId }, conversation: { conversationType: 'channel' } }, tenantId),
+  ]) assert.equal((await authorizer.authorize(denied, context())).kind, 'no-access');
+  for (const target of ['tools', 'missing']) assert.equal((await authorizer.authorize(subject(), context(), target)).kind, 'no-access');
+  assert.equal(calls, 0);
+});
+test('user-only authorizer without a membership client retains cancellation, deadline, capacity, clocks and clean close', async t => {
+  const authorizer = createGroupAuthorizer(userPolicy()); t.after(() => authorizer.close());
+  const abort = new AbortController(); abort.abort();
+  assert.equal((await authorizer.authorize(subject(), { ...context(), signal: abort.signal })).kind, 'unavailable');
+  assert.equal((await authorizer.authorize(subject(), { ...context(), deadline: performance.now() - 1 })).kind, 'unavailable');
+  const pending = Array.from({ length: 32 }, () => authorizer.authorize(subject(), context()));
+  assert.equal((await authorizer.authorize(subject(), context())).kind, 'unavailable');
+  assert.ok((await Promise.all(pending)).every(r => r.kind === 'eligible'));
+  const wall = Date.now(); t.mock.method(Date, 'now', () => wall - 1000);
+  assert.equal((await authorizer.authorize(subject(), context())).kind, 'unavailable'); t.mock.restoreAll();
+  await authorizer.close(); await authorizer.close();
+  assert.equal((await authorizer.authorize(subject(), context())).kind, 'unavailable');
+});
+test('mixed policy grants user and group targets only after complete membership success, never on failure', async t => {
+  let calls = 0; let fail = true;
+  const gate = deferred(); let pending = true;
+  const authorizer = createGroupAuthorizer(userPolicy(true), { lookup: async (id, groups) => {
+    calls++; assert.equal(id, objectId); assert.deepEqual(groups, [groupB]);
+    if (pending) await gate.promise; if (fail) throw new Error('partial/failed lookup'); return [];
+  }, close: async () => {} }); t.after(() => authorizer.close());
+  const operation = authorizer.authorize(subject(), context(), 'primary'); let settled = false;
+  void operation.then(() => { settled = true; }); await new Promise(resolve => setImmediate(resolve)); assert.equal(settled, false);
+  gate.resolve(); assert.equal((await operation).kind, 'unavailable'); pending = false;
+  assert.equal((await authorizer.authorize(subject(), context(), 'primary')).kind, 'unavailable'); assert.equal(calls, 2);
+  fail = false;
+  assert.deepEqual(await authorizer.authorize(subject(), context()), { kind: 'eligible', targets: [{ id: 'primary', label: 'primary' }] });
+  const complete = createGroupAuthorizer(userPolicy(true), { lookup: async () => [groupB], close: async () => {} });
+  t.after(() => complete.close());
+  const result = await complete.authorize(subject(), context()); assert.equal(result.kind, 'eligible');
+  if (result.kind === 'eligible') assert.deepEqual(result.targets.map(t => t.id), ['primary', 'tools']);
+});
+test('group policy without a membership client fails before authorization', () => {
+  assert.throws(() => createGroupAuthorizer(policy()));
+});
 test('current AAD subject is separate from unchanged personal Teams sender bytes', () => {
   const activity = structuredClone(personalMessage); Object.assign(activity.from!, { aadObjectId: objectId });
   const before = JSON.stringify(activity);

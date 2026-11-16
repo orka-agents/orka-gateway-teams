@@ -60,8 +60,8 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
     ...(deps.managedIdentity ? { managedIdentity: deps.managedIdentity } : {}), ...(deps.delegatedRequest ? { request: deps.delegatedRequest } : {}),
     ...(deps.delegatedKeys ? { fetchKeys: deps.delegatedKeys } : {}) }) : undefined;
   const readers = config.targets.map(t => createKubernetesReader(t, deps.kubernetesRequest === undefined ? {} : { request: deps.kubernetesRequest }));
-  const authorizer = createGroupAuthorizer(policy, createGraphMembershipClient(createGraphIdentity(policy.graphIdentityClientId,
-    deps.graphIdentityRequest === undefined ? {} : { request: deps.graphIdentityRequest }), deps.graphRequest === undefined ? {} : { request: deps.graphRequest }));
+  const authorizer = createGroupAuthorizer(policy, policy.groupIds.length ? createGraphMembershipClient(createGraphIdentity(policy.graphIdentityClientId!,
+    deps.graphIdentityRequest === undefined ? {} : { request: deps.graphIdentityRequest }), deps.graphRequest === undefined ? {} : { request: deps.graphRequest }) : undefined);
   const prepared = prepareReceiver(shared.config.receiver, deps);
   const abort = new AbortController(); const loss = new AbortController(); const authorities: LeaseAuthority[] = [];
   const subscriptions: (() => void)[] = []; const handles: { open(): Promise<unknown>; close(): Promise<unknown> }[] = [];

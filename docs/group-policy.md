@@ -1,8 +1,9 @@
 # Group access policy
 
-The group-policy library evaluates access to registered Orkas by Entra group and
-chat kind. `serve-registry` loads it from the required absolute
-`ORKA_GROUP_POLICY_FILE` before acquiring stores. Every supported new activity,
+The group-policy library evaluates access to registered Orkas by Entra group or
+named Entra user object ID, scoped to the authenticated tenant and chat kind.
+`serve-registry` loads it from the required absolute `ORKA_GROUP_POLICY_FILE`
+before acquiring stores. Every supported new activity,
 including duplicate commands, is checked before any connection, Task or control
 send effect. Channels remain unsupported.
 
@@ -34,17 +35,59 @@ boundary. Neither changes the registry format or target routing digest.
 
 The target must already exist in the registry. `frontAgent` must equal that
 target's registered front-agent name. Rules add grants; missing target policy,
-empty rules or no matching group grants nothing. There is no wildcard or default
-tenant access. Unknown fields, including `agents`, are rejected. Current Orka
+empty rules or no matching group or user grants nothing. There is no wildcard or
+default tenant access. Unknown fields, including `agents`, are rejected. Current Orka
 cannot enforce different agent limits for each sender's request: these rules
 control Orka access only, not delegation inside it.
 
 The file is at most 256 KiB, contains at most 32 target policies and 256 total
-rules, and uses UUID group/client IDs. UUID case is canonicalized; target IDs and
-names are not repaired. Policy is immutable for a running owner. Policy, registry
+rules across both rule kinds, and uses UUID group, user and client IDs. UUID case
+is canonicalized; target IDs and names are not repaired. Policy is immutable for a running owner. Policy, registry
 or identity selection changes require stopping/draining the prior owner before
 restarting; no hot reload is provided. Labels and bearer/CA changes do not become
 routing identity changes through this policy.
+
+## Named users without Graph
+
+For explicit per-person access, replace a group rule with `userObjectId`. A
+user-only file needs no `graphIdentityClientId`, Graph managed identity or Graph
+application consent. For example, for an existing registered target:
+
+```json
+{
+  "schemaVersion": 1,
+  "policies": [{
+    "schemaVersion": 1,
+    "targetId": "platform",
+    "frontAgent": "front",
+    "rules": [{
+      "userObjectId": "22222222-2222-4222-8222-222222222222",
+      "chatKinds": ["personal"]
+    }]
+  }]
+}
+```
+
+Each rule must contain exactly one of `groupId` and `userObjectId`. Use the
+person's verified Entra object UUID in the registered tenant, not an email,
+display name or Teams `from.id`. Only the already authenticated activity's
+`from.aadObjectId` can match. The same object ID in another tenant grants nothing.
+No wildcard, empty identity or missing target rule grants access. Bot
+credentials and storage identity are still required; user rules do not provide
+Work IQ consent or share the operator's linked Work IQ/GitHub account.
+
+User-only operation makes zero Graph identity/token/membership requests. Adding
+any group rule requires `graphIdentityClientId` and the normal complete lookup
+across all configured groups, even when requesting a target with only user rules.
+A failed/partial lookup returns `unavailable`, never a user-rule outage fallback.
+Existing group-only policy digests and membership/cache semantics are unchanged.
+
+To add or revoke a person, stop and drain the owner, edit the protected policy
+file, then restart. There is no hot reload. The same authorizer checks discovery,
+`use`, messages, SSO exchange, browser/GitHub callbacks, proposal reads, approval,
+rejection and revision resubmission. An old card does not restore removed access;
+a different allowed person still cannot act on its requester's card. Already
+accepted Tasks/queued work are not cancelled by policy changes.
 
 ## Identity and Graph
 
@@ -91,8 +134,9 @@ fallback to a Teams ID. Unsupported/channel subjects grant nothing. Channels are
 unsupported in `serve-registry`.
 
 Compose `createGroupAuthorizer(policy, membership)` with the snapshot and
-`createGraphMembershipClient(identity)`. Call `authorize(subject, context,
-optionalTargetId)` for every new activity, including duplicate commands and
+`createGraphMembershipClient(identity)` when group rules exist; omit membership
+for user-only policies. A group policy without membership is rejected. Call
+`authorize(subject, context, optionalTargetId)` for every new activity, including duplicate commands and
 same-target choices. Its only outcomes are:
 
 - `eligible`: eligible target IDs/labels, never URLs, groups or credentials.
