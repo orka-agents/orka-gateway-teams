@@ -1,4 +1,5 @@
 import type { IAdaptiveCard, ITextBlock } from '@microsoft/teams.cards';
+import { proposalDecisionText } from '../accounts/pull-request-proposal.js';
 import type { Proposal } from '../accounts/pull-request-proposal.js';
 import { object } from '../storage/table/codec.js';
 import { MAX_OUTGOING_MESSAGE_BYTES } from './format.js';
@@ -18,7 +19,7 @@ export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', dec
   const block = (text: string, heading = false): ITextBlock => ({ type: 'TextBlock', text, wrap: true, ...(heading ? { weight: 'Bolder', size: 'Medium' } : {}) });
   const state = p.state === 'expired' ? 'Expired. Ask again to get a new card.' : p.state === 'superseded' ? 'Replaced by a newer request.' :
     p.state === 'pending' ? viewer === 'sender' ? decisionsEnabled ? 'Approve or reject this pull request.' : 'Approval actions are not enabled yet.' : `Waiting for ${label(p.displayName, 80)} to approve.${decisionsEnabled ? '' : ' Approval actions are not enabled yet.'}` :
-    p.state === 'approving' ? 'Approved. Opening the pull request…' : p.state === 'rejected' ? 'Rejected. Nothing was opened.' : 'This request is no longer pending.';
+    p.state === 'approving' ? 'Approved. Opening the pull request…' : p.state === 'rejected' ? label(proposalDecisionText(p), 2400) : label(proposalDecisionText(p) || 'This request is no longer pending.', 2400);
   const preview = boundedLabel(p.body || 'No description supplied.', 240); const expanded = boundedLabel(p.body, 1800);
   const body: ITextBlock[] = [block('Pull request proposal', true), block(state),
     block(`Asked by ${label(p.displayName, 80)} · expires ${new Date(p.expiresAt).toISOString()}`),
@@ -35,6 +36,7 @@ export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', dec
       type: 'Action.Execute' as const, title: decision === 'approve' ? 'Approve' : 'Reject', verb: `pr-${decision}`,
       data: { proposal: p.id, rev: p.revision, digest: p.payloadDigest } })) : []), ...(preview.truncated ? [{ type: 'Action.ShowCard' as const, title: expanded.truncated ? 'Show more description (truncated)' : 'Show full description',
       card: { type: 'AdaptiveCard' as const, version: '1.5' as const, body: [block(expanded.text)] } }] : []),
+      ...(p.outcome?.kind === 'opened' ? [{ type: 'Action.OpenUrl' as const, title: 'Open pull request', url: p.outcome.url }] : []),
       { type: 'Action.OpenUrl', title: 'View changes', url: `https://github.com/${encodeURIComponent(p.owner)}/${encodeURIComponent(p.repo)}/compare/${p.baseSHA}...${p.headSHA}` }] };
 }
 /** Closed projection: SDK/arbitrary card properties cannot become an HTTP invoke response. */
@@ -58,7 +60,7 @@ export function cardInvokeResponse(input: unknown): { statusCode: 200; type: 'ap
             const d = object(v.data, ['proposal', 'rev', 'digest']);
             if (!['pr-approve', 'pr-reject'].includes(String(v.verb)) || d.rev !== 1 || !/^[a-f0-9]{64}$/u.test(String(d.proposal)) || !/^[a-f0-9]{64}$/u.test(String(d.digest))) throw new Error();
           } else if (v.type === 'Action.ShowCard') validate(v.card, true);
-          else if (v.type !== 'Action.OpenUrl' || typeof v.url !== 'string' || !/^https:\/\/github\.com\/[A-Za-z0-9%_.-]+\/[A-Za-z0-9%_.-]+\/compare\/[A-Za-z0-9%_.-]+\.\.\.[a-f0-9]{40}$/u.test(v.url)) throw new Error(); }
+          else if (v.type !== 'Action.OpenUrl' || typeof v.url !== 'string' || !/^https:\/\/github\.com\/[A-Za-z0-9%_.-]+\/[A-Za-z0-9%_.-]+\/(?:compare\/[A-Za-z0-9%_.-]+\.\.\.[a-f0-9]{40}|pull\/[1-9][0-9]*)$/u.test(v.url)) throw new Error(); }
       }
       if (c.refresh !== undefined) {
         if (nested) throw new Error(); const r = object(c.refresh, ['action', 'userIds']); const a = object(r.action, ['type', 'verb', 'data']); const d = object(a.data, ['proposal', 'rev', 'digest']);

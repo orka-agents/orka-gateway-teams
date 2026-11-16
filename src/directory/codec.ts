@@ -115,12 +115,12 @@ function validate(input: unknown): DirectoryRecord {
     const signin = kind === 'signin' || kind === 'github-signin';
     const disconnected = kind === 'disconnected' || kind === 'github-disconnected';
     const delegated = signin || disconnected || kind === 'signed-in' || kind === 'github-signed-in';
-    object(reply, kind === 'pr-approval' ? ['kind', 'targetId', 'proposal', 'rev', 'digest'] : kind === 'no-access' ? ['kind'] : kind === 'discovery' ? ['kind', 'targets'] : delegated ?
+    object(reply, kind === 'pr-decision' ? ['kind', 'targetId', 'proposal', 'rev', 'digest', 'outcome'] : kind === 'pr-approval' ? ['kind', 'targetId', 'proposal', 'rev', 'digest'] : kind === 'no-access' ? ['kind'] : kind === 'discovery' ? ['kind', 'targets'] : delegated ?
       ['kind', 'targetId', 'recipient', ...(signin ? ['challengeId'] : disconnected ? ['generation'] : [])] : ['kind', 'targetId', 'label']);
     if (kind === 'discovery') {
       if (!Array.isArray(reply.targets) || !reply.targets.length || reply.targets.length > 32) bad(); const ids = new Set<string>();
       for (const item of reply.targets) { const t = object(item, ['id', 'label']); const id = target(t.id); text(t.label, 256); if (ids.has(id)) bad(); ids.add(id); }
-    } else if (kind === 'pr-approval') { target(reply.targetId); hex(reply.proposal); hex(reply.digest); if (reply.rev !== 1) bad(); }
+    } else if (kind === 'pr-approval' || kind === 'pr-decision') { target(reply.targetId); hex(reply.proposal); hex(reply.digest); if (reply.rev !== 1) bad(); if (kind === 'pr-decision') hex(reply.outcome); }
     else if (kind === 'connected' || kind === 'switching') { target(reply.targetId); text(reply.label, 256); }
     else if (delegated) {
       target(reply.targetId); if (disconnected) integer(reply.generation, 0, Number.MAX_SAFE_INTEGER);

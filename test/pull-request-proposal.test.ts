@@ -89,6 +89,17 @@ test('expired_boundary_cannot_claim and replacement_before_decision_wins', async
   assert.equal(await f.store.claimProposal(q, { ...claim, decidedAt: f.now() }, context()), false);
   assert.equal((await f.store.getProposal(q.id, context()))?.proposal.state, 'expired');
 });
+test('proposal_owned_write_grants_one_send_and_never_borrows_Task_authority', async t => {
+  const f = await grantsFixture(t); const p = proposalFixture(); await f.store.reserveProposal(p, 'operation', context());
+  await assert.rejects(f.store.reserveProposalWrite(p, context()));
+  await f.store.claimProposal(p, { decision: 'approve', tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: 'invoke', decidedAt: f.now() }, context());
+  const claimed = (await f.store.getProposal(p.id, context()))!.proposal;
+  const r = await f.store.reserveProposalWrite(claimed, context()); assert.equal(r.kind, 'send');
+  assert.equal((await f.open().reserveProposalWrite(claimed, context())).kind, 'uncertain');
+  const outcome = { kind: 'opened' as const, number: 12, url: 'https://github.com/example/project/pull/12', headSHA: p.headSHA };
+  await f.store.completeProposalWrite(claimed, outcome, context());
+  assert.deepEqual(await f.open().reserveProposalWrite(claimed, context()), { kind: 'done', outcome });
+});
 test('claim_rejects_wrong_actor_digest_and_future_claim_time', async t => {
   const f = await grantsFixture(t); const p = proposalFixture(); await f.store.reserveProposal(p, 'operation', context());
   const claim = { decision: 'approve' as const, tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: 'invoke', decidedAt: f.now() };
