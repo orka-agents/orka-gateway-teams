@@ -405,13 +405,41 @@ separately from direct GitHub-write reservations. Replay returns frozen facts;
 an armed or unknown card send is never resent, including after restart. An
 unconfirmed arrival is reported honestly, not as a successful send.
 
-The shared card is read-only. Authenticated sender refresh offers **Approve** and
-**Reject** while the selected proposal is pending. Revise is not available. The
+The shared card is read-only. Authenticated sender refresh offers **Approve**,
+**Revise** and **Reject** while the selected proposal is pending. The
 server checks tenant, Entra object ID, conversation, current target and policy;
 Teams MRI selects the view, not authority. Other allowed members see waiting text
 and cannot decide. Refresh derives expiry/replacement from durable state. Live
 Teams per-user refresh, displayed-card replacement and interaction timing still
 need separate operator-approved qualification; synthetic tests do not prove them.
+
+**Revise** accepts a nonblank note of at most 2,000 Unicode characters. The first
+winning note, invoke identity and new reply target are saved encrypted before
+normal conversation admission. Until the inbox accepts that exact turn, the card
+says “Sending your revision…”; full/busy admission remains pending, not sent.
+A sign-in control reply is not inbox delivery: sign in, then send the revision
+again by authenticated sender refresh/redelivery. Neither sign-in completion nor
+startup automatically resumes it. Retries reuse the saved event, sender profile,
+route and reply target; new click text cannot replace the winning note.
+If the inbox accepts the turn but its proposal-status write is lost, a later
+expired token or changed account generation can prevent confirming that delivery.
+The card may then ask for sign-in or report a conflict despite the accepted turn;
+check the conversation before sending the same request again.
+A grant reserved before an inbox-full response cannot be rebound after an account
+generation change; send a new ordinary message with the requested changes instead.
+A saved sign-in challenge also retains its original ten-minute expiry. If that
+link expires, send a new ordinary message to get a fresh sign-in prompt, then
+send the requested changes again. Refreshing the old card does not renew the link.
+
+The revision uses current policy, sign-in and a fresh normal grant in the same
+conversation/session, without the old Task's pass or tool authority. Command
+recognition is disabled for this explicit interaction; ordinary shared messages
+still require a bot mention. A conflict is not delivery; reply with what to change
+if the saved turn cannot be admitted. The agent's subsequent proposal uses the
+existing selector and sends a new card, not a Teams message update. An already
+claimed older card retains its decision and note rather than becoming pending.
+After account-generation revocation, the sender can still see fixed revision
+status, but the frozen private preview and note remain hidden.
 
 A decision uses the proposal's 60-minute authority, not the ended Task's pass or
 deadline. Both frozen account generations must still match. Relink, disconnect

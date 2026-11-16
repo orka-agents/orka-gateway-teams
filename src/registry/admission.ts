@@ -1,7 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import type { createPullRequestService } from '../accounts/pull-request-service.js';
 import { proposalOutput, proposalHash, proposalDecisionText } from '../accounts/pull-request-proposal.js';
-import type { Proposal } from '../accounts/pull-request-proposal.js';
+import { createExternalEventId } from '../teams/ids.js';
+import type { Proposal, RevisionAdmission } from '../accounts/pull-request-proposal.js';
 import { object } from '../storage/table/codec.js';
 import { buildPullRequestCard } from '../teams/pull-request-card.js';
 import { MAX_OUTGOING_MESSAGE_BYTES } from '../teams/format.js';
@@ -44,6 +45,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
   postProposal(proposal: Proposal, ctx: DirectoryContext): Promise<'delivered' | 'uncertain' | 'unavailable'>;
   checkProposal(p: Proposal, ctx: DirectoryContext): Promise<boolean>;
   postDecision(p: Proposal, ctx: DirectoryContext): Promise<void>;
+  admitRevision(p: Proposal, ctx: ExchangeContext): Promise<Exclude<RevisionAdmission, 'pending'>>;
   preflight(targetId: string, claim: Readonly<IngressClaim>, signal: AbortSignal): Promise<boolean>;
 } {
   const { directory, authority, authorizer } = options;
@@ -139,10 +141,10 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     await directory.settleControl(keyOf(saved), armed.attemptUUID, outcome.kind === 'delivered' ? outcome : { kind: outcome.kind === 'retryable' ? 'no-effect' : 'unknown' }, ctx);
     return outcome.kind === 'retryable' ? { kind: 'full' } : { kind: 'accepted', replyTarget: '' };
   }
-  async function safeProposal(p: Proposal, text: string, ctx: DirectoryContext) {
+  async function safeProposal(p: Proposal, text: string, ctx: DirectoryContext, generation = p.generation, githubGeneration = p.githubGeneration) {
     if (!options.delegated || options.safeOutput?.(text) === false) return false;
-    return await options.delegated.accounts.safeOutput({ objectId: p.objectId }, p.generation, text, ctx) &&
-      (!options.github || options.github.auth.safeOutput(text) && await options.github.accounts.safeOutput({ objectId: p.objectId }, p.githubGeneration, text, ctx));
+    return await options.delegated.accounts.safeOutput({ objectId: p.objectId }, generation, text, ctx) &&
+      (!options.github || options.github.auth.safeOutput(text) && await options.github.accounts.safeOutput({ objectId: p.objectId }, githubGeneration, text, ctx));
   }
   async function proposalMessage(saved: ControlRecord, ctx: DirectoryContext): Promise<ProviderMessage> {
     if (!['pr-approval', 'pr-decision'].includes(saved.reply.kind) || !options.delegated) throw new DirectoryError('unready');
@@ -203,24 +205,61 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     const ctx = { ...supplied, deadline: Math.min(supplied.deadline, performance.now() + 4000), signal: AbortSignal.any([supplied.signal, controller.signal]), authorizeWrite: () => active(ctx) };
     try {
       assertActive(ctx); if (!record(input) || input.type !== 'invoke' || input.name !== 'adaptiveCard/action' || !record(input.conversation) || !record(input.from)) return denied;
-      const value = object(input.value, ['action', 'trigger']); const action = object(value.action, ['type', 'verb', 'data', 'id', 'title']); const data = object(action.data, ['proposal', 'rev', 'digest']);
-      if (action.type !== 'Action.Execute' || !['pr-refresh', 'pr-approve', 'pr-reject'].includes(String(action.verb)) || data.rev !== 1 || typeof data.proposal !== 'string' || typeof data.digest !== 'string' ||
+      const value = object(input.value, ['action', 'trigger']); const action = object(value.action, ['type', 'verb', 'data', 'id', 'title']);
+      const revise = action.verb === 'pr-revise'; const data = object(action.data, ['proposal', 'rev', 'digest', ...(revise ? ['note'] : [])]);
+      if (action.type !== 'Action.Execute' || !['pr-refresh', 'pr-approve', 'pr-reject', 'pr-revise'].includes(String(action.verb)) || data.rev !== 1 || typeof data.proposal !== 'string' || typeof data.digest !== 'string' ||
         !supplied.subject.objectId || input.from.aadObjectId !== supplied.subject.objectId) return denied;
       let p = (await options.delegated.accounts.getProposal(data.proposal, ctx))?.proposal;
       if (!p || p.conversationId !== input.conversation.id || input.conversation.tenantId !== undefined && p.tenantId !== input.conversation.tenantId || p.payloadDigest !== data.digest || p.revision !== data.rev ||
         !await proposalConnection(p, supplied.subject, ctx)) return denied;
       if (action.verb !== 'pr-refresh') {
         if (!options.proposals || supplied.subject.objectId !== p.objectId) return denied;
-        p = await options.proposals.decide(p, action.verb === 'pr-approve' ? 'approve' : 'reject', identity(input.id), { ...ctx, subject: supplied.subject });
+        if (revise && (!supplied.delegatedTenant || supplied.controlRecipient?.id !== p.senderMRI || typeof data.note !== 'string' ||
+          input.serviceUrl !== p.route.serviceUrl || !record(input.recipient) || input.recipient.id !== p.route.bot.id ||
+          input.conversation.conversationType !== p.route.conversation.conversationType)) return denied;
+        p = await options.proposals.decide(p, revise ? 'revise' : action.verb === 'pr-approve' ? 'approve' : 'reject', identity(input.id), ctx, revise ? data.note as string : undefined);
       }
-      if (action.verb === 'pr-refresh' && supplied.subject.objectId === p.objectId) options.proposals?.refresh(p);
-      const card = buildPullRequestCard(p, supplied.subject.objectId === p.objectId ? 'sender' : 'room', !!options.proposals);
-      if (!await safeProposal(p, proposalOutput(p), ctx) || !await safeProposal(p, JSON.stringify(card), ctx)) return denied;
+      if (action.verb === 'pr-refresh' && supplied.subject.objectId === p.objectId) options.proposals?.refresh(p, ctx);
+      let card = buildPullRequestCard(p, supplied.subject.objectId === p.objectId ? 'sender' : 'room', !!options.proposals);
+      if (!await safeProposal(p, proposalOutput(p), ctx) || !await safeProposal(p, JSON.stringify(card), ctx)) {
+        if (p.state !== 'revise-requested' || supplied.subject.objectId !== p.objectId || !supplied.controlRecipient) return denied;
+        const subject = { objectId: p.objectId }; const current = await options.delegated.accounts.inspect(subject, ctx);
+        const github = await options.github?.accounts.inspect(subject, ctx);
+        if (current.generation === p.generation && (!github || github.generation === p.githubGeneration)) return denied;
+        // A fresh sign-in can resume the saved turn, but cannot restore revoked private preview facts.
+        const text = p.revisionAdmission === 'delivered' ? 'Your revision was sent.' : p.revisionAdmission === 'signin-required' ?
+          'Sign in, then send your revision again.' : p.revisionAdmission === 'conflict' ? 'Your revision was not sent. Reply with what to change.' : 'Sending your revision…';
+        card = { type: 'AdaptiveCard', version: '1.5', body: [{ type: 'TextBlock', wrap: true, text }],
+          ...(card.refresh ? { refresh: { ...card.refresh, userIds: [supplied.controlRecipient.id] } } : {}) };
+        if (!await safeProposal(p, JSON.stringify(card), ctx, current.generation, github?.generation ?? p.githubGeneration)) return denied;
+      }
       assertActive(ctx); return { status: 200, body: { cardInvokeResponse: { statusCode: 200, type: 'application/vnd.microsoft.card.adaptive', value: card } } };
     } catch { return denied; }
     finally { clearTimeout(timer); consumers--; }
   }
-  async function admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>, supplied?: AdmissionContext): Promise<AdmissionResult> {
+  async function admitRevision(p: Proposal, ctx: ExchangeContext): Promise<Exclude<RevisionAdmission, 'pending'>> {
+    const claim = p.claim; const kind = p.route.conversation.conversationType;
+    if (!active(ctx)) return 'full';
+    if (p.state !== 'revise-requested' || claim?.decision !== 'revise' || kind === 'channel' ||
+      ctx.subject.tenantId !== p.tenantId || ctx.subject.objectId !== p.objectId || ctx.subject.chatKind !== kind ||
+      p.appId !== scope.appId || p.tenantId !== scope.tenantId || !ctx.delegatedTenant || ctx.controlRecipient?.id !== p.senderMRI) return 'conflict';
+    const connection = await directory.getConnection(p.conversationId, ctx); const slot = slots.get(p.targetId);
+    if (!connection || !slot || connection.state !== 'provisioned' || connection.targetId !== p.targetId ||
+      connection.identityDigest !== p.targetDigest || slot.target.identityDigest !== p.targetDigest) return 'conflict';
+    // The winning encrypted bytes, not refresh/redelivery input, identify the new normal turn.
+    const event: EventEnvelope = { protocolVersion: 'orka.gateway.v1', eventType: 'text', accountId: p.tenantId, contextId: p.conversationId,
+      externalEventId: createExternalEventId({ tenantId: p.tenantId, conversationId: p.conversationId, activityId: claim.invokeActivityId }),
+      sender: { id: kind === 'personal' ? p.senderMRI : p.objectId, ...(p.displayName ? { displayName: p.displayName } : {}) },
+      text: `Change the proposed pull request for ${p.head}: ${claim.note!}`, replyTarget: claim.revisionReplyTarget! };
+    const result = await admit(event, p.route, { signal: ctx.signal, deadline: ctx.deadline, subject: ctx.subject,
+      activityId: claim.invokeActivityId, delegatedTenant: ctx.delegatedTenant, controlRecipient: ctx.controlRecipient }, true);
+    if (result.kind === 'full' || result.kind === 'conflict') return result.kind;
+    if ('replyTarget' in result && result.replyTarget === claim.revisionReplyTarget) return 'delivered';
+    // Control sends also report accepted/duplicate, but never attest inbox admission.
+    const control = await directory.getControl({ kind: 'control', conversationId: p.conversationId, activityId: claim.invokeActivityId }, ctx);
+    return control?.reply.kind === 'signin' ? 'signin-required' : 'conflict';
+  }
+  async function admit(event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>, supplied?: AdmissionContext, resumeSignin = false): Promise<AdmissionResult> {
     if (route.conversation.conversationType === 'channel') return { kind: 'conflict' };
     if (!supplied || consumers >= 4) return { kind: 'full' };
     const context = { ...supplied }; const ctx: DirectoryContext = { signal: context.signal, deadline: context.deadline, authorizeWrite: () => active(ctx) };
@@ -250,7 +289,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
       let connection = await directory.getConnection(event.contextId, ctx); assertActive(ctx);
       let reply: ControlReply;
       if (denied) reply = { kind: 'no-access' };
-      else if (previous && (previous.state !== 'ready' || previous.reply.kind !== 'connected')) {
+      else if (previous && (previous.state !== 'ready' || previous.reply.kind !== 'connected') && !(resumeSignin && previous.reply.kind === 'signin')) {
         if (previous.state === 'ready' && (previous.reply.kind === 'disconnected' || previous.reply.kind === 'github-disconnected') && options.delegated && context.subject.objectId) {
           const subject = { objectId: context.subject.objectId };
           const accounts = previous.reply.kind === 'github-disconnected' ? options.github?.accounts : options.delegated.accounts;
@@ -480,7 +519,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     scope: options.config.targets[0]!.config.scope, admit,
     ...(browser ? { browser } : {}),
     ...(options.delegated ? { exchange } : {}),
-    postProposal, cardAction,
+    postProposal, cardAction, admitRevision,
     checkProposal: async (p, ctx) => !!await proposalConnection(p, { tenantId: p.tenantId, objectId: p.objectId, chatKind: p.route.conversation.conversationType === 'groupChat' ? 'groupChat' : 'personal' }, ctx),
     postDecision: async (p, ctx) => { await postProposal(p, ctx, true); },
     bindControlSender(value) { if (sender) throw new Error('Control sender already bound'); sender = value; },

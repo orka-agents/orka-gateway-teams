@@ -11,13 +11,14 @@ export interface ProposalFacts { headSHA: string; baseSHA: string; githubId: str
   files: { path: string; additions: number; deletions: number }[]; fileCount: number; additions: number; deletions: number; filesComplete: boolean }
 export interface ClaimEvidence { decision: 'approve' | 'reject' | 'revise'; tenantId: string; objectId: string; invokeActivityId: string;
   decidedAt: number; note?: string; revisionReplyTarget?: string }
+export type RevisionAdmission = 'pending' | 'delivered' | 'full' | 'signin-required' | 'conflict';
 export type ProposalResult = { kind: 'opened'; number: number; url: string; headSHA: string; existing?: true };
 export type ProposalOutcome = ProposalResult | { kind: 'branch-moved' | 'permission' | 'signin-required' | 'validation' | 'failed' | 'uncertain' };
 export interface Proposal extends ProposalOrigin, ProposalFacts {
   id: string; revision: 1; state: 'pending' | 'approving' | 'opened' | 'rejected' | 'revise-requested' | 'superseded' | 'expired' | 'branch-moved' | 'failed' | 'uncertain';
   appId: string; tenantId: string; generation: number; githubGeneration: number; targetId: string; targetDigest: string; grantRef: string; taskUID: string;
   owner: string; repo: string; base: string; head: string; title: string; body: string; createdAt: number; expiresAt: number; payloadDigest: string;
-  claim?: ClaimEvidence; cardActivityId?: string; prNumber?: number; prUrl?: string; outcome?: ProposalOutcome;
+  claim?: ClaimEvidence; revisionAdmission?: RevisionAdmission; cardActivityId?: string; prNumber?: number; prUrl?: string; outcome?: ProposalOutcome;
 }
 export interface ProposalVersion { proposal: Proposal; etag: string; needsProjection?: true }
 export interface ProposalSelector { id: string; objectId: string; generation: number; proposalId: string; revision: 1;
@@ -29,9 +30,9 @@ export const proposalSelectorId = (p: Proposal) => proposalHash(['teams-pr-selec
 export const proposalArgs = (p: Proposal) => ({ owner: p.owner, repo: p.repo, base: p.base, head: p.head, title: p.title, body: p.body });
 // Check decoded display strings too: JSON escaping must not hide a configured credential.
 export const proposalOutput = (p: Proposal) => JSON.stringify(p) + '\n' +
-  [p.title, p.body, p.displayName, p.githubLogin, p.owner, p.repo, p.base, p.head, ...p.files.map(f => f.path)].join('\n');
+  [p.title, p.body, p.claim?.note ?? '', p.displayName, p.githubLogin, p.owner, p.repo, p.base, p.head, ...p.files.map(f => f.path)].join('\n');
 export function proposalDigest(p: Proposal): string {
-  const { payloadDigest: _digest, state: _state, claim: _claim, cardActivityId: _card, prNumber: _number, prUrl: _url, outcome: _outcome, ...frozen } = p;
+  const { payloadDigest: _digest, state: _state, claim: _claim, cardActivityId: _card, prNumber: _number, prUrl: _url, outcome: _outcome, revisionAdmission: _admission, ...frozen } = p;
   return proposalHash(frozen);
 }
 const originKeys = ['conversationId', 'replyTarget', 'route', 'senderMRI', 'objectId', 'displayName', 'activityId'];
@@ -48,7 +49,7 @@ export function claimEvidence(input: unknown): ClaimEvidence {
   const v = object(input, ['decision', 'tenantId', 'objectId', 'invokeActivityId', 'decidedAt', 'note', 'revisionReplyTarget']);
   if (!['approve', 'reject', 'revise'].includes(String(v.decision))) throw new Error('Invalid claim');
   identity(v.tenantId); identity(v.objectId); identity(v.invokeActivityId); integer(v.decidedAt, 1, Number.MAX_SAFE_INTEGER);
-  if (v.decision === 'revise') { if (!text(v.note, 8000).trim() || Array.from(v.note as string).length > 2000) throw new Error('Invalid claim'); identity(v.revisionReplyTarget); }
+  if (v.decision === 'revise') { if (!text(v.note, 8000).trim() || Array.from(v.note as string).length > 2000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(v.note as string)) throw new Error('Invalid claim'); identity(v.revisionReplyTarget); }
   else if (v.note !== undefined || v.revisionReplyTarget !== undefined) throw new Error('Invalid claim');
   return v as unknown as ClaimEvidence;
 }
@@ -62,7 +63,7 @@ export function decodeSelector(input: unknown): ProposalSelector {
 export function decodeProposal(input: unknown): Proposal {
   const v = object(input, [...originKeys, 'id', 'revision', 'state', 'appId', 'tenantId', 'generation', 'githubGeneration', 'targetId', 'targetDigest',
     'grantRef', 'taskUID', 'owner', 'repo', 'base', 'head', 'title', 'body', 'headSHA', 'baseSHA', 'githubId', 'githubLogin', 'commits', 'files',
-    'fileCount', 'additions', 'deletions', 'filesComplete', 'createdAt', 'expiresAt', 'payloadDigest', 'claim', 'cardActivityId', 'prNumber', 'prUrl', 'outcome']);
+    'fileCount', 'additions', 'deletions', 'filesComplete', 'createdAt', 'expiresAt', 'payloadDigest', 'claim', 'revisionAdmission', 'cardActivityId', 'prNumber', 'prUrl', 'outcome']);
   proposalOrigin(Object.fromEntries(originKeys.map(k => [k, v[k]]))); validateScope({ appId: v.appId, tenantId: v.tenantId });
   for (const k of ['id', 'targetDigest', 'grantRef', 'payloadDigest']) grantRef(v[k]);
   for (const k of ['targetId', 'taskUID']) identity(v[k]);
@@ -76,7 +77,10 @@ export function decodeProposal(input: unknown): Proposal {
   const p = v as unknown as Proposal;
   if (p.revision !== 1 || !['pending', 'approving', 'opened', 'rejected', 'revise-requested', 'superseded', 'expired', 'branch-moved', 'failed', 'uncertain'].includes(p.state) ||
     p.expiresAt !== p.createdAt + 3_600_000 || p.route.conversation.tenantId !== p.tenantId || proposalDigest(p) !== p.payloadDigest) throw new Error('Invalid proposal');
-  if (p.claim !== undefined) claimEvidence(p.claim); if (p.cardActivityId !== undefined) identity(p.cardActivityId);
+  if (p.claim !== undefined) claimEvidence(p.claim);
+  if (p.revisionAdmission !== undefined && (p.state !== 'revise-requested' || p.claim?.decision !== 'revise' ||
+    !['pending', 'delivered', 'full', 'signin-required', 'conflict'].includes(p.revisionAdmission))) throw new Error('Invalid revision admission');
+  if (p.cardActivityId !== undefined) identity(p.cardActivityId);
   if (p.prNumber !== undefined) integer(p.prNumber, 1, Number.MAX_SAFE_INTEGER); if (p.prUrl !== undefined) text(p.prUrl);
   if (p.outcome !== undefined) proposalOutcome(p, p.outcome);
   return p;
@@ -103,5 +107,5 @@ export function proposalDecisionText(p: Proposal): string {
   return '';
 }
 export function projectClaim(p: Proposal, claim: ClaimEvidence): Proposal {
-  return { ...p, claim, state: claim.decision === 'approve' ? 'approving' : claim.decision === 'reject' ? 'rejected' : 'revise-requested' };
+  return { ...p, claim, ...(claim.decision === 'revise' ? { revisionAdmission: 'pending' as const } : {}), state: claim.decision === 'approve' ? 'approving' : claim.decision === 'reject' ? 'rejected' : 'revise-requested' };
 }

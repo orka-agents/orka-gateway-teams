@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import type { ExchangeContext } from '../ingress/server.js';
 import type { LeaseAuthority } from '../storage/table/types.js';
 import type { DirectoryContext, DirectoryScope } from '../directory/types.js';
@@ -6,14 +7,15 @@ import { AccountError } from './store.js';
 import type { TaskGrant } from './grants.js';
 import type { createGitHub } from './github.js';
 import { githubArguments, GitHubError } from './github.js';
-import { proposalIdentity, proposalDigest, proposalArgs, proposalOutput, projectClaim } from './pull-request-proposal.js';
-import type { Proposal, ProposalOutcome } from './pull-request-proposal.js';
+import { proposalIdentity, proposalDigest, proposalArgs, proposalOutput, projectClaim, claimEvidence } from './pull-request-proposal.js';
+import type { Proposal, ProposalOutcome, RevisionAdmission } from './pull-request-proposal.js';
 import { canonicalJSON } from '../directory/codec.js';
 
 export function createPullRequestService(options: { accounts: AccountStore; githubAccounts: AccountStore;
   github: Pick<ReturnType<typeof createGitHub>, 'readProposalFacts' | 'readUserId' | 'readHead' | 'findPullRequest' | 'openProposedPullRequest' | 'refresh'>; scope: DirectoryScope; now?: () => number;
   postProposal(proposal: Proposal, ctx: DirectoryContext): Promise<'delivered' | 'uncertain' | 'unavailable'>;
   decisions?: { authority: LeaseAuthority; connected(p: Proposal, ctx: DirectoryContext): Promise<boolean>;
+    admitRevision?(p: Proposal, ctx: ExchangeContext): Promise<Exclude<RevisionAdmission, 'pending'>>;
     postDecision(p: Proposal, ctx: DirectoryContext): Promise<void> } }) {
   const now = options.now ?? Date.now; let closed = false; let places = 0;
   const shutdown = new AbortController(); const effects = new Set<Promise<unknown>>(); const intake = new Set<Promise<unknown>>();
@@ -106,7 +108,17 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
     await finish(p, outcome, settlement);
     } finally { if (!owned) effectIds.delete(p.id); }
   }
-  function launch(p: Proposal, readOnly = false) {
+  async function revising(p: Proposal, ctx: ExchangeContext, settlement: DirectoryContext) {
+    const version = await options.accounts.getProposal(p.id, ctx); if (!version) return;
+    p = version.proposal;
+    if (p.claim?.decision !== 'revise' || ['delivered', 'conflict'].includes(p.revisionAdmission ?? 'pending')) return;
+    if (version.needsProjection) await options.accounts.replaceProposal(version, p, ctx);
+    const status = await options.decisions!.admitRevision!(p, ctx);
+    const current = await options.accounts.getProposal(p.id, settlement);
+    if (current && !['delivered', 'conflict'].includes(current.proposal.revisionAdmission ?? 'pending'))
+      await options.accounts.replaceProposal(current, { ...current.proposal, revisionAdmission: status }, settlement);
+  }
+  function launch(p: Proposal, readOnly = false, sender?: ExchangeContext) {
     effectIds.add(p.id);
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 30000); timer.unref();
     const ctx = { signal: AbortSignal.any([controller.signal, shutdown.signal, options.decisions!.authority.lost]), deadline: performance.now() + 30000,
@@ -114,33 +126,43 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
     // Reserve the last four seconds of the same thirty-second lifetime for outcome settlement, not more GitHub work.
     const operation = new AbortController(); const operationTimer = setTimeout(() => operation.abort(), 26000); operationTimer.unref();
     const work = { ...ctx, signal: AbortSignal.any([ctx.signal, operation.signal]), deadline: ctx.deadline - 4000 };
-    const pending = (readOnly ? reconcile(p, work, true, ctx) : opening(p, work, ctx)).catch(() => { /* Retained claim/write evidence is reconciled, never re-POSTed. */ })
+    const pending = (p.claim?.decision === 'revise' ? revising(p, { ...sender!, ...work }, ctx) :
+      readOnly ? reconcile(p, work, true, ctx) : opening(p, work, ctx)).catch(() => { /* Retained claim/write evidence is reconciled, never re-POSTed. */ })
       .finally(() => { clearTimeout(timer); clearTimeout(operationTimer); effects.delete(pending); effectIds.delete(p.id); places--; });
     effects.add(pending);
   }
-  async function decide(expected: Proposal, decision: 'approve' | 'reject', activityId: string, supplied: ExchangeContext): Promise<Proposal> {
+  async function decide(expected: Proposal, decision: 'approve' | 'reject' | 'revise', activityId: string, supplied: ExchangeContext, note?: string): Promise<Proposal> {
       const timerController = new AbortController(); const timer = setTimeout(() => timerController.abort(), 4000); timer.unref();
       const ctx = { ...supplied, signal: AbortSignal.any([supplied.signal, timerController.signal, shutdown.signal, options.decisions?.authority.lost ?? shutdown.signal]),
         deadline: Math.min(supplied.deadline, performance.now() + 4000), authorizeWrite: () => active(ctx) };
       let slot = false; let launched = false;
       try {
       if (!active(ctx) || supplied.subject.tenantId !== expected.tenantId || supplied.subject.objectId !== expected.objectId ||
-        expected.appId !== options.scope.appId || expected.tenantId !== options.scope.tenantId || !['approve', 'reject'].includes(decision)) throw new GitHubError();
+        expected.appId !== options.scope.appId || expected.tenantId !== options.scope.tenantId || !['approve', 'reject', 'revise'].includes(decision)) throw new GitHubError();
       const p = (await options.accounts.getProposal(expected.id, ctx))?.proposal;
       if (!p || p.objectId !== supplied.subject.objectId || p.tenantId !== supplied.subject.tenantId || p.conversationId !== expected.conversationId ||
-        p.payloadDigest !== expected.payloadDigest || p.revision !== expected.revision || !await options.decisions!.connected(p, ctx) ||
-        !await generations(p, ctx)) throw new GitHubError();
+        p.payloadDigest !== expected.payloadDigest || p.revision !== expected.revision || !await options.decisions!.connected(p, ctx)) throw new GitHubError();
+      if (p.state === 'revise-requested' && decision === 'revise') { refresh(p, supplied); return p; }
+      if (!await generations(p, ctx)) throw new GitHubError();
       if (p.state !== 'pending' || places >= 4 || effectIds.has(p.id)) return p;
       places++; slot = true; effectIds.add(p.id);
-      const claim = { decision, tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: activityId, decidedAt: now() };
+      if (decision === 'revise' && !options.decisions!.admitRevision) throw new GitHubError();
+      const claim = claimEvidence({ decision, tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: activityId, decidedAt: now(),
+        ...(decision === 'revise' ? { note, revisionReplyTarget: randomUUID() } : {}) });
       if (!await options.accounts.claimProposal(p, claim, ctx)) return (await options.accounts.getProposal(p.id, ctx))!.proposal;
-      const claimed = projectClaim(p, claim); launch(claimed); launched = true; return claimed;
+      const claimed = projectClaim(p, claim); launch(claimed, false, supplied); launched = true; return claimed;
       } finally { clearTimeout(timer); if (slot && !launched) { places--; effectIds.delete(expected.id); } }
   }
+  function refresh(p: Proposal, sender?: ExchangeContext) {
+    const revision = p.state === 'revise-requested' && !['delivered', 'conflict'].includes(p.revisionAdmission ?? 'pending') &&
+      !!sender && sender.delegatedTenant === true && sender.controlRecipient?.id === p.senderMRI &&
+      sender.subject.tenantId === p.tenantId && sender.subject.objectId === p.objectId && active(sender) && !!options.decisions?.admitRevision;
+    if (!closed && places < 4 && !effectIds.has(p.id) && (revision || ['approving', 'uncertain'].includes(p.state))) {
+      places++; launch(p, true, sender && { ...sender, subject: { ...sender.subject } });
+    }
+  }
   return {
-    refresh(p: Proposal) {
-      if (!closed && places < 4 && !effectIds.has(p.id) && ['approving', 'uncertain'].includes(p.state)) { places++; launch(p, true); }
-    },
+    refresh,
     recover(supplied: DirectoryContext): Promise<void> {
       if (recovery) return recovery;
       const ctx = { ...supplied, signal: AbortSignal.any([supplied.signal, shutdown.signal, options.decisions?.authority.lost ?? shutdown.signal]), authorizeWrite: () => active(ctx) };
@@ -148,8 +170,8 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
         .catch(() => { /* A bounded pass failure does not retry global startup. */ }).finally(() => { recovery = undefined; });
       return recovery;
     },
-    decide(expected: Proposal, decision: 'approve' | 'reject', activityId: string, ctx: ExchangeContext): Promise<Proposal> {
-      const pending = decide(expected, decision, activityId, ctx); intake.add(pending);
+    decide(expected: Proposal, decision: 'approve' | 'reject' | 'revise', activityId: string, ctx: ExchangeContext, note?: string): Promise<Proposal> {
+      const pending = decide(expected, decision, activityId, ctx, note); intake.add(pending);
       void pending.then(() => intake.delete(pending), () => intake.delete(pending)); return pending;
     },
     async close(): Promise<void> { closed = true; shutdown.abort(); await Promise.allSettled([...intake, ...effects, recovery]); },
@@ -162,6 +184,7 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
       const id = proposalIdentity(grant.ref, grant.binding.taskUID, operation);
       let p = (await options.accounts.getProposal(id, ctx))?.proposal;
       if (p && canonicalJSON(proposalArgs(p)) !== canonicalJSON(canonicalArgs)) throw new AccountError('operation-conflict');
+      if (p?.claim?.decision === 'revise') return { text: 'This approval request is no longer pending. Ask again for a new card.' };
       if (!p) {
         const facts = await options.github.readProposalFacts(args, token, ctx);
         if (facts.githubId !== await options.githubAccounts.providerIdentity({ objectId: grant.objectId }, grant.githubGeneration, ctx)) throw new GitHubError();

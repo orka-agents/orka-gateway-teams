@@ -147,6 +147,7 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
         scope: { appId: shared.config.scope.appId, tenantId: shared.config.scope.tenantId },
         postProposal: (p, ctx) => admission ? admission.postProposal(p, ctx) : Promise.resolve('unavailable'),
         decisions: { authority, connected: (p, ctx) => admission ? admission.checkProposal(p, ctx) : Promise.resolve(false),
+          admitRevision: (p, ctx) => admission ? admission.admitRevision(p, ctx) : Promise.resolve('full'),
           postDecision: async (p, ctx) => { if (admission) await admission.postDecision(p, ctx); } } }) : undefined;
       tasks = createTaskService({ accounts, auth: delegatedAuth!, authority, ...(proposals ? { proposals } : {}),
         ...(github && githubAccounts ? { github: { accounts: githubAccounts, auth: github } } : {}),

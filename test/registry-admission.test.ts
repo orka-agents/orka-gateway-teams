@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { initializeIngressStore, openIngressStore } from '../src/ingress/store.js';
 import test from 'node:test';
 import type { KubernetesContext } from '../src/registry/kubernetes.js';
 import { snapshotRegistry } from '../src/registry/config.js';
@@ -9,7 +13,7 @@ import { bindingName } from '../src/directory/codec.js';
 import { openDirectory } from '../src/directory/store.js';
 import { DirectoryError } from '../src/directory/types.js';
 import { AccountError } from '../src/accounts/store.js';
-import type { ProposalVersion } from '../src/accounts/pull-request-proposal.js';
+import type { Proposal, ProposalVersion } from '../src/accounts/pull-request-proposal.js';
 import { proposalFixture } from './support/pull-request-proposal.js';
 import type { TaskGrant } from '../src/accounts/grants.js';
 import { grantReference } from '../src/accounts/grants.js';
@@ -17,7 +21,9 @@ import type { AccountChallenge, BrowserAttempt } from '../src/accounts/store.js'
 import type { ConnectionRecord } from '../src/directory/types.js';
 import type { PolicyAdmission } from '../src/policy/admission.js';
 import type { AdmissionContext } from '../src/ingress/server.js';
-import type { IngressClaim, ReplyRoute } from '../src/ingress/types.js';
+import { createExternalEventId } from '../src/teams/ids.js';
+import type { EventEnvelope } from '../src/protocol/types.js';
+import type { AdmissionResult, IngressClaim, ReplyRoute } from '../src/ingress/types.js';
 import type { ProviderResult } from '../src/outbound/types.js';
 import { expectedEvent } from './fixtures/incoming.js';
 import { memoryDirectoryTable } from './support/directory-memory.js';
@@ -32,11 +38,12 @@ async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<ty
   const memory = memoryDirectoryTable(); const directory = await openDirectory(memory.table, context()); t.after(() => directory.close());
   let eligible: PolicyAdmission = { kind: 'eligible', targets: config.targets.map(t => ({ id: t.id, label: t.label })) };
   let authorized = 0; let outcome: ProviderResult = { kind: 'delivered', providerMessageId: 'receipt' }; let allowed = true;
+  const turns: { event: Readonly<EventEnvelope>; route: Readonly<ReplyRoute> }[] = [];
   const sent: { text: string; route: unknown }[] = []; const admitted: string[] = []; const checks: string[] = []; let failCheck = false; let failureCategory: BindingCheckError['category'] = 'binding-conflict';
   let checkGate: Promise<void> | undefined; let sendGate: Promise<void> | undefined;
   const evidence = (c: ConnectionRecord) => ({ namespace: 'default', name: c.bindingName, uid: 'uid', generation: 1, spec: {} });
-  const slots = config.targets.map(target => ({ target, inbox: { admit: async (event: typeof expectedEvent) => {
-    admitted.push(target.id); return { kind: 'accepted' as const, replyTarget: event.replyTarget! };
+  const slots = config.targets.map(target => ({ target, inbox: { admit: async (event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>): Promise<AdmissionResult> => {
+    turns.push(structuredClone({ event, route })); admitted.push(target.id); return { kind: 'accepted' as const, replyTarget: event.replyTarget! };
   } }, provisioner: { reconcile: async (c: ConnectionRecord) => { checks.push('reconcile:' + target.id); await checkGate; if (failCheck) throw new BindingCheckError('target-paused'); return evidence(c); },
     check: async (c: ConnectionRecord, _ctx: KubernetesContext) => { checks.push('check:' + target.id); await checkGate; if (failCheck) throw new BindingCheckError(failureCategory); return evidence(c); } } }));
   const authority = { allowed: () => allowed, revalidate: async () => allowed, lost: new AbortController().signal };
@@ -61,7 +68,7 @@ async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<ty
       identityDigest: target.identityDigest!, bindingName: bindingName(scope, conversationId, target.identityDigest!), state: 'reserved' };
     return directory.markProvisioned(await directory.reserveConnection(conn, context()), evidence(conn), context());
   };
-  return { sink, restart: () => { const s = makeSink(); bindSender(s); return s; }, directory, scope, config, slots, event, route, run, provision, sent, admitted, checks, logs, authorized: () => authorized,
+  return { sink, restart: () => { const s = makeSink(); bindSender(s); return s; }, directory, scope, config, slots, event, route, run, provision, sent, admitted, turns, checks, logs, authorized: () => authorized,
     policy: (value: PolicyAdmission) => { eligible = value; }, outcome: (value: ProviderResult) => { outcome = value; },
     fail: (value: boolean, category: BindingCheckError['category'] = 'binding-conflict') => { failCheck = value; failureCategory = category; }, checkGate: (value: Promise<void>) => { checkGate = value; },
     sendGate: (value: Promise<void>) => { sendGate = value; }, revoke: () => { allowed = false; } };
@@ -259,7 +266,7 @@ function delegatedFixture() {
     getGrant: async (_ref: string) => undefined as TaskGrant | undefined,
     watch: () => { throw new Error('not a tool handoff'); },
     pin: () => { throw new Error('not a tool handoff'); },
-    safeGrantOutput: async () => true, safeOutput: async () => true, invalidate: async () => {},
+    safeGrantOutput: async () => true, safeOutput: async (_subject: unknown, _generation: number, _text: string, _ctx: unknown) => true, invalidate: async () => {},
     reserveWrite: async () => { throw new Error('not a write'); }, completeWrite: async () => {},
     bindGrant: async () => { throw new Error('not issuance'); },
     prepareGitHub: async () => undefined, claimGitHub: async () => undefined,
@@ -289,6 +296,59 @@ function delegatedFixture() {
     gate: (value: Promise<void>) => { gate = value; } };
 }
 
+for (const kind of ['personal', 'groupChat'] as const) test(`${kind}: group_revise_preserves_sender_session_without_fake_mention and fresh normal grant`, async t => {
+  const d = delegatedFixture(); await d.delegated.accounts.complete(); const f = await fixture(t, 2, d.delegated, kind);
+  await f.provision('primary', f.event.contextId, kind);
+  const route = structuredClone(f.route); if (route.requester) route.requester = { id: d.ch.objectId, displayName: 'First profile' };
+  const p = { ...proposalFixture(), ...f.scope, conversationId: f.event.contextId, objectId: d.ch.objectId, senderMRI: '29:fixture-person', displayName: 'First profile',
+    route,
+    targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest!, state: 'revise-requested' as const,
+    claim: { decision: 'revise' as const, tenantId: f.scope.tenantId, objectId: d.ch.objectId, invokeActivityId: 'winning-invoke', decidedAt: Date.now(), note: 'disconnect', revisionReplyTarget: 'fresh-reply' } };
+  const grants: TaskGrant[] = []; d.delegated.accounts.reserveGrant = async input => { grants.push(input); return input; };
+  const ctx = { ...context(), subject: { ...context().subject, chatKind: kind }, delegatedTenant: true,
+    controlRecipient: { id: p.senderMRI, ...(kind === 'groupChat' ? { isTargeted: true as const } : {}) } };
+  assert.equal(await f.sink.admitRevision(p, ctx), 'delivered'); assert.equal(f.turns.length, 1);
+  assert.deepEqual(f.turns[0], { event: { protocolVersion: 'orka.gateway.v1', eventType: 'text', accountId: p.tenantId, contextId: p.conversationId,
+    externalEventId: createExternalEventId({ tenantId: p.tenantId, conversationId: p.conversationId, activityId: 'winning-invoke' }),
+    sender: { id: kind === 'personal' ? p.senderMRI : p.objectId, displayName: p.displayName },
+    text: 'Change the proposed pull request for orka/fix: disconnect', replyTarget: 'fresh-reply' }, route: p.route });
+  assert.equal(d.disconnects(), 0); assert.equal(grants.length, 1); assert.notEqual(grants[0]!.ref, p.grantRef);
+  assert.equal(grants[0]!.eventId, f.turns[0]!.event.externalEventId); assert.equal(grants[0]!.binding, undefined);
+  assert.deepEqual(grants[0]!.tools, ['workiq']); assert.equal(f.turns[0]!.event.metadata, undefined);
+  f.policy({ kind: 'unavailable', category: 'graph-unavailable' }); assert.equal(await f.sink.admitRevision(p, ctx), 'full'); assert.equal(f.turns.length, 1);
+  f.policy({ kind: 'no-access', text: '' }); assert.equal(await f.sink.admitRevision(p, ctx), 'conflict'); assert.equal(f.turns.length, 1);
+});
+test('expired revision operation stays retryable and a fresh authenticated attempt can admit the saved note', async t => {
+  const d = delegatedFixture(); await d.delegated.accounts.complete(); const f = await fixture(t, 2, d.delegated); await f.provision();
+  const p = { ...proposalFixture(), ...f.scope, conversationId: f.event.contextId, objectId: d.ch.objectId, senderMRI: '29:fixture-person', route: f.route,
+    targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest!, state: 'revise-requested' as const,
+    claim: { decision: 'revise' as const, tenantId: f.scope.tenantId, objectId: d.ch.objectId, invokeActivityId: 'saved-invoke', decidedAt: Date.now(), note: 'saved note', revisionReplyTarget: 'saved-reply' } };
+  const ctx = { ...context(), delegatedTenant: true, controlRecipient: { id: p.senderMRI } };
+  assert.equal(await f.sink.admitRevision(p, { ...ctx, deadline: performance.now() - 1 }), 'full');
+  const cancelled = new AbortController(); cancelled.abort();
+  assert.equal(await f.sink.admitRevision(p, { ...ctx, signal: cancelled.signal }), 'full');
+  assert.equal(f.turns.length, 0);
+  assert.equal(await f.sink.admitRevision(p, ctx), 'delivered');
+  assert.equal(f.turns.length, 1); assert.equal(f.turns[0]!.event.replyTarget, 'saved-reply');
+});
+test('signin_control_is_not_revision_delivered; authenticated sender follow-up rechecks sign-in without changing event identity', async t => {
+  const d = delegatedFixture(); const f = await fixture(t, 2, d.delegated); await f.provision();
+  const p = { ...proposalFixture(), ...f.scope, conversationId: f.event.contextId, objectId: d.ch.objectId, senderMRI: '29:fixture-person', route: f.route,
+    targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest!, state: 'revise-requested' as const,
+    claim: { decision: 'revise' as const, tenantId: f.scope.tenantId, objectId: d.ch.objectId, invokeActivityId: 'first-invoke', decidedAt: Date.now(), note: 'add test', revisionReplyTarget: 'fresh-reply' } };
+  const ctx = { ...context(), delegatedTenant: true, controlRecipient: { id: p.senderMRI } };
+  assert.equal(await f.sink.admitRevision(p, ctx), 'signin-required'); assert.equal(f.turns.length, 0); assert.equal(f.sent.length, 1);
+  assert.equal(await f.restart().admitRevision(p, ctx), 'signin-required'); assert.equal(f.sent.length, 1);
+  const grants: TaskGrant[] = []; d.delegated.accounts.reserveGrant = async input => { grants.push(input); return input; };
+  await d.delegated.accounts.complete(); d.delegated.accounts.inspect = async () => ({ generation: 2, linked: true });
+  assert.equal(f.turns.length, 0); // Sign-in completion itself never replays the note.
+  assert.equal(await f.restart().admitRevision(p, ctx), 'delivered'); assert.equal(grants[0]!.generation, 2);
+  assert.equal(f.turns.length, 1); assert.equal(f.turns[0]!.event.replyTarget, 'fresh-reply');
+  assert.equal(await f.sink.admitRevision(p, { ...ctx, subject: { ...ctx.subject, objectId: 'other' } }), 'conflict');
+  assert.equal(await f.sink.admitRevision(p, { ...ctx, delegatedTenant: false }), 'conflict');
+  assert.equal(await f.sink.admitRevision(p, { ...ctx, controlRecipient: { id: '29:other' } }), 'conflict'); assert.equal(f.turns.length, 1);
+});
+
 test('uncertain_card_send_never_resends_after_restart and refresh scopes identity, policy, expiry and supersession', async t => {
   const d = delegatedFixture(); await d.delegated.accounts.complete(); const f = await fixture(t, 2, d.delegated, 'groupChat'); await f.provision('primary', f.event.contextId, 'groupChat');
   const p = { ...proposalFixture(), ...f.scope, objectId: d.ch.objectId, conversationId: f.event.contextId, route: f.route,
@@ -312,6 +372,62 @@ test('uncertain_card_send_never_resends_after_restart and refresh scopes identit
   p.state = 'superseded'; assert.match(JSON.stringify((await restarted.cardAction!(input, context())).body), /Replaced/);
   p.state = 'expired'; assert.match(JSON.stringify((await restarted.cardAction!(input, context())).body), /Expired/);
   f.policy({ kind: 'no-access', text: '' }); assert.equal((await restarted.cardAction!(input, context())).status, 403);
+});
+
+for (const crash of ['before', 'after'] as const) test(`normal Revise admission survives crash ${crash} durable inbox commit with one saved event`, async t => {
+  const d = delegatedFixture(); await d.delegated.accounts.complete(); const f = await fixture(t, 2, d.delegated); await f.provision();
+  const dir = mkdtempSync(join(tmpdir(), 'revision-inbox-')); const path = join(dir, 'inbox.sqlite');
+  const scope = f.config.targets[0]!.config.scope; initializeIngressStore(path, scope); let inbox = openIngressStore(path, scope);
+  t.after(() => { inbox.close(); rmSync(dir, { recursive: true, force: true }); });
+  const p = { ...proposalFixture(), ...f.scope, conversationId: f.event.contextId, objectId: d.ch.objectId, senderMRI: '29:fixture-person', route: f.route,
+    targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest!, state: 'revise-requested' as const,
+    claim: { decision: 'revise' as const, tenantId: f.scope.tenantId, objectId: d.ch.objectId, invokeActivityId: 'winning-invoke', decidedAt: Date.now(), note: 'saved note', revisionReplyTarget: 'saved-reply' } };
+  const ctx = { ...context(), delegatedTenant: true, controlRecipient: { id: p.senderMRI } }; let fail = true;
+  f.slots[0]!.inbox.admit = async (event, route) => {
+    if (fail && crash === 'before') throw new Error('simulated before commit');
+    const result = inbox.admit(event, route); if (fail) throw new Error('simulated lost commit response'); return result;
+  };
+  await assert.rejects(f.sink.admitRevision(p, ctx)); inbox.close(); inbox = openIngressStore(path, scope); fail = false;
+  const nextContext = { ...ctx, activityId: 'new-refresh-id' };
+  assert.equal(await f.restart().admitRevision(p, nextContext), 'delivered');
+  assert.equal(await f.restart().admitRevision(p, { ...nextContext }), 'delivered');
+  const claim = inbox.claim()!; assert.equal(claim.event.text, 'Change the proposed pull request for orka/fix: saved note');
+  assert.equal(claim.event.replyTarget, 'saved-reply'); assert.equal(claim.event.externalEventId,
+    createExternalEventId({ tenantId: p.tenantId, conversationId: p.conversationId, activityId: 'winning-invoke' }));
+  assert.deepEqual(inbox.getRoute('saved-reply'), p.route); assert.equal(inbox.claim(), undefined);
+});
+
+test('claimed revision retains fixed status after sign-in changes generation without restoring revoked private preview', async t => {
+  const d = delegatedFixture(); const f = await fixture(t, 2, d.delegated); await f.provision();
+  const p: Proposal = { ...proposalFixture(), ...f.scope, objectId: d.ch.objectId, conversationId: f.event.contextId, route: f.route,
+    targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest!, state: 'revise-requested', revisionAdmission: 'signin-required',
+    claim: { decision: 'revise', tenantId: f.scope.tenantId, objectId: d.ch.objectId, invokeActivityId: 'first', decidedAt: Date.now(), note: 'PRIVATE_NOTE', revisionReplyTarget: 'saved-reply' } };
+  d.delegated.accounts.getProposal = async () => ({ proposal: p, etag: 'W/"1"' });
+  d.delegated.accounts.inspect = async () => ({ generation: 2, linked: true });
+  d.delegated.accounts.safeOutput = async (_s, generation, text) => generation === 2 && !text.includes('PRIVATE_NOTE');
+  const input = { type: 'invoke', name: 'adaptiveCard/action', conversation: f.route.conversation, from: { id: p.senderMRI, aadObjectId: p.objectId },
+    value: { action: { type: 'Action.Execute', verb: 'pr-refresh', data: { proposal: p.id, rev: 1, digest: p.payloadDigest } } } };
+  for (const status of ['pending', 'full', 'signin-required', 'conflict', 'delivered'] as const) {
+    p.revisionAdmission = status;
+    const result = await f.sink.cardAction!(input, { ...context(), delegatedTenant: true, controlRecipient: { id: p.senderMRI } });
+    assert.equal(result.status, 200); const wire = JSON.stringify(result.body);
+    assert.match(wire, status === 'delivered' ? /Your revision was sent/ : status === 'signin-required' ? /Sign in, then send your revision again/ : status === 'conflict' ? /not sent/ : /Sending your revision/);
+    for (const privateValue of [p.title, p.body, p.head, p.displayName, p.githubLogin, 'PRIVATE_NOTE']) assert.ok(!wire.includes(privateValue));
+    assert.ok(!wire.includes('pr-approve')); assert.ok(!wire.includes('pr-revise'));
+  }
+});
+
+test('raw decoded revision note cannot hide a configured credential behind JSON quote escaping', async t => {
+  const d = delegatedFixture(); await d.delegated.accounts.complete(); const f = await fixture(t, 2, d.delegated); await f.provision();
+  const secret = 'QUOTED_"_PRIVATE';
+  const p = { ...proposalFixture(), ...f.scope, objectId: d.ch.objectId, conversationId: f.event.contextId, route: f.route,
+    targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest!, state: 'revise-requested' as const, revisionAdmission: 'delivered' as const,
+    claim: { decision: 'revise' as const, tenantId: f.scope.tenantId, objectId: d.ch.objectId, invokeActivityId: 'first', decidedAt: Date.now(), note: secret, revisionReplyTarget: 'reply' } };
+  d.delegated.accounts.getProposal = async () => ({ proposal: p, etag: 'W/"1"' });
+  d.delegated.accounts.safeOutput = async (_s, _g, text) => !text.includes(secret);
+  const input = { type: 'invoke', name: 'adaptiveCard/action', conversation: f.route.conversation, from: { id: p.senderMRI, aadObjectId: p.objectId },
+    value: { action: { type: 'Action.Execute', verb: 'pr-refresh', data: { proposal: p.id, rev: 1, digest: p.payloadDigest } } } };
+  assert.equal((await f.sink.cardAction!(input, context())).status, 403);
 });
 
 test('unknown_decision_reply_not_resent_after_restart and plaintext control stores only result references', async t => {

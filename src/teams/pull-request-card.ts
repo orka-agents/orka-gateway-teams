@@ -17,8 +17,11 @@ const label = (s: string, max: number) => boundedLabel(s, max).text;
 /** Only the server-verified sender receives decision actions; invokes still recheck authority. */
 export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolean): IAdaptiveCard {
   const block = (text: string, heading = false): ITextBlock => ({ type: 'TextBlock', text, wrap: true, ...(heading ? { weight: 'Bolder', size: 'Medium' } : {}) });
-  const state = p.state === 'expired' ? 'Expired. Ask again to get a new card.' : p.state === 'superseded' ? 'Replaced by a newer request.' :
-    p.state === 'pending' ? viewer === 'sender' ? decisionsEnabled ? 'Approve or reject this pull request.' : 'Approval actions are not enabled yet.' : `Waiting for ${label(p.displayName, 80)} to approve.${decisionsEnabled ? '' : ' Approval actions are not enabled yet.'}` :
+  const revision = p.revisionAdmission === 'delivered' ? `${p.displayName} asked for changes: "${p.claim?.note ?? ''}"` :
+    p.revisionAdmission === 'signin-required' ? 'Sign in, then send your revision again.' :
+      p.revisionAdmission === 'conflict' ? 'Your revision was not sent. Reply with what to change.' : 'Sending your revision…';
+  const state = p.state === 'revise-requested' ? label(revision, 3000) : p.state === 'expired' ? 'Expired. Ask again to get a new card.' : p.state === 'superseded' ? 'Replaced by a newer request.' :
+    p.state === 'pending' ? viewer === 'sender' ? decisionsEnabled ? 'Approve, revise or reject this pull request.' : 'Approval actions are not enabled yet.' : `Waiting for ${label(p.displayName, 80)} to approve.${decisionsEnabled ? '' : ' Approval actions are not enabled yet.'}` :
     p.state === 'approving' ? 'Approved. Opening the pull request…' : p.state === 'rejected' ? label(proposalDecisionText(p), 2400) : label(proposalDecisionText(p) || 'This request is no longer pending.', 2400);
   const preview = boundedLabel(p.body || 'No description supplied.', 240); const expanded = boundedLabel(p.body, 1800);
   const body: ITextBlock[] = [block('Pull request proposal', true), block(state),
@@ -34,7 +37,11 @@ export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', dec
     refresh: { action: { type: 'Action.Execute', verb: 'pr-refresh', data: { proposal: p.id, rev: p.revision, digest: p.payloadDigest } }, userIds: [p.senderMRI] },
     actions: [...(decisionsEnabled && viewer === 'sender' && p.state === 'pending' ? (['approve', 'reject'] as const).map(decision => ({
       type: 'Action.Execute' as const, title: decision === 'approve' ? 'Approve' : 'Reject', verb: `pr-${decision}`,
-      data: { proposal: p.id, rev: p.revision, digest: p.payloadDigest } })) : []), ...(preview.truncated ? [{ type: 'Action.ShowCard' as const, title: expanded.truncated ? 'Show more description (truncated)' : 'Show full description',
+      data: { proposal: p.id, rev: p.revision, digest: p.payloadDigest } })) : []),
+      ...(decisionsEnabled && viewer === 'sender' && p.state === 'pending' ? [{ type: 'Action.ShowCard' as const, title: 'Revise',
+        card: { type: 'AdaptiveCard' as const, version: '1.5' as const,
+          body: [{ type: 'Input.Text' as const, id: 'note', isMultiline: true, maxLength: 2000, placeholder: 'What should change?' }],
+          actions: [{ type: 'Action.Execute' as const, title: 'Send', verb: 'pr-revise', data: { proposal: p.id, rev: p.revision, digest: p.payloadDigest } }] } }] : []), ...(preview.truncated ? [{ type: 'Action.ShowCard' as const, title: expanded.truncated ? 'Show more description (truncated)' : 'Show full description',
       card: { type: 'AdaptiveCard' as const, version: '1.5' as const, body: [block(expanded.text)] } }] : []),
       ...(p.outcome?.kind === 'opened' ? [{ type: 'Action.OpenUrl' as const, title: 'Open pull request', url: p.outcome.url }] : []),
       { type: 'Action.OpenUrl', title: 'View changes', url: `https://github.com/${encodeURIComponent(p.owner)}/${encodeURIComponent(p.repo)}/compare/${p.baseSHA}...${p.headSHA}` }] };
@@ -47,20 +54,25 @@ export function cardInvokeResponse(input: unknown): { statusCode: 200; type: 'ap
     if (Buffer.byteLength(JSON.stringify(input.value)) > MAX_OUTGOING_MESSAGE_BYTES) return undefined;
     const card = JSON.parse(JSON.stringify(input.value)) as unknown;
     const string = (s: unknown) => { if (typeof s !== 'string' || Buffer.byteLength(s) > MAX_OUTGOING_MESSAGE_BYTES) throw new Error(); };
-    const validate = (input: unknown, nested = false) => {
+    const validate = (input: unknown, nested = false, revision = false) => {
       const c = object(input, ['type', 'version', 'fallbackText', 'body', 'actions', 'refresh']);
       if (c.type !== 'AdaptiveCard' || c.version !== '1.5' || !Array.isArray(c.body) || c.body.length > 32) throw new Error();
       if (c.fallbackText !== undefined) string(c.fallbackText);
-      for (const b of c.body) { const t = object(b, ['type', 'text', 'wrap', 'weight', 'size']);
+      if (revision) {
+        if (c.body.length !== 1 || !Array.isArray(c.actions) || c.actions.length !== 1) throw new Error();
+        const t = object(c.body[0], ['type', 'id', 'isMultiline', 'maxLength', 'placeholder']);
+        if (t.type !== 'Input.Text' || t.id !== 'note' || t.isMultiline !== true || t.maxLength !== 2000 || t.placeholder !== 'What should change?') throw new Error();
+      }
+      for (const b of revision ? [] : c.body) { const t = object(b, ['type', 'text', 'wrap', 'weight', 'size']);
         if (t.type !== 'TextBlock' || t.wrap !== true || t.weight !== undefined && t.weight !== 'Bolder' || t.size !== undefined && t.size !== 'Medium') throw new Error(); string(t.text); }
       if (c.actions !== undefined) {
-        if (nested || !Array.isArray(c.actions) || c.actions.length > 4) throw new Error();
+        if (nested && !revision || !Array.isArray(c.actions) || c.actions.length > (revision ? 1 : 5)) throw new Error();
         for (const a of c.actions) { const v = object(a, ['type', 'title', ...(a.type === 'Action.ShowCard' ? ['card'] : a.type === 'Action.Execute' ? ['verb', 'data'] : ['url'])]); string(v.title);
           if (v.type === 'Action.Execute') {
             const d = object(v.data, ['proposal', 'rev', 'digest']);
-            if (!['pr-approve', 'pr-reject'].includes(String(v.verb)) || d.rev !== 1 || !/^[a-f0-9]{64}$/u.test(String(d.proposal)) || !/^[a-f0-9]{64}$/u.test(String(d.digest))) throw new Error();
-          } else if (v.type === 'Action.ShowCard') validate(v.card, true);
-          else if (v.type !== 'Action.OpenUrl' || typeof v.url !== 'string' || !/^https:\/\/github\.com\/[A-Za-z0-9%_.-]+\/[A-Za-z0-9%_.-]+\/(?:compare\/[A-Za-z0-9%_.-]+\.\.\.[a-f0-9]{40}|pull\/[1-9][0-9]*)$/u.test(v.url)) throw new Error(); }
+            if (!(revision ? v.verb === 'pr-revise' && v.title === 'Send' : ['pr-approve', 'pr-reject'].includes(String(v.verb))) || d.rev !== 1 || !/^[a-f0-9]{64}$/u.test(String(d.proposal)) || !/^[a-f0-9]{64}$/u.test(String(d.digest))) throw new Error();
+          } else if (!nested && v.type === 'Action.ShowCard') validate(v.card, true, v.title === 'Revise');
+          else if (nested || v.type !== 'Action.OpenUrl' || typeof v.url !== 'string' || !/^https:\/\/github\.com\/[A-Za-z0-9%_.-]+\/[A-Za-z0-9%_.-]+\/(?:compare\/[A-Za-z0-9%_.-]+\.\.\.[a-f0-9]{40}|pull\/[1-9][0-9]*)$/u.test(v.url)) throw new Error(); }
       }
       if (c.refresh !== undefined) {
         if (nested) throw new Error(); const r = object(c.refresh, ['action', 'userIds']); const a = object(r.action, ['type', 'verb', 'data']); const d = object(a.data, ['proposal', 'rev', 'digest']);
