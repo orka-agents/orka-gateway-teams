@@ -17,6 +17,7 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
     postDecision(p: Proposal, ctx: DirectoryContext): Promise<void> } }) {
   const now = options.now ?? Date.now; let closed = false; let places = 0;
   const shutdown = new AbortController(); const effects = new Set<Promise<unknown>>(); const intake = new Set<Promise<unknown>>();
+  const effectIds = new Set<string>(); let recovery: Promise<void> | undefined;
   const active = (ctx: DirectoryContext) => !closed && !!options.decisions?.authority.allowed() && !ctx.signal.aborted && performance.now() < ctx.deadline;
   async function generations(p: Proposal, ctx: DirectoryContext) {
     const subject = { objectId: p.objectId }; const a = await options.accounts.inspect(subject, ctx);
@@ -75,13 +76,37 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
     // Settlement uses runtime authority, not a credential guard invalidated by disconnect.
     await finish(p, outcome!, ctx);
   }
-  function launch(p: Proposal) {
+  async function reconcile(p: Proposal, ctx: DirectoryContext, owned = false) {
+    if (!active(ctx) || !owned && effectIds.has(p.id) || !await generations(p, ctx) || !await options.decisions!.connected(p, ctx)) return;
+    if (!['approving', 'uncertain'].includes(p.state)) { await finish(p, undefined, ctx); return; }
+    const saved = await options.accounts.proposalWriteOutcome(p, ctx);
+    if (saved) { await finish(p, saved, ctx); return; }
+    const fence = await options.accounts.fenceUnsentProposal(p, ctx);
+    if (fence === 'abandoned') { await finish(p, { kind: 'failed' }, ctx); return; }
+    let outcome: ProposalOutcome = { kind: 'uncertain' };
+    const guards: ReturnType<AccountStore['watch']>[] = [];
+    const bound = { ...ctx, authorizeWrite: () => active(ctx) && guards.every(g => g.active()) };
+    try {
+      const subject = { objectId: p.objectId };
+      // Recovery never renews through GitHub's POST token endpoint. Expired credentials retain uncertainty.
+      const account = await options.githubAccounts.acquire(subject, p.githubGeneration, async () => { throw new GitHubError(); }, bound);
+      if (account.kind === 'token') {
+        guards.push(options.accounts.watch(subject), options.githubAccounts.watch(subject));
+        if (await options.accounts.pin(subject, p.generation, bound) && await options.github.readUserId(account.accessToken, bound) === p.githubId &&
+          await options.decisions!.authority.revalidate() && await options.decisions!.connected(p, bound))
+          outcome = await options.github.findPullRequest(p, account.accessToken, bound, true) ?? outcome;
+      }
+    } catch { /* Missing, ambiguous or unreadable evidence never grants another POST. */ }
+    finally { for (const g of guards) g.release(); }
+    await finish(p, outcome, ctx);
+  }
+  function launch(p: Proposal, readOnly = false) {
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 30000); timer.unref();
     const ctx = { signal: AbortSignal.any([controller.signal, shutdown.signal, options.decisions!.authority.lost]), deadline: performance.now() + 30000,
       authorizeWrite: () => active(ctx) };
-    const pending = opening(p, ctx).catch(() => { /* Retained claim/write evidence is reconciled, never re-POSTed. */ })
-      .finally(() => { clearTimeout(timer); effects.delete(pending); places--; });
-    effects.add(pending);
+    const pending = (readOnly ? reconcile(p, ctx, true) : opening(p, ctx)).catch(() => { /* Retained claim/write evidence is reconciled, never re-POSTed. */ })
+      .finally(() => { clearTimeout(timer); effects.delete(pending); effectIds.delete(p.id); places--; });
+    effects.add(pending); effectIds.add(p.id);
   }
   async function decide(expected: Proposal, decision: 'approve' | 'reject', activityId: string, supplied: ExchangeContext): Promise<Proposal> {
       const timerController = new AbortController(); const timer = setTimeout(() => timerController.abort(), 4000); timer.unref();
@@ -92,7 +117,8 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
       if (!active(ctx) || supplied.subject.tenantId !== expected.tenantId || supplied.subject.objectId !== expected.objectId ||
         expected.appId !== options.scope.appId || expected.tenantId !== options.scope.tenantId || !['approve', 'reject'].includes(decision)) throw new GitHubError();
       const p = (await options.accounts.getProposal(expected.id, ctx))?.proposal;
-      if (!p || p.payloadDigest !== expected.payloadDigest || p.revision !== expected.revision || !await options.decisions!.connected(p, ctx) ||
+      if (!p || p.objectId !== supplied.subject.objectId || p.tenantId !== supplied.subject.tenantId || p.conversationId !== expected.conversationId ||
+        p.payloadDigest !== expected.payloadDigest || p.revision !== expected.revision || !await options.decisions!.connected(p, ctx) ||
         !await generations(p, ctx)) throw new GitHubError();
       if (p.state !== 'pending' || places >= 4) return p;
       places++; slot = true;
@@ -102,11 +128,21 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
       } finally { clearTimeout(timer); if (slot && !launched) places--; }
   }
   return {
+    refresh(p: Proposal) {
+      if (!closed && places < 4 && !effectIds.has(p.id) && ['approving', 'uncertain'].includes(p.state)) { places++; launch(p, true); }
+    },
+    recover(supplied: DirectoryContext): Promise<void> {
+      if (recovery) return recovery;
+      const ctx = { ...supplied, signal: AbortSignal.any([supplied.signal, shutdown.signal, options.decisions?.authority.lost ?? shutdown.signal]), authorizeWrite: () => active(ctx) };
+      recovery = options.accounts.visitRecoverableProposals(ctx, async p => { try { await reconcile(p, ctx); } catch { /* Keep durable evidence for authenticated refresh or a later restart. */ } })
+        .catch(() => { /* A bounded pass failure does not retry global startup. */ }).finally(() => { recovery = undefined; });
+      return recovery;
+    },
     decide(expected: Proposal, decision: 'approve' | 'reject', activityId: string, ctx: ExchangeContext): Promise<Proposal> {
       const pending = decide(expected, decision, activityId, ctx); intake.add(pending);
       void pending.then(() => intake.delete(pending), () => intake.delete(pending)); return pending;
     },
-    async close(): Promise<void> { closed = true; shutdown.abort(); await Promise.allSettled([...intake, ...effects]); },
+    async close(): Promise<void> { closed = true; shutdown.abort(); await Promise.allSettled([...intake, ...effects, recovery]); },
 
     async propose(grant: TaskGrant, input: Record<string, string>, operation: string, token: string, ctx: DirectoryContext,
       safeOutput: (text: string) => Promise<boolean>): Promise<{ text: string }> {

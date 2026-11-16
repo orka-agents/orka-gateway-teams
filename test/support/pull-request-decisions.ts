@@ -32,6 +32,6 @@ export async function decisionsFixture(t: TestContext) {
   const ctx = () => ({ ...context(), subject: { tenantId: p.tenantId, objectId: p.objectId, chatKind: 'personal' as const } });
   const decide = (decision: 'approve' | 'reject' = 'approve', current = p, supplied = ctx()) => service.decide(current, decision, 'invoke', supplied);
   const settled = async () => { await eventually(() => replies.length > 0); return (await f.store.getProposal(p.id, context()))!.proposal; };
-  return { ...f, ...remote, gh, github, service, make, p, ctx, decide, settled, replies, result,
+  return { ...f, ...remote, tableRequests: f.requests, gh, github, service, make, p, ctx, decide, settled, replies, result,
     connected: (v: boolean) => { connected = v; }, redigest: (p: Proposal) => { p.payloadDigest = proposalDigest(p); return p; } };
 }

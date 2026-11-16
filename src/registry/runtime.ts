@@ -174,6 +174,8 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
       dispatcher: receiver!.outbounds!.get(s.target.id)!, scope: { appId: s.target.config.scope.appId, tenantId: s.target.config.scope.tenantId },
     })), active, tasks);
     assertStarting(); if (!authority.allowed()) throw new Error('Registry authority lost'); ready = true;
+    // Receiver has bound the existing control sender; this single pass cannot block readiness or retry startup.
+    void proposals?.recover({ signal: abort.signal, deadline: performance.now() + shared.config.storage.audit.maxDurationMs });
   } catch {
     ready = false; abort.abort();
     await Promise.allSettled([api?.stop(), receiver?.stop()]); await closeStores(); signal?.removeEventListener('abort', cancel);

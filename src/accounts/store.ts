@@ -284,6 +284,40 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     return v;
   }
   return {
+    visitRecoverableProposals(ctx: DirectoryContext, visit: (p: Proposal) => Promise<void>): Promise<void> {
+      return run(ctx, async c => {
+        if (provider !== 'workiq') bad('invalid-input'); const seen = new Set<string>();
+        await table.visitProposals(c, async encrypted => {
+          const doc = unseal(encrypted);
+          const id = doc.kind === 'proposal' ? doc.proposal.id : doc.kind === 'proposal-selector' && doc.state === 'claimed' ? doc.proposalId : undefined;
+          if (!id || seen.has(id)) return;
+          const version = await proposalVersion(id, c); const p = version?.proposal;
+          if (!p?.claim || p.claim.decision === 'revise') return;
+          // Copy retained selector evidence before visiting an unprojected decision.
+          const raw = await read(proposalKey(id), c);
+          if (raw?.value.kind !== 'proposal') bad();
+          if (!raw.value.proposal.claim) await persist(raw, { ...raw.value, proposal: p }, c);
+          seen.add(id); await visit(p); check(c);
+        });
+      });
+    },
+    proposalWriteOutcome(p: Proposal, ctx: DirectoryContext): Promise<ProposalOutcome | undefined> {
+      return run(ctx, async c => {
+        await approved(p, c); const row = await read(writeKey(proposalWriteId(p)), c);
+        return row?.value.kind === 'proposal-write' && row.value.state === 'done' ? proposalOutcome(p, row.value.outcome) : undefined;
+      });
+    },
+    fenceUnsentProposal(p: Proposal, ctx: DirectoryContext): Promise<'abandoned' | 'uncertain'> {
+      return run(ctx, async c => {
+        const v = await approved(p, c); const id = proposalWriteId(v); const previous = await read(writeKey(id), c);
+        if (previous) return previous.value.kind === 'proposal-write' && previous.value.state === 'abandoned' ? 'abandoned' : 'uncertain';
+        try {
+          await persist(undefined, { kind: 'proposal-write', id, proposalId: v.id, revision: 1, argsDigest: v.payloadDigest, objectId: v.objectId,
+            generation: v.generation, githubGeneration: v.githubGeneration, owner: v.owner, repo: v.repo, ownerUUID, state: 'abandoned' }, c);
+          return 'abandoned';
+        } catch { return 'uncertain'; }
+      });
+    },
     reserveProposalWrite(p: Proposal, ctx: DirectoryContext): Promise<{ kind: 'send' } | { kind: 'done'; outcome: ProposalOutcome } | { kind: 'uncertain' }> {
       return run(ctx, async c => {
         const v = await approved(p, c); const id = proposalWriteId(v); const previous = await read(writeKey(id), c);

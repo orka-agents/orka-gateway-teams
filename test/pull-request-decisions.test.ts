@@ -8,6 +8,7 @@ test('wrong_sender_tenant_digest_never_claims and disconnected_target_never_clai
   for (const subject of [{ ...f.ctx().subject, objectId: 'other' }, { ...f.ctx().subject, tenantId: 'other' }])
     await assert.rejects(f.decide('approve', f.p, { ...f.ctx(), subject }));
   await assert.rejects(f.decide('approve', { ...f.p, payloadDigest: 'f'.repeat(64) }));
+  await assert.rejects(f.decide('approve', { ...f.p, objectId: 'other' }, { ...f.ctx(), subject: { ...f.ctx().subject, objectId: 'other' } }));
   f.connected(false); await assert.rejects(f.decide());
   assert.equal((await f.store.getProposal(f.p.id, context()))?.proposal.state, 'pending');
   assert.equal(f.requests.length, 0);

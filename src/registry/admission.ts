@@ -34,7 +34,7 @@ import type { RegistryConfig, RegistryTarget } from './config.js';
 type Category = BindingCheckError['category'] | 'graph-unavailable' | 'signin-required' | 'signin-complete';
 interface DelegatedOptions { accounts: AccountStore; auth: ReturnType<typeof createDelegatedAuth>; apiUri: string; connectionName: string; publicOrigin?: string }
 interface Slot { target: RegistryTarget; inbox: Pick<IngressPort, 'admit'>; provisioner: ReturnType<typeof createBindingProvisioner> }
-interface Options { proposals?: Pick<ReturnType<typeof createPullRequestService>, 'decide'>; safeOutput?(text: string): boolean; github?: { accounts: AccountStore; auth: ReturnType<typeof createGitHub> }; delegated?: DelegatedOptions; config: RegistryConfig; directory: Directory; slots: readonly Slot[]; authority: LeaseAuthority; active(): boolean;
+interface Options { proposals?: Pick<ReturnType<typeof createPullRequestService>, 'decide' | 'refresh'>; safeOutput?(text: string): boolean; github?: { accounts: AccountStore; auth: ReturnType<typeof createGitHub> }; delegated?: DelegatedOptions; config: RegistryConfig; directory: Directory; slots: readonly Slot[]; authority: LeaseAuthority; active(): boolean;
   authorizer: Pick<ReturnType<typeof createGroupAuthorizer>, 'authorize'>; log(category: Category, targetId?: string): void }
 
 /** Four complete consumers share the directory's four places, including control settlement.
@@ -207,6 +207,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
         if (!options.proposals || supplied.subject.objectId !== p.objectId) return denied;
         p = await options.proposals.decide(p, action.verb === 'pr-approve' ? 'approve' : 'reject', identity(input.id), { ...ctx, subject: supplied.subject });
       }
+      if (action.verb === 'pr-refresh' && supplied.subject.objectId === p.objectId) options.proposals?.refresh(p);
       const card = buildPullRequestCard(p, supplied.subject.objectId === p.objectId ? 'sender' : 'room', !!options.proposals);
       if (!await safeProposal(p, proposalOutput(p), ctx) || !await safeProposal(p, JSON.stringify(card), ctx)) return denied;
       assertActive(ctx); return { status: 200, body: { cardInvokeResponse: { statusCode: 200, type: 'application/vnd.microsoft.card.adaptive', value: card } } };
