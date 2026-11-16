@@ -275,7 +275,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     const selected = selector?.kind === 'proposal-selector' && selector.proposalId === p.id && selector.revision === p.revision;
     if (p.state === 'pending') p = selected && selector.state === 'claimed' ? projectClaim(p, selector.claim!) :
       { ...p, state: !selected ? 'superseded' : now() >= p.expiresAt ? 'expired' : 'pending' };
-    return { proposal: p, etag: row.etag };
+    return { proposal: p, etag: row.etag, ...(p.claim && !row.value.proposal.claim ? { needsProjection: true as const } : {}) };
   }
   const proposalWriteId = (p: Proposal) => proposalHash(['teams-proposal-write-v1', p.id, p.revision, p.payloadDigest]);
   async function approved(p: Proposal, c: DirectoryContext) {
@@ -293,10 +293,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
           if (!id || seen.has(id)) return;
           const version = await proposalVersion(id, c); const p = version?.proposal;
           if (!p?.claim || p.claim.decision === 'revise') return;
-          // Copy retained selector evidence before visiting an unprojected decision.
-          const raw = await read(proposalKey(id), c);
-          if (raw?.value.kind !== 'proposal') bad();
-          if (!raw.value.proposal.claim) await persist(raw, { ...raw.value, proposal: p }, c);
+          // The service owns projection repair, after excluding its live claims/effects.
           seen.add(id); await visit(p); check(c);
         });
       });

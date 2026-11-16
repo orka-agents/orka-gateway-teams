@@ -34,6 +34,14 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
     } else p = current;
     await options.decisions!.postDecision(p, ctx);
   }
+  async function settle(p: Proposal, outcome: ProposalOutcome, operation: DirectoryContext) {
+    if (active(operation)) return finish(p, outcome, operation);
+    // Native operation work has drained. A separate bounded settlement may only save/send the outcome, never retry GitHub.
+    const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 4000); timer.unref();
+    const ctx = { signal: AbortSignal.any([controller.signal, shutdown.signal, options.decisions!.authority.lost]), deadline: performance.now() + 4000,
+      authorizeWrite: () => active(ctx) };
+    try { if (active(ctx)) await finish(p, outcome, ctx); } finally { clearTimeout(timer); }
+  }
   async function opening(p: Proposal, ctx: DirectoryContext) {
     const guards: ReturnType<AccountStore['watch']>[] = []; let reserving = false; let sent = false; let token: string | undefined;
     const bound = { ...ctx, authorizeWrite: () => active(ctx) && guards.every(g => g.active()) };
@@ -74,10 +82,15 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
       if (e instanceof GitHubError && e.code === 'unauthorized' && token) try { await options.githubAccounts.invalidate({ objectId: p.objectId }, p.githubGeneration, token, ctx); } catch { /* No retry. */ }
     } finally { for (const g of guards) g.release(); }
     // Settlement uses runtime authority, not a credential guard invalidated by disconnect.
-    await finish(p, outcome!, ctx);
+    await settle(p, outcome!, ctx);
   }
   async function reconcile(p: Proposal, ctx: DirectoryContext, owned = false) {
-    if (!active(ctx) || !owned && effectIds.has(p.id) || !await generations(p, ctx) || !await options.decisions!.connected(p, ctx)) return;
+    if (!active(ctx) || !owned && effectIds.has(p.id)) return;
+    if (!owned) effectIds.add(p.id);
+    try {
+    const version = await options.accounts.getProposal(p.id, ctx); if (!version) return; p = version.proposal;
+    if (version.needsProjection) await options.accounts.replaceProposal(version, p, ctx);
+    if (!await generations(p, ctx) || !await options.decisions!.connected(p, ctx)) return;
     if (!['approving', 'uncertain'].includes(p.state)) { await finish(p, undefined, ctx); return; }
     const saved = await options.accounts.proposalWriteOutcome(p, ctx);
     if (saved) { await finish(p, saved, ctx); return; }
@@ -99,14 +112,16 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
     } catch { /* Missing, ambiguous or unreadable evidence never grants another POST. */ }
     finally { for (const g of guards) g.release(); }
     await finish(p, outcome, ctx);
+    } finally { if (!owned) effectIds.delete(p.id); }
   }
   function launch(p: Proposal, readOnly = false) {
+    effectIds.add(p.id);
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 30000); timer.unref();
     const ctx = { signal: AbortSignal.any([controller.signal, shutdown.signal, options.decisions!.authority.lost]), deadline: performance.now() + 30000,
       authorizeWrite: () => active(ctx) };
     const pending = (readOnly ? reconcile(p, ctx, true) : opening(p, ctx)).catch(() => { /* Retained claim/write evidence is reconciled, never re-POSTed. */ })
       .finally(() => { clearTimeout(timer); effects.delete(pending); effectIds.delete(p.id); places--; });
-    effects.add(pending); effectIds.add(p.id);
+    effects.add(pending);
   }
   async function decide(expected: Proposal, decision: 'approve' | 'reject', activityId: string, supplied: ExchangeContext): Promise<Proposal> {
       const timerController = new AbortController(); const timer = setTimeout(() => timerController.abort(), 4000); timer.unref();
@@ -120,12 +135,12 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
       if (!p || p.objectId !== supplied.subject.objectId || p.tenantId !== supplied.subject.tenantId || p.conversationId !== expected.conversationId ||
         p.payloadDigest !== expected.payloadDigest || p.revision !== expected.revision || !await options.decisions!.connected(p, ctx) ||
         !await generations(p, ctx)) throw new GitHubError();
-      if (p.state !== 'pending' || places >= 4) return p;
-      places++; slot = true;
+      if (p.state !== 'pending' || places >= 4 || effectIds.has(p.id)) return p;
+      places++; slot = true; effectIds.add(p.id);
       const claim = { decision, tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: activityId, decidedAt: now() };
       if (!await options.accounts.claimProposal(p, claim, ctx)) return (await options.accounts.getProposal(p.id, ctx))!.proposal;
       const claimed = projectClaim(p, claim); launch(claimed); launched = true; return claimed;
-      } finally { clearTimeout(timer); if (slot && !launched) places--; }
+      } finally { clearTimeout(timer); if (slot && !launched) { places--; effectIds.delete(expected.id); } }
   }
   return {
     refresh(p: Proposal) {

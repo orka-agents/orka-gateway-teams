@@ -83,6 +83,19 @@ test('disconnect_during_acquire_or_before_post_fences_effect and fresh numeric I
     await f.decide(); await f.settled(); assert.equal(f.requests.filter(r => r.method === 'POST').length, 0);
   }
 });
+test('operation_deadline_settles_uncertain_after_native_work_drains', { timeout: 10000 }, async t => {
+  const f = await decisionsFixture(t); const reached = deferred();
+  f.behavior((req, res) => {
+    if (req.path === '/user') return void res.end('{"id":123}');
+    if (req.path.includes('/git/ref/')) return void res.end(JSON.stringify({ ref: 'refs/heads/orka/fix', object: { type: 'commit', sha: f.p.headSHA } }));
+    if (req.method === 'GET') return void res.end('[]'); reached.resolve();
+  });
+  t.mock.timers.enable({ apis: ['setTimeout'] }); t.after(() => t.mock.timers.reset());
+  await f.decide(); await reached.promise;
+  t.mock.timers.tick(30001); t.mock.timers.reset();
+  const p = await f.settled(); assert.equal(p.state, 'uncertain');
+  assert.equal(f.requests.filter(r => r.method === 'POST').length, 1);
+});
 test('http_422_is_no_effect_and_read_only_lookup and definite permission differs from generic 403', async t => {
   for (const [status, message, state, kind] of [[422, 'Validation Failed', 'failed', 'validation'], [403, 'Resource not accessible by integration', 'failed', 'permission'], [403, 'API rate limit exceeded', 'uncertain', 'uncertain']] as const) {
     const f = await decisionsFixture(t);

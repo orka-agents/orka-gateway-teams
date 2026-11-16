@@ -426,6 +426,11 @@ claim survives replacement and restart. Four service-owned slots bound effects;
 invokes have a four-second decision budget and return an opening card without
 waiting for a GitHub POST. Claimed work has its own thirty-second deadline and
 is cancelled/drained on runtime shutdown or lost authority, not client disconnect.
+After timed-out native work drains, a separate four-second settlement budget can
+save the outcome and send its fixed reply; it cannot start another GitHub operation.
+The four effect slots are an upper bound, not reserved downstream capacity: a
+transient busy account or provider can still leave an approval failed or uncertain.
+A failed approval needs a new card; uncertainty follows the read-only path below.
 A deterministic encrypted write reservation grants at most one PR POST. Existing
 open PRs are linked without creating another. Complete validation failures and
 confirmed permission denials have fixed replies; generic rate limits, lost

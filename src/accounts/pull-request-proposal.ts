@@ -19,7 +19,7 @@ export interface Proposal extends ProposalOrigin, ProposalFacts {
   owner: string; repo: string; base: string; head: string; title: string; body: string; createdAt: number; expiresAt: number; payloadDigest: string;
   claim?: ClaimEvidence; cardActivityId?: string; prNumber?: number; prUrl?: string; outcome?: ProposalOutcome;
 }
-export interface ProposalVersion { proposal: Proposal; etag: string }
+export interface ProposalVersion { proposal: Proposal; etag: string; needsProjection?: true }
 export interface ProposalSelector { id: string; objectId: string; generation: number; proposalId: string; revision: 1;
   state: 'pending' | 'claimed'; claim?: ClaimEvidence }
 export const proposalHash = (v: unknown) => createHash('sha256').update(canonicalJSON(v)).digest('hex');

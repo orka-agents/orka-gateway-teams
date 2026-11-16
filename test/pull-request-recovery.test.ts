@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { decisionsFixture } from './support/pull-request-decisions.js';
 import { proposalFixture } from './support/pull-request-proposal.js';
-import { context, eventually } from './support/directory-table.js';
+import { context, eventually, deferred } from './support/directory-table.js';
 async function claim(f: Awaited<ReturnType<typeof decisionsFixture>>, reserve = false) {
   await f.store.claimProposal(f.p, { decision: 'approve', tenantId: f.p.tenantId, objectId: f.p.objectId, invokeActivityId: 'original', decidedAt: f.now() }, context());
   const p = (await f.store.getProposal(f.p.id, context()))!.proposal;
@@ -55,6 +55,19 @@ test('server_side_range_excludes_other_provider_rows_and_obeys_continuations wit
   assert.ok(queries.length > 1); assert.ok(queries.some(r => r.url.searchParams.has('NextRowKey')));
   assert.ok(queries.every(r => r.url.searchParams.get('$filter')?.endsWith("and RowKey ge 'proposal_' and RowKey lt 'proposal`'")));
   assert.equal(f.requests.length, 0);
+});
+test('startup_recovery_cannot_cancel_a_live_claim_during_projection', async t => {
+  const f = await decisionsFixture(t); const entered = deferred(); const release = deferred(); let hold = true;
+  f.controls.hook = async ({ req, body, reply }) => {
+    if (hold && req.method === 'PUT' && /^proposal_[a-f0-9]{64}$/u.test(String(body?.RowKey))) {
+      hold = false; entered.resolve(); await release.promise;
+    }
+    reply();
+  };
+  const pending = f.decide(); await entered.promise;
+  try { await f.service.recover(context()); } finally { release.resolve(); }
+  await pending; assert.equal((await f.settled()).state, 'opened');
+  assert.equal(f.requests.filter(r => r.method === 'POST').length, 1);
 });
 test('shutdown_drains_held_lookup_before_store_close and recovery never posts', async t => {
   const f = await decisionsFixture(t); await claim(f, true); let held = false;
