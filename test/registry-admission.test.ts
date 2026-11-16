@@ -13,7 +13,7 @@ import { bindingName } from '../src/directory/codec.js';
 import { openDirectory } from '../src/directory/store.js';
 import { DirectoryError } from '../src/directory/types.js';
 import { AccountError } from '../src/accounts/store.js';
-import type { ProposalVersion } from '../src/accounts/pull-request-proposal.js';
+import type { Proposal, ProposalVersion } from '../src/accounts/pull-request-proposal.js';
 import { proposalFixture } from './support/pull-request-proposal.js';
 import type { TaskGrant } from '../src/accounts/grants.js';
 import { grantReference } from '../src/accounts/grants.js';
@@ -326,7 +326,10 @@ test('signin_control_is_not_revision_delivered; authenticated sender follow-up r
   const ctx = { ...context(), delegatedTenant: true, controlRecipient: { id: p.senderMRI } };
   assert.equal(await f.sink.admitRevision(p, ctx), 'signin-required'); assert.equal(f.turns.length, 0); assert.equal(f.sent.length, 1);
   assert.equal(await f.restart().admitRevision(p, ctx), 'signin-required'); assert.equal(f.sent.length, 1);
-  await d.delegated.accounts.complete(); assert.equal(await f.restart().admitRevision(p, ctx), 'delivered');
+  const grants: TaskGrant[] = []; d.delegated.accounts.reserveGrant = async input => { grants.push(input); return input; };
+  await d.delegated.accounts.complete(); d.delegated.accounts.inspect = async () => ({ generation: 2, linked: true });
+  assert.equal(f.turns.length, 0); // Sign-in completion itself never replays the note.
+  assert.equal(await f.restart().admitRevision(p, ctx), 'delivered'); assert.equal(grants[0]!.generation, 2);
   assert.equal(f.turns.length, 1); assert.equal(f.turns[0]!.event.replyTarget, 'fresh-reply');
   assert.equal(await f.sink.admitRevision(p, { ...ctx, subject: { ...ctx.subject, objectId: 'other' } }), 'conflict');
   assert.equal(await f.sink.admitRevision(p, { ...ctx, delegatedTenant: false }), 'conflict');
@@ -379,6 +382,26 @@ for (const crash of ['before', 'after'] as const) test(`normal Revise admission 
   assert.equal(claim.event.replyTarget, 'saved-reply'); assert.equal(claim.event.externalEventId,
     createExternalEventId({ tenantId: p.tenantId, conversationId: p.conversationId, activityId: 'winning-invoke' }));
   assert.deepEqual(inbox.getRoute('saved-reply'), p.route); assert.equal(inbox.claim(), undefined);
+});
+
+test('claimed revision retains fixed status after sign-in changes generation without restoring revoked private preview', async t => {
+  const d = delegatedFixture(); const f = await fixture(t, 2, d.delegated); await f.provision();
+  const p: Proposal = { ...proposalFixture(), ...f.scope, objectId: d.ch.objectId, conversationId: f.event.contextId, route: f.route,
+    targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest!, state: 'revise-requested', revisionAdmission: 'signin-required',
+    claim: { decision: 'revise', tenantId: f.scope.tenantId, objectId: d.ch.objectId, invokeActivityId: 'first', decidedAt: Date.now(), note: 'PRIVATE_NOTE', revisionReplyTarget: 'saved-reply' } };
+  d.delegated.accounts.getProposal = async () => ({ proposal: p, etag: 'W/"1"' });
+  d.delegated.accounts.inspect = async () => ({ generation: 2, linked: true });
+  d.delegated.accounts.safeOutput = async (_s, generation, text) => generation === 2 && !text.includes('PRIVATE_NOTE');
+  const input = { type: 'invoke', name: 'adaptiveCard/action', conversation: f.route.conversation, from: { id: p.senderMRI, aadObjectId: p.objectId },
+    value: { action: { type: 'Action.Execute', verb: 'pr-refresh', data: { proposal: p.id, rev: 1, digest: p.payloadDigest } } } };
+  for (const status of ['pending', 'full', 'signin-required', 'conflict', 'delivered'] as const) {
+    p.revisionAdmission = status;
+    const result = await f.sink.cardAction!(input, { ...context(), delegatedTenant: true, controlRecipient: { id: p.senderMRI } });
+    assert.equal(result.status, 200); const wire = JSON.stringify(result.body);
+    assert.match(wire, status === 'delivered' ? /Your revision was sent/ : status === 'signin-required' ? /Sign in, then send your revision again/ : status === 'conflict' ? /not sent/ : /Sending your revision/);
+    for (const privateValue of [p.title, p.body, p.head, p.displayName, p.githubLogin, 'PRIVATE_NOTE']) assert.ok(!wire.includes(privateValue));
+    assert.ok(!wire.includes('pr-approve')); assert.ok(!wire.includes('pr-revise'));
+  }
 });
 
 test('raw decoded revision note cannot hide a configured credential behind JSON quote escaping', async t => {

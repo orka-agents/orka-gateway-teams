@@ -141,10 +141,10 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     await directory.settleControl(keyOf(saved), armed.attemptUUID, outcome.kind === 'delivered' ? outcome : { kind: outcome.kind === 'retryable' ? 'no-effect' : 'unknown' }, ctx);
     return outcome.kind === 'retryable' ? { kind: 'full' } : { kind: 'accepted', replyTarget: '' };
   }
-  async function safeProposal(p: Proposal, text: string, ctx: DirectoryContext) {
+  async function safeProposal(p: Proposal, text: string, ctx: DirectoryContext, generation = p.generation, githubGeneration = p.githubGeneration) {
     if (!options.delegated || options.safeOutput?.(text) === false) return false;
-    return await options.delegated.accounts.safeOutput({ objectId: p.objectId }, p.generation, text, ctx) &&
-      (!options.github || options.github.auth.safeOutput(text) && await options.github.accounts.safeOutput({ objectId: p.objectId }, p.githubGeneration, text, ctx));
+    return await options.delegated.accounts.safeOutput({ objectId: p.objectId }, generation, text, ctx) &&
+      (!options.github || options.github.auth.safeOutput(text) && await options.github.accounts.safeOutput({ objectId: p.objectId }, githubGeneration, text, ctx));
   }
   async function proposalMessage(saved: ControlRecord, ctx: DirectoryContext): Promise<ProviderMessage> {
     if (!['pr-approval', 'pr-decision'].includes(saved.reply.kind) || !options.delegated) throw new DirectoryError('unready');
@@ -220,8 +220,19 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
         p = await options.proposals.decide(p, revise ? 'revise' : action.verb === 'pr-approve' ? 'approve' : 'reject', identity(input.id), ctx, revise ? data.note as string : undefined);
       }
       if (action.verb === 'pr-refresh' && supplied.subject.objectId === p.objectId) options.proposals?.refresh(p, ctx);
-      const card = buildPullRequestCard(p, supplied.subject.objectId === p.objectId ? 'sender' : 'room', !!options.proposals);
-      if (!await safeProposal(p, proposalOutput(p), ctx) || !await safeProposal(p, JSON.stringify(card), ctx)) return denied;
+      let card = buildPullRequestCard(p, supplied.subject.objectId === p.objectId ? 'sender' : 'room', !!options.proposals);
+      if (!await safeProposal(p, proposalOutput(p), ctx) || !await safeProposal(p, JSON.stringify(card), ctx)) {
+        if (p.state !== 'revise-requested' || supplied.subject.objectId !== p.objectId || !supplied.controlRecipient) return denied;
+        const subject = { objectId: p.objectId }; const current = await options.delegated.accounts.inspect(subject, ctx);
+        const github = await options.github?.accounts.inspect(subject, ctx);
+        if (current.generation === p.generation && (!github || github.generation === p.githubGeneration)) return denied;
+        // A fresh sign-in can resume the saved turn, but cannot restore revoked private preview facts.
+        const text = p.revisionAdmission === 'delivered' ? 'Your revision was sent.' : p.revisionAdmission === 'signin-required' ?
+          'Sign in, then send your revision again.' : p.revisionAdmission === 'conflict' ? 'Your revision was not sent. Reply with what to change.' : 'Sending your revision…';
+        card = { type: 'AdaptiveCard', version: '1.5', body: [{ type: 'TextBlock', wrap: true, text }],
+          ...(card.refresh ? { refresh: { ...card.refresh, userIds: [supplied.controlRecipient.id] } } : {}) };
+        if (!await safeProposal(p, JSON.stringify(card), ctx, current.generation, github?.generation ?? p.githubGeneration)) return denied;
+      }
       assertActive(ctx); return { status: 200, body: { cardInvokeResponse: { statusCode: 200, type: 'application/vnd.microsoft.card.adaptive', value: card } } };
     } catch { return denied; }
     finally { clearTimeout(timer); consumers--; }

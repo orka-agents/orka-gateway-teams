@@ -429,7 +429,8 @@ still require a bot mention. A conflict is not delivery; reply with what to chan
 if the saved turn cannot be admitted. The agent's subsequent proposal uses the
 existing selector and sends a new card, not a Teams message update. An already
 claimed older card retains its decision and note rather than becoming pending.
-Frozen private previews remain unavailable after account-generation revocation.
+After account-generation revocation, the sender can still see fixed revision
+status, but the frozen private preview and note remain hidden.
 
 A decision uses the proposal's 60-minute authority, not the ended Task's pass or
 deadline. Both frozen account generations must still match. Relink, disconnect
