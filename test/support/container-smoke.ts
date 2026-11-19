@@ -93,6 +93,10 @@ async function fixture(mode: string): Promise<void> {
           res.once('close', () => clearTimeout(timer)); return;
         }
         if (req.url === '/stream-request') { req.once('data', () => res.end('{"streamed":true}')); return; }
+        if (req.url === '/v1/task-tools/workiq') {
+          req.resume(); req.once('end', () => { const timer = setTimeout(() => res.end(JSON.stringify({ path: req.url })), 16000);
+            res.once('close', () => clearTimeout(timer)); }); return;
+        }
         req.resume(); req.once('end', () => res.end(JSON.stringify({ path: req.url,
           authorizationMatches: req.headersDistinct.authorization?.length === 1 && req.headersDistinct.authorization[0] === `Bearer ${settings.env.ORKA_OUTBOUND_BEARER_TOKEN}`,
           connection: req.headers.connection, version: req.httpVersion, cookie: req.headers.cookie })));
@@ -117,13 +121,13 @@ async function plaintextStatus(port: number): Promise<number> {
 interface HttpResult { status: number; body: string; location?: string; firstByteMs: number;
   isJSON?: boolean; isPlainText?: boolean; noSniff?: boolean }
 function https(ca: Buffer, port: number, path: string, options: {
-  method?: string; headers?: OutgoingHttpHeaders; body?: string; slow?: boolean; partial?: boolean;
+  method?: string; headers?: OutgoingHttpHeaders; body?: string; slow?: boolean; partial?: boolean; timeoutMs?: number;
 } = {}): Promise<HttpResult> {
   return new Promise((resolve) => {
     const started = performance.now(); let bytes = 0; let body = ''; let firstByteMs = Infinity;
     let drip: ReturnType<typeof setInterval> | undefined;
     const done = (result: HttpResult) => { clearTimeout(timer); clearInterval(drip); req.destroy(); resolve(result); };
-    const timer = setTimeout(() => done({ status: 0, body: '', firstByteMs }), options.slow ? 13000 : 5000);
+    const timer = setTimeout(() => done({ status: 0, body: '', firstByteMs }), options.timeoutMs ?? (options.slow ? 13000 : 5000));
     const req = request({ host: smokeHost, port, servername: serverName, ca, rejectUnauthorized: true, agent: false,
       method: options.method ?? 'GET', path, headers: { Connection: 'close', ...options.headers } }, (res) => {
       res.on('error', () => done({ status: 0, body: '', firstByteMs }));
@@ -535,6 +539,8 @@ async function smoke(): Promise<void> {
     stage = 'no request/response buffering or transparent upstream retry';
     const streaming = await https(ca, privatePort, '/stream-response'); assert.equal(streaming.body, 'firstlast'); assert.equal(streaming.firstByteMs < 1500, true);
     assert.equal(streaming.isPlainText && streaming.noSniff, true);
+    const slowWorkIQ = await https(ca, privatePort, '/v1/task-tools/workiq', { method: 'POST', headers: auth, body: '{}', timeoutMs: 20000 });
+    assert.equal(slowWorkIQ.status, 200); assert.equal(JSON.parse(slowWorkIQ.body).path, '/v1/task-tools/workiq');
     const partial = await https(ca, privatePort, '/stream-request', { method: 'POST', headers: { 'Content-Length': 100000 }, partial: true });
     assert.equal(partial.status, 200); assert.equal(partial.firstByteMs < 1500, true);
     assert.equal((await https(ca, privatePort, `/fail?synthetic=${secrets[3]}`, { method: 'POST', headers: auth, body: secrets[3]! })).status, 502);
