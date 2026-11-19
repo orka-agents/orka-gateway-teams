@@ -79,3 +79,29 @@ test('API401 is classified privately; final authority/deadline and close fence o
   const entered = deferred(); f.behavior(() => entered.resolve()); const pending = client.tool('github-list-issues', repository, 'ACCESS_PRIVATE', context());
   const rejected = assert.rejects(pending); await entered.promise; await client.close(); await rejected;
 });
+test('github-read-issue returns a bounded issue projection with a truncation note and closed arguments', async t => {
+  const f = await toolsFixture(t); const client = createGitHub(config, { request: f.request }); t.after(() => client.close());
+  const issue = (v: Record<string, unknown> = {}) => ({ number: 71, title: 'Reader', state: 'open', body: 'Steps', labels: [{ name: 'bug' }, 'area/ui'],
+    html_url: 'https://github.com/acme/repo/issues/71', user: { login: 'not-forwarded' }, ...v });
+  const read = async (v: Record<string, unknown> = {}) => { f.behavior((_req, res) => res.end(JSON.stringify(issue(v))));
+    return JSON.parse((await client.tool('github-read-issue', { ...repository, number: 71 }, 'ACCESS_PRIVATE', context())).text) as Record<string, unknown>; };
+  assert.deepEqual(await read(), { number: 71, title: 'Reader', state: 'open', labels: ['bug', 'area/ui'], url: 'https://github.com/acme/repo/issues/71', body: 'Steps' });
+  assert.deepEqual(f.requests.map(r => [r.method, r.path]), [['GET', '/repos/acme/repo/issues/71']]);
+  assert.deepEqual(await read({ state: 'closed', body: null, labels: [] }), { number: 71, title: 'Reader', state: 'closed', labels: [], url: 'https://github.com/acme/repo/issues/71', body: '' });
+  assert.equal((await read({ pull_request: {}, html_url: 'https://github.com/acme/repo/pull/71' })).url, 'https://github.com/acme/repo/pull/71');
+  // Escapes count toward the cap, so control-heavy bodies cannot push the whole result past the 32 KiB tool bound.
+  for (const unit of ['x', '\u0001', '\u00e9', '\ud83d\ude00']) {
+    const body = unit.repeat(40000); const result = await read({ body });
+    assert.ok(body.startsWith(result.body as string)); assert.ok(Buffer.byteLength(JSON.stringify(result.body)) <= 16386);
+    assert.ok(Buffer.byteLength(JSON.stringify(result.body)) > 16000); assert.match(String(result.bodyTruncated), /16384 bytes/u);
+  }
+  assert.equal((await read({ body: 'y'.repeat(16384) })).bodyTruncated, undefined);
+  for (const bad of [{ number: 72 }, { state: 'merged' }, { title: 7 }, { body: 7 }, { labels: [{}] }, { html_url: 'https://evil.invalid/71' }]) {
+    f.behavior((_req, res) => res.end(JSON.stringify(issue(bad)))); await assert.rejects(client.tool('github-read-issue', { ...repository, number: 71 }, 'ACCESS_PRIVATE', context()));
+  }
+  f.behavior((_req, res) => { res.statusCode = 404; res.end('{"message":"Not Found"}'); });
+  await assert.rejects(client.tool('github-read-issue', { ...repository, number: 71 }, 'ACCESS_PRIVATE', context()), { code: 'unavailable' });
+  for (const number of [0, -1, 1.5, '071', '7.1', ' 71', 2 ** 31, String(2 ** 31), undefined]) assert.throws(() => githubArguments('github-read-issue', { ...repository, number }));
+  assert.deepEqual(githubArguments('github-read-issue', { ...repository, number: '71' }), githubArguments('github-read-issue', { ...repository, number: 71 }));
+  assert.throws(() => githubArguments('github-read-issue', { ...repository, number: 71, state: 'open' }));
+});
