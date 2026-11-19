@@ -37,7 +37,7 @@ export function githubArguments(tool: GitHubTool, input: unknown): Record<string
 
 const failure = () => new GitHubError();
 const ISSUE_BODY_BYTES = 16384;
-/** Cut at a code point so the JSON-escaped text stays within max bytes, keeping the whole tool result bounded. */
+/** Cut at a code point so the JSON-escaped text stays within max bytes; the final 32 KiB check still bounds the whole result. */
 function clip(text: string, max: number): [string, boolean] {
   let size = 0; let end = 0;
   for (const ch of text) { size += Buffer.byteLength(JSON.stringify(ch)) - 2; if (size > max) return [text.slice(0, end), true]; end += ch.length; }

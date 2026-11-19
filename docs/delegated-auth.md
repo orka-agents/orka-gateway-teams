@@ -296,7 +296,7 @@ Each Tool must use its exact name and fixed gateway endpoint, with
 | --- | --- | --- | --- |
 | `github-read-file` | `read` | `/v1/task-tools/github-read-file` | `owner`, `repo`, `path`, optional `ref` |
 | `github-list-issues` | `read` | `/v1/task-tools/github-list-issues` | `owner`, `repo`, optional `state` (`open`, `closed`, `all`) |
-| `github-read-issue` | `read` | `/v1/task-tools/github-read-issue` | `owner`, `repo`, `number` (positive integer) |
+| `github-read-issue` | `read` | `/v1/task-tools/github-read-issue` | `owner`, `repo`, `number` (positive integer, or the same as a decimal string) |
 | `github-create-issue` | `write` | `/v1/task-tools/github-create-issue` | `owner`, `repo`, `title`, optional `body` |
 | `github-create-pull-request` | `write` | `/v1/task-tools/github-create-pull-request` | `owner`, `repo`, `title`, `head`, `base`, optional `body` |
 | `github-propose-pull-request` | `write` | `/v1/task-tools/github-propose-pull-request` | `owner`, `repo`, `title`, `head`, `base`, optional `body` |

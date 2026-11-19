@@ -112,13 +112,13 @@ for (const transplant of ['missing', 'other-browser']) test(`valid attacker Micr
   assert.equal(f.requests.length, 2);
 });
 
-test('new_grants_only_gain_propose: admission freezes six tools with unlinked0 and duplicate admission cannot adopt a later GitHub link', async t => {
+test('new_grants_only_gain_propose: admission freezes seven tools with unlinked0 and duplicate admission cannot adopt a later GitHub link', async t => {
   const f = await setup(t); const ch = await f.accounts.challenge({ objectId: oid }, expectedEvent.contextId, 'workiq', context());
   await f.accounts.claim(ch, context()); await f.accounts.complete(ch, { accessToken: 'MS_ACCESS_PRIVATE', expiresAt: Date.now() + 600000 }, context());
   assert.equal((await f.run('work', 'event')).kind, 'accepted'); assert.equal(f.work(), 1);
   const target = snapshotRegistry(registryInput(1)).targets[0]!;
   const ref = grantReference(target.config.scope, target, expectedEvent.externalEventId, expectedEvent.replyTarget!);
-  const grant = await f.accounts.getGrant(ref, context()); assert.equal(grant?.githubGeneration, 0); assert.equal(grant.tools.length, 6); assert.ok(grant.tools.includes('github-propose-pull-request'));
+  const grant = await f.accounts.getGrant(ref, context()); assert.equal(grant?.githubGeneration, 0); assert.equal(grant.tools.length, 7); assert.ok(grant.tools.includes('github-propose-pull-request')); assert.ok(grant.tools.includes('github-read-issue'));
   assert.equal(grant.proposalOrigin?.senderMRI, '29:fixture-person');
   const { ms } = await f.start(); const proof = await f.proof(ms);
   const state = new URL(proof.headers.get('location')!).searchParams.get('state')!; const cookie = proof.headers.get('set-cookie')!.split(';')[0]!;
