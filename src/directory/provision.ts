@@ -81,15 +81,14 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
   /** This chat's other epochs: earlier ones stay in place, outranked, and the next one may already
    * exist if a move stopped before its directory write. Each must be exactly the Binding we would create. */
   function sibling(value: ConnectionRecord, binding: Record<string, unknown>): boolean {
-    const meta = object(binding.metadata); const current = value.epoch ?? 0;
-    for (let epoch = 0; epoch <= current + 1; epoch++) {
-      if (epoch === current || meta.name !== bindingName(value.scope, value.conversationId, value.identityDigest, epoch)) continue;
-      const annotations = object(meta.annotations ?? {});
-      const expected = desired({ ...value, epoch, bindingName: meta.name } as ConnectionRecord).spec;
-      return annotations[digestMarker] === target.identityDigest && annotations[gatewayMarker] === target.gatewayUid &&
-        canonicalJSON(object(binding.spec)) === canonicalJSON(expected);
-    }
-    return false;
+    // A sibling's priority is its epoch; the exact name and spec checks below confirm it.
+    const meta = object(binding.metadata); const current = value.epoch ?? 0; const epoch = object(binding.spec).priority ?? 0;
+    if (!Number.isSafeInteger(epoch) || (epoch as number) < 0 || (epoch as number) > current + 1 || epoch === current ||
+        meta.name !== bindingName(value.scope, value.conversationId, value.identityDigest, epoch as number)) return false;
+    const annotations = object(meta.annotations ?? {});
+    const expected = desired({ ...value, epoch, bindingName: meta.name } as ConnectionRecord).spec;
+    return annotations[digestMarker] === target.identityDigest && annotations[gatewayMarker] === target.gatewayUid &&
+      canonicalJSON(object(binding.spec)) === canonicalJSON(expected);
   }
   async function overlap(value: ConnectionRecord, context: KubernetesContext): Promise<void> {
     active(context); const bindings = await client.listBindings(context); active(context);
