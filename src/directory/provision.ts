@@ -3,8 +3,8 @@ import { identity } from '../ingress/codec.js';
 import type { RegistryTarget } from '../registry/config.js';
 import { snapshotRegistry } from '../registry/config.js';
 import type { createKubernetesReader, KubernetesContext } from '../registry/kubernetes.js';
-import { canonicalJSON, snapshotDirectoryRecord } from './codec.js';
-import type { BindingEvidence, CanonicalValue, ConnectionRecord } from './types.js';
+import { bindingName, canonicalJSON, snapshotDirectoryRecord } from './codec.js';
+import type { AgentRevision, BindingEvidence, CanonicalValue, ConnectionRecord } from './types.js';
 
 const apiVersion = 'gateway.orka.ai/v1alpha1';
 const digestMarker = 'gateway.orka.ai/teams-target-digest';
@@ -64,7 +64,8 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
       apiVersion, kind: 'GatewayBinding', metadata: { namespace, name: value.bindingName,
         annotations: { [digestMarker]: target.identityDigest!, [gatewayMarker]: target.gatewayUid } },
       spec: { gatewayRef: { name: scope.gatewayName }, agentRef: { name: target.frontAgent.name },
-        match: { accountId: scope.tenantId, contextId: value.conversationId }, priority: 0,
+        // Orka routes to the highest-priority ready match, so a later epoch takes over the chat.
+        match: { accountId: scope.tenantId, contextId: value.conversationId }, priority: value.epoch ?? 0,
         senderPolicy: { mode: 'all' }, session: { mode: value.chatKind === 'personal' ? 'context-sender' : 'context' } },
     };
   }
@@ -77,6 +78,18 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
       if (!waitReady) paused(); await wait(context);
     }
   }
+  /** This chat's other epochs: earlier ones stay in place, outranked, and the next one may already
+   * exist if a move stopped before its directory write. Each must be exactly the Binding we would create. */
+  function sibling(value: ConnectionRecord, binding: Record<string, unknown>): boolean {
+    // A sibling's priority is its epoch; the exact name and spec checks below confirm it.
+    const meta = object(binding.metadata); const current = value.epoch ?? 0; const epoch = object(binding.spec).priority ?? 0;
+    if (!Number.isSafeInteger(epoch) || (epoch as number) < 0 || (epoch as number) > current + 1 || epoch === current ||
+        meta.name !== bindingName(value.scope, value.conversationId, value.identityDigest, epoch as number)) return false;
+    const annotations = object(meta.annotations ?? {});
+    const expected = desired({ ...value, epoch, bindingName: meta.name } as ConnectionRecord).spec;
+    return annotations[digestMarker] === target.identityDigest && annotations[gatewayMarker] === target.gatewayUid &&
+      canonicalJSON(object(binding.spec)) === canonicalJSON(expected);
+  }
   async function overlap(value: ConnectionRecord, context: KubernetesContext): Promise<void> {
     active(context); const bindings = await client.listBindings(context); active(context);
     for (const binding of bindings) {
@@ -85,7 +98,7 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
           typeof object(spec.gatewayRef).name !== 'string' || typeof match.accountId !== 'string' || typeof match.contextId !== 'string') conflict();
       // Sender, thread, priority and readiness cannot make a foreign overlap safe.
       if (meta.name !== value.bindingName && object(spec.gatewayRef).name === scope.gatewayName &&
-          match.accountId === scope.tenantId && match.contextId === value.conversationId) conflict();
+          match.accountId === scope.tenantId && match.contextId === value.conversationId && !sibling(value, binding)) conflict();
     }
   }
   function evidence(value: ConnectionRecord, binding: Record<string, unknown>): BindingEvidence {
@@ -132,8 +145,20 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
       throw new BindingCheckError(error instanceof Error && error.message === 'credential-expiring' ? 'credential-expiring' : 'target-paused');
     }
   }
+  async function revision(supplied: KubernetesContext): Promise<AgentRevision> {
+    try {
+      const context = capture(supplied); active(context);
+      const meta = metadata(await client.getAgent(context), 'Agent', 'core.orka.ai/v1alpha1', namespace, target.frontAgent.name); active(context);
+      return { uid: identity(meta.uid), generation: generation(meta.generation) };
+    } catch (error) {
+      if (error instanceof BindingCheckError) throw error;
+      throw new BindingCheckError(error instanceof Error && error.message === 'credential-expiring' ? 'credential-expiring' : 'target-paused');
+    }
+  }
   return Object.freeze({
     reconcile: (value: ConnectionRecord, context: KubernetesContext) => run(value, context, false),
     check: (value: ConnectionRecord, context: KubernetesContext) => run(value, context, true),
+    /** The front Agent revision new Tasks in this target's chats run on. */
+    revision,
   });
 }

@@ -109,3 +109,14 @@ test('Table rows require exact identity, digest, Armed, ETag and Timestamp', () 
   assert.throws(() => codec.decodeEntity(scope, row, connKey, '"different"'));
   assert.throws(() => codec.encodeRecord({ ...control(), reply: { kind: 'discovery', targets: [{ id: 'tools', label: 'a'.repeat(49000) }] } }));
 });
+
+test('epoch 0 keeps the original Binding name; later epochs name a distinct Binding', () => {
+  const scope = { appId: 'app-a', tenantId: 'tenant-a' }; const digest = 'a'.repeat(64);
+  const names = [0, 1, 2].map(epoch => codec.bindingName(scope, 'chat-a', digest, epoch));
+  assert.equal(names[0], codec.bindingName(scope, 'chat-a', digest)); assert.equal(new Set(names).size, 3);
+  for (const name of names) assert.match(name, /^teams-[0-9a-f]{56}$/u);
+  const base = { schema: 1, kind: 'conn', scope, conversationId: 'chat-a', chatKind: 'personal', targetId: 'tools', identityDigest: digest, state: 'reserved' };
+  assert.doesNotThrow(() => codec.encodeRecord({ ...base, bindingName: names[1], epoch: 1 }));
+  for (const bad of [{ ...base, bindingName: names[0], epoch: 0 }, { ...base, bindingName: names[0], epoch: 1 }, { ...base, bindingName: names[1] },
+    { ...base, bindingName: names[0], agent: { uid: 'agent', generation: 1 } }]) assert.throws(() => codec.encodeRecord(bad));
+});

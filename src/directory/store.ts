@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { canonicalJSON, recordKey, snapshotDirectoryRecord } from './codec.js';
-import type { BindingEvidence, ConnectionRecord, ControlRecord, DirectoryContext, DirectoryKey, DirectoryRecord, DirectoryRow, DirectoryTable } from './types.js';
+import type { AgentRevision, BindingEvidence, ConnectionRecord, ControlRecord, DirectoryContext, DirectoryKey, DirectoryRecord, DirectoryRow, DirectoryTable } from './types.js';
 import { DirectoryError } from './types.js';
 
 export type ControlSettlement = { kind: 'no-effect' | 'rejected' | 'unknown' } | { kind: 'delivered'; providerMessageId: string };
@@ -95,15 +95,29 @@ export async function openDirectory(table: DirectoryTable, startup: DirectoryCon
         }
       });
     },
-    markProvisioned(expected: ConnectionRecord, binding: BindingEvidence, context: DirectoryContext): Promise<ConnectionRecord> {
+    markProvisioned(expected: ConnectionRecord, binding: BindingEvidence, context: DirectoryContext, agent?: AgentRevision): Promise<ConnectionRecord> {
       return run(context, async ctx => {
-        const candidate = snapshotDirectoryRecord({ ...expected, state: 'provisioned', binding }) as ConnectionRecord;
+        const candidate = snapshotDirectoryRecord({ ...expected, state: 'provisioned', binding, ...(agent ? { agent } : {}) }) as ConnectionRecord;
         const row = await read(recordKey(candidate), ctx);
         if (!row || row.value.kind !== 'conn' || connectionIdentity(row.value) !== connectionIdentity(candidate)) throw new DirectoryError('conflict');
         if (row.value.state === 'provisioned') {
           if (canonicalJSON(row.value) !== canonicalJSON(candidate)) throw new DirectoryError('conflict'); return row.value;
         }
         return (await persist(row, candidate, ctx)).value as ConnectionRecord;
+      });
+    },
+    /** Moves the chat to its next-epoch Binding. Never rewrites another target or chat. */
+    updateConnection(expected: ConnectionRecord, input: ConnectionRecord, context: DirectoryContext): Promise<ConnectionRecord> {
+      return run(context, async ctx => {
+        const current = snapshotDirectoryRecord(expected) as ConnectionRecord; const next = snapshotDirectoryRecord(input) as ConnectionRecord;
+        const same = (a: ConnectionRecord, b: ConnectionRecord) => canonicalJSON([a.scope, a.conversationId, a.chatKind, a.targetId, a.identityDigest]) ===
+          canonicalJSON([b.scope, b.conversationId, b.chatKind, b.targetId, b.identityDigest]);
+        if (current.state !== 'provisioned' || next.state !== 'provisioned' || !next.agent || !same(current, next) ||
+            next.epoch !== (current.epoch ?? 0) + 1) throw new DirectoryError('invalid-input');
+        const row = await read(recordKey(next), ctx);
+        if (row?.value.kind === 'conn' && canonicalJSON(row.value) === canonicalJSON(next)) return row.value;
+        if (!row || row.value.kind !== 'conn' || canonicalJSON(row.value) !== canonicalJSON(current)) throw new DirectoryError('conflict');
+        return (await persist(row, next, ctx)).value as ConnectionRecord;
       });
     },
     getControl(key: ControlKey, context: DirectoryContext): Promise<ControlRecord | undefined> {

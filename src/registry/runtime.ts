@@ -163,7 +163,8 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
       ...(accounts && delegatedAuth && config.sso ? { delegated: { accounts, auth: delegatedAuth, apiUri: config.sso.apiUri, connectionName: config.sso.connectionName,
         ...(config.sso.publicOrigin ? { publicOrigin: config.sso.publicOrigin } : {}) } } : {}),
       slots: slots.map((s, i) => ({ ...s, provisioner: createBindingProvisioner(s.target, readers[i]!) })),
-      log: (category, id) => { process.stderr.write(`teams-ingress: ${category}${id ? ` (${id})` : ''}\n`); } });
+      log: (category, id, detail) => { process.stderr.write(`teams-ingress: ${category}${id ? ` (${id})` : ''}${
+        detail ? Object.entries(detail).map(([k, v]) => ` ${k}=${v}`).join('') : ''}\n`); } });
     receiver = await prepared.start(admission,
       { targets: slots.map(s => ({ id: s.target.id, journal: s.journal, correlation: s.journal, authority,
         getRoute: key => s.inbox.getRoute(key),

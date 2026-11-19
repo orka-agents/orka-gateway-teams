@@ -3,7 +3,7 @@ import { httpsBase, identity } from '../ingress/codec.js';
 import { MAX_TEXT_BYTES } from '../protocol/types.js';
 import { etag, hex, integer, object, uuid } from '../storage/table/codec.js';
 import type { CanonicalValue, DirectoryKey, DirectoryRecord, DirectoryRow, DirectoryScope } from './types.js';
-import { DirectoryError } from './types.js';
+import { DirectoryError, MAX_BINDING_EPOCH } from './types.js';
 
 export const MAX_DIRECTORY_PAYLOAD = 48 * 1024;
 function bad(): never { throw new DirectoryError('invalid-input'); }
@@ -34,8 +34,10 @@ export function directoryKey(scope: DirectoryScope, input: DirectoryKey): { part
   const parts = [identity(k.conversationId), ...(k.kind === 'control' ? [identity(k.activityId)] : [])];
   return { partition: `directory_${hash(['teams-directory-v1', s.appId, s.tenantId])}`, row: `${k.kind}_${hash(parts)}` };
 }
-export function bindingName(scope: DirectoryScope, conversationId: string, identityDigest: string): string {
-  const s = validateScope(scope); return `teams-${hash(['teams-binding-v1', s.appId, s.tenantId, identity(conversationId), hex(identityDigest)]).slice(0, 56)}`;
+export function bindingName(scope: DirectoryScope, conversationId: string, identityDigest: string, epoch = 0): string {
+  const s = validateScope(scope); integer(epoch, 0, MAX_BINDING_EPOCH);
+  const parts = [s.appId, s.tenantId, identity(conversationId), hex(identityDigest)];
+  return `teams-${hash(epoch === 0 ? ['teams-binding-v1', ...parts] : ['teams-binding-v2', ...parts, epoch]).slice(0, 56)}`;
 }
 /** Full Binding specs include fractional backoff; the kernel envelope remains integer-only. */
 export function parseCanonicalJSON(input: Uint8Array, maxNodes = 16384): CanonicalValue {
@@ -92,9 +94,12 @@ function validate(input: unknown): DirectoryRecord {
   if (v.schema !== 1 || !['personal', 'groupChat'].includes(v.chatKind as string)) bad();
   const common = ['schema', 'kind', 'scope', 'conversationId', 'chatKind', 'state'];
   if (v.kind === 'conn') {
-    object(v, [...common, 'targetId', 'identityDigest', 'bindingName', ...(v.state === 'provisioned' ? ['binding'] : [])]);
+    object(v, [...common, 'targetId', 'identityDigest', 'bindingName', 'epoch', ...(v.state === 'provisioned' ? ['binding', 'agent'] : [])]);
     target(v.targetId); hex(v.identityDigest); const name = text(v.bindingName, 253);
-    if (name !== bindingName(s, conversationId, v.identityDigest as string)) bad();
+    // Absent, not 0, keeps every record written before epochs byte-identical.
+    if (v.epoch !== undefined) integer(v.epoch, 1, MAX_BINDING_EPOCH);
+    if (name !== bindingName(s, conversationId, v.identityDigest as string, (v.epoch as number | undefined) ?? 0)) bad();
+    if (v.agent !== undefined) { const a = object(v.agent, ['uid', 'generation']); text(a.uid, 128); integer(a.generation, 1, Number.MAX_SAFE_INTEGER); }
     if (v.state === 'provisioned') {
       const b = object(v.binding, ['namespace', 'name', 'uid', 'generation', 'spec']); text(b.namespace, 253); text(b.uid); integer(b.generation, 1, Number.MAX_SAFE_INTEGER);
       if (text(b.name, 253) !== name) bad(); object(b.spec); canonicalJSON(b.spec);

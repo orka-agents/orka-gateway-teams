@@ -113,7 +113,7 @@ authorized same-target choice, marks fresh evidence, and checks again on ordinar
 admission and before every queued event's Orka handoff.
 
 New Bindings use the existing deterministic `bindingName` helper, exact tenant
-and conversation, the registered Gateway/front Agent, priority zero, all senders,
+and conversation, the registered Gateway/front Agent, priority zero (the epoch, below), all senders,
 and personal `context-sender` or group `context` Session mode. Ownership markers
 are `gateway.orka.ai/teams-target-digest` (the routing digest) and
 `gateway.orka.ai/teams-gateway-uid` (the registered Gateway UID). No ownerReference,
@@ -141,6 +141,23 @@ deterministic Binding; cancellation cannot undo it. Fixed failures are
 `target-paused`, `binding-conflict` or `credential-expiring`. Serving maps these
 to transient HTTP 503 or relay no-effect backoff, with coalesced/rate-limited
 recovery and fixed diagnostics. These failures do not poison healthy storage.
+
+### After the front Agent changes
+
+Orka pins a Session to the Agent revision (UID and generation) of its first Task
+and names gateway Sessions from the Binding UID. A provisioned connection records
+that revision as `agent`. Before each queued event's Orka handoff, the gateway
+compares it with the current front Agent. When they differ, the chat moves to its
+next epoch: a new deterministic Binding (`epoch` folded into the name, priority
+equal to the epoch, otherwise the same spec), then a compare-and-swap of the
+connection row. Orka routes to the highest-priority ready match, so the event
+starts a new Session on the current Agent. Earlier Bindings, their Sessions and
+history stay as they are. Each move writes one
+`teams-ingress: session-renewed (<target>) binding=… epoch=… fromAgentGeneration=… toAgentGeneration=…`
+line. A row saved before `agent` existed has an unknown pin and moves once.
+The overlap check accepts only this chat's other epochs with the exact spec and
+markers above, including the next epoch left by a move that stopped before its
+row write; the next handoff finishes that move. Epochs stop at 1000.
 
 Checks are not atomic with Orka ingress or other Binding writers. While serving,
 only this provisioner may write the registered Gateway's Bindings; operators must
