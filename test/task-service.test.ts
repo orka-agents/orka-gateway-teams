@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { request } from 'node:http';
 import { createTaskService } from '../src/accounts/task-service.js';
 import { startTargetOutboundServer } from '../src/outbound/server.js';
 import { context, deferred } from './support/directory-table.js';
@@ -52,6 +53,26 @@ test('real listener accepts only dedicated issuance bearer and exact #1110 body/
     assert.notEqual((await f.post('/v1/task-passes', credential, { ...f.body, ...change })).status, 200);
   }
   assert.ok(f.logs.includes('grant-binding-conflict'));
+});
+
+test('authenticated Work IQ can finish after the old nine-second provider budget', { timeout: 20000 }, async t => {
+  const f = await fixture(t); const pass = await f.issue();
+  f.w.behavior((_req, res, body) => { setTimeout(() => res.end(JSON.stringify(completed(body.id))), 11000); });
+  const result = await f.post('/v1/task-tools/workiq', pass.pass, { question: 'Question' });
+  assert.equal(result.status, 200, 'a completed authenticated Work IQ response after eleven seconds must be returned');
+  assert.deepEqual(result.body, { text: 'Answer' }, 'the normal completed-text parser remains in use');
+});
+
+test('an authenticated Work IQ request with an incomplete body still has the ten-second input deadline', { timeout: 16000 }, async t => {
+  const f = await fixture(t); const pass = await f.issue(); const started = performance.now();
+  await new Promise<void>((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port: f.server.port, path: '/v1/task-tools/workiq', method: 'POST', headers: {
+      authorization: `Bearer ${pass.pass}`, 'content-type': 'application/json', 'content-length': '100' } }, res => { res.resume(); });
+    const timer = setTimeout(() => { req.destroy(); reject(new Error('incomplete authenticated body was not bounded')); }, 13000);
+    req.once('close', () => { clearTimeout(timer); resolve(); }); req.once('error', () => {}); req.write('{');
+  });
+  assert.ok(performance.now() - started < 12500, 'the longer provider budget must not extend an incomplete request body');
+  assert.equal(f.w.bodies.length, 0, 'an incomplete body must not invoke Work IQ');
 });
 
 test('listener binds descendants before any ancestor call and reacquires exact child after restart', async t => {

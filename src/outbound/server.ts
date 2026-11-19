@@ -45,7 +45,8 @@ export async function startTargetOutboundServer(config: { host: string; port: nu
         ...(interimDelivery === true ? { interimDelivery: true } : {}), ...(meetingDrafts === true ? { meetingDrafts: true } : {}) } } };
   });
   const healthy = () => slots.every(slot => slot.dispatcher.healthy);
-  const starts = new WeakMap<Socket, number>(); const work = new Set<Promise<void>>(); const controllers = new Set<AbortController>();
+  const starts = new WeakMap<Socket, number>(); const connectionTimers = new WeakMap<Socket, ReturnType<typeof setTimeout>>();
+  const work = new Set<Promise<void>>(); const controllers = new Set<AbortController>();
   let active = 0; let stopping = false; let closing: Promise<void> | undefined; let bound = false;
   let fail!: (error: Error) => void; const failed = new Promise<never>((_resolve, reject) => { fail = reject; });
   void failed.catch(() => {});
@@ -56,8 +57,8 @@ export async function startTargetOutboundServer(config: { host: string; port: nu
   server.maxRequestsPerSocket = 1;
   server.on('connection', (socket) => {
     starts.set(socket, performance.now());
-    const timer = setTimeout(() => socket.destroy(), DEADLINE_MS); timer.unref();
-    socket.once('close', () => clearTimeout(timer));
+    const timer = setTimeout(() => socket.destroy(), DEADLINE_MS); timer.unref(); connectionTimers.set(socket, timer);
+    socket.once('close', () => { clearTimeout(connectionTimers.get(socket)); connectionTimers.delete(socket); });
   });
   server.on('clientError', (_error, socket) => {
     if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
@@ -67,11 +68,12 @@ export async function startTargetOutboundServer(config: { host: string; port: nu
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const controller = new AbortController(); controllers.add(controller); let admitted = false; let authenticated = false;
-    const deadline = (starts.get(req.socket) ?? performance.now()) + DEADLINE_MS;
+    let deadline = (starts.get(req.socket) ?? performance.now()) + DEADLINE_MS;
     const finished = new Promise<void>((resolve) => { res.once('finish', resolve); res.once('close', resolve); });
     const disconnected = () => { if (!res.writableFinished) controller.abort(); };
     res.once('close', disconnected);
-    const timer = setTimeout(() => { controller.abort(); respond(res, 408, retryable); }, Math.max(1, Math.ceil(deadline - performance.now()))); timer.unref();
+    const expire = () => { controller.abort(); respond(res, 408, retryable); };
+    let timer = setTimeout(expire, Math.max(1, Math.ceil(deadline - performance.now()))); timer.unref();
     try {
       // Authenticate even unavailable/unknown routes, before consuming any body or consulting readiness/storage.
       const values = req.headersDistinct.authorization;
@@ -101,6 +103,15 @@ export async function startTargetOutboundServer(config: { host: string; port: nu
           catch { throw new HttpFailure(400); }
         }
         let input: unknown; try { input = parseCanonicalJSON(await readBody(req, controller.signal)); } catch { throw new HttpFailure(400); }
+        if (req.url === '/v1/task-tools/workiq') {
+          // Only a fully received, authenticated Work IQ call may outlive the ten-second input budget.
+          if (controller.signal.aborted || performance.now() >= deadline) throw new HttpFailure(408);
+          deadline = performance.now() + 90000;
+          const remaining = Math.max(1, Math.ceil(deadline - performance.now()));
+          clearTimeout(timer); timer = setTimeout(expire, remaining); timer.unref();
+          clearTimeout(connectionTimers.get(req.socket));
+          const socketTimer = setTimeout(() => req.socket.destroy(), remaining); socketTimer.unref(); connectionTimers.set(req.socket, socketTimer);
+        }
         const result = await tasks.handle(req.url!, token, input, { signal: controller.signal, deadline: deadline - 1000 }, operation);
         respond(res, result.status, result.body); return;
       }

@@ -15,6 +15,37 @@ test('Work IQ sends fixed A2A 1.0 sender query and returns completed artifact te
   assert.equal('contextId' in f.bodies[1]!.params.message, false); assert.equal('metadata' in f.bodies[1]!.params.message, false);
 });
 
+test('completed Work IQ text remains usable alongside structured data parts without exposing that data', async t => {
+  const f = await workIQFixture(t); const client = createWorkIQ({ request: f.request }); t.after(() => client.close());
+  f.behavior((_req, res, body) => {
+    const result = completed(body.id); (result.result.task.artifacts[0]!.parts as unknown[]).unshift({ data: { private: 'DATA-PRIVATE', nested: { token: 'ACCESS-PRIVATE' } } });
+    (result.result.task.artifacts as unknown[]).push({ parts: [{ data: { private: 'OTHER-DATA-PRIVATE' }, metadata: { private: true } }, { text: 'Second text' }] });
+    res.end(JSON.stringify(result));
+  });
+  const result = await client.ask({ question: 'q' }, 'ACCESS-PRIVATE', context());
+  assert.deepEqual(result, { text: 'Answer\nSecond text' }, 'only completed text parts may be returned');
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE/, 'structured data must not leak into tool output');
+});
+
+test('A2A 1.0 data values and optional media fields are ignored while text is retained', async t => {
+  const f = await workIQFixture(t); const client = createWorkIQ({ request: f.request }); t.after(() => client.close());
+  for (const data of [null, [], ['PRIVATE'], 'PRIVATE', 42, true]) {
+    f.behavior((_req, res, body) => { const result = completed(body.id); (result.result.task.artifacts[0]!.parts as unknown[]).unshift({ data, mediaType: 'application/json', filename: 'PRIVATE' });
+      Object.assign(result.result.task.artifacts[0]!.parts[1]!, { mediaType: 'text/plain' }); res.end(JSON.stringify(result)); });
+    assert.deepEqual(await client.ask({ question: 'q' }, 'ACCESS-PRIVATE', context()), { text: 'Answer' }, 'non-text JSON data is valid but must never become the answer');
+  }
+});
+
+test('structured data cannot make malformed, ambiguous or textless responses acceptable', async t => {
+  const f = await workIQFixture(t); const client = createWorkIQ({ request: f.request }); t.after(() => client.close());
+  for (const part of [{ data: {}, filename: 42 }, { data: {}, mediaType: [] }, { text: 'Answer', data: {} }, { text: 'Answer', data: null }, { data: {}, extra: true }, { metadata: {} }]) {
+    f.behavior((_req, res, body) => { const result = completed(body.id); (result.result.task.artifacts[0]!.parts as unknown[]).push(part); res.end(JSON.stringify(result)); });
+    await assert.rejects(client.ask({ question: 'q' }, 'ACCESS-PRIVATE', context()), /Tool unavailable/, 'invalid data or ambiguous part must remain refused');
+  }
+  f.behavior((_req, res, body) => { const result = completed(body.id); (result.result.task.artifacts[0] as { parts: unknown[] }).parts = [{ data: { private: true } }]; res.end(JSON.stringify(result)); });
+  await assert.rejects(client.ask({ question: 'q' }, 'ACCESS-PRIVATE', context()), /Tool unavailable/, 'a data-only response has no usable text answer');
+});
+
 test('tool arguments cannot choose context, destination, credentials, identity or arbitrary metadata', () => {
   for (const extra of ['contextId', 'url', 'headers', 'authorization', 'objectId', 'metadata']) assert.throws(() => workIQArguments({ question: 'q', [extra]: 'private' }));
   for (const value of [{}, { question: '' }, { question: 'q'.repeat(32769) }, { question: 'q', location: { timeZone: 'garbage', timeZoneOffset: 0 } },
@@ -29,7 +60,7 @@ test('noncompleted, malformed, credential-bearing and ambiguous Work IQ response
     (_id: unknown) => completed('wrong-id'),
     (id: unknown) => completed(id, 'ACCESS-PRIVATE'),
     (id: unknown) => ({ jsonrpc: '2.0', id, error: { message: 'ACCESS-PRIVATE' } }),
-    (id: unknown) => { const r = completed(id); (r.result.task.artifacts[0]!.parts as unknown[]).push({ data: { private: true } }); return r; },
+    (id: unknown) => { const r = completed(id); (r.result.task.artifacts[0]!.parts as unknown[]).push({ text: 'ambiguous', data: null }); return r; },
   ];
   for (const variant of variants) {
     f.behavior((_req, res, b) => res.end(JSON.stringify(variant(b.id))));
