@@ -164,3 +164,22 @@ test('lost authority after a write cannot publish an arm; subsequent startup rec
   f.table.replace = replace; const next = await openDirectory(f.table, context()); assert.equal((await next.getControl(key, context()))?.state, 'unknown');
   await directory.close(); await next.close();
 });
+
+// A lost race or stale reader must not move a chat to a Binding it did not check.
+test('connection update moves one epoch at a time by exact compare-and-swap', async () => {
+  const f = memoryDirectoryTable(); const directory = await openDirectory(f.table, context());
+  const reserved = await directory.reserveConnection(connection(), context());
+  const binding = { namespace: 'gateway', name: reserved.bindingName, uid: 'uid-a', generation: 1, spec: {} };
+  type Provisioned = Extract<ConnectionRecord, { state: 'provisioned' }>;
+  const pinned = await directory.markProvisioned(reserved, binding, context(), { uid: 'agent', generation: 1 }) as Provisioned;
+  assert.deepEqual(pinned.agent, { uid: 'agent', generation: 1 });
+  const name = bindingName(scope, 'chat-a', 'a'.repeat(64), 1);
+  const next: Provisioned = { ...pinned, epoch: 1, bindingName: name, binding: { ...binding, name, uid: 'uid-b' }, agent: { uid: 'agent', generation: 2 } };
+  assert.deepEqual(await directory.updateConnection(pinned, next, context()), next);
+  assert.deepEqual(await directory.updateConnection(pinned, next, context()), next, 'the same move is idempotent');
+  await assert.rejects(directory.updateConnection(pinned, { ...next, agent: { uid: 'agent', generation: 3 } }, context()), { code: 'conflict' });
+  await assert.rejects(directory.updateConnection(next, { ...pinned, agent: { uid: 'agent', generation: 3 } }, context()), { code: 'invalid-input' });
+  await assert.rejects(directory.updateConnection(next, { ...next, targetId: 'platform' }, context()), { code: 'invalid-input' });
+  await assert.rejects(directory.updateConnection(next, { ...next, agent: { uid: 'agent', generation: 9 } }, context()), { code: 'invalid-input' }, 'one epoch per move');
+  assert.deepEqual(await directory.getConnection('chat-a', context()), next); await directory.close();
+});

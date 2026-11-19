@@ -43,17 +43,18 @@ async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<ty
   let authorized = 0; let outcome: ProviderResult = { kind: 'delivered', providerMessageId: 'receipt' }; let allowed = true;
   const turns: { event: Readonly<EventEnvelope>; route: Readonly<ReplyRoute> }[] = [];
   const sent: { text: string; route: unknown }[] = []; const admitted: string[] = []; const checks: string[] = []; let failCheck = false; let failureCategory: BindingCheckError['category'] = 'binding-conflict';
-  let checkGate: Promise<void> | undefined; let sendGate: Promise<void> | undefined;
+  let checkGate: Promise<void> | undefined; let sendGate: Promise<void> | undefined; let agent = { uid: 'agent-uid', generation: 1 };
   const evidence = (c: ConnectionRecord) => ({ namespace: 'default', name: c.bindingName, uid: 'uid', generation: 1, spec: {} });
   const slots = config.targets.map(target => ({ target, inbox: { admit: async (event: Readonly<EventEnvelope>, route: Readonly<ReplyRoute>): Promise<AdmissionResult> => {
     turns.push(structuredClone({ event, route })); admitted.push(target.id); return { kind: 'accepted' as const, replyTarget: event.replyTarget! };
   } }, provisioner: { reconcile: async (c: ConnectionRecord) => { checks.push('reconcile:' + target.id); await checkGate; if (failCheck) throw new BindingCheckError('target-paused'); return evidence(c); },
-    check: async (c: ConnectionRecord, _ctx: KubernetesContext) => { checks.push('check:' + target.id); await checkGate; if (failCheck) throw new BindingCheckError(failureCategory); return evidence(c); } } }));
+    check: async (c: ConnectionRecord, _ctx: KubernetesContext) => { checks.push('check:' + target.id); await checkGate; if (failCheck) throw new BindingCheckError(failureCategory); return evidence(c); },
+    revision: async () => ({ ...agent }) } }));
   const authority = { allowed: () => allowed, revalidate: async () => allowed, lost: new AbortController().signal };
   const logs: string[] = [];
   const makeSink = () => createRegistryAdmission({ config, directory, slots, authority, active: () => allowed,
     ...(delegated ? { delegated } : {}),
-    authorizer: { authorize: async (...args) => { authorized++; return policyAuthorizer ? policyAuthorizer.authorize(...args) : eligible; } }, log: (category, target) => logs.push(category + ':' + target) });
+    authorizer: { authorize: async (...args) => { authorized++; return policyAuthorizer ? policyAuthorizer.authorize(...args) : eligible; } }, log: (category, target, detail) => logs.push(category + ':' + target + (detail ? ' ' + JSON.stringify(detail) : '')) });
   const sink = makeSink();
   const bindSender = (s: typeof sink) => s.bindControlSender({ send: async (route, message) => {
     sent.push({ text: JSON.stringify(message), route }); await sendGate; return outcome;
@@ -65,17 +66,18 @@ async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<ty
     { ...baseRoute, conversation: { id: event.contextId, tenantId: scope.tenantId, conversationType: 'personal' } };
   const run = (text = 'help', id: string = randomUUID(), changed = {}) => sink.admit({ ...event, ...changed, text }, route, { ...context(id), commandText: text,
     delegatedTenant: true, controlRecipient: { id: '29:fixture-person', ...(chatKind === 'groupChat' ? { isTargeted: true as const } : {}) } });
-  const provision = async (id = 'primary', conversationId = event.contextId, chatKind: 'personal' | 'groupChat' = 'personal') => {
+  const provision = async (id = 'primary', conversationId = event.contextId, chatKind: 'personal' | 'groupChat' = 'personal', legacy = false) => {
     const target = config.targets.find(t => t.id === id)!;
     const conn: ConnectionRecord = { schema: 1, kind: 'conn', scope, conversationId, chatKind, targetId: id,
       identityDigest: target.identityDigest!, bindingName: bindingName(scope, conversationId, target.identityDigest!), state: 'reserved' };
-    return directory.markProvisioned(await directory.reserveConnection(conn, context()), evidence(conn), context());
+    return directory.markProvisioned(await directory.reserveConnection(conn, context()), evidence(conn), context(), legacy ? undefined : { uid: 'agent-uid', generation: 1 });
   };
   return { sink, restart: () => { const s = makeSink(); bindSender(s); return s; }, directory, scope, config, slots, event, route, run, provision, sent, admitted, turns, checks, logs, authorized: () => authorized,
     authorizeWith: (value: typeof policyAuthorizer) => { policyAuthorizer = value; },
     policy: (value: PolicyAdmission) => { eligible = value; }, outcome: (value: ProviderResult) => { outcome = value; },
     fail: (value: boolean, category: BindingCheckError['category'] = 'binding-conflict') => { failCheck = value; failureCategory = category; }, checkGate: (value: Promise<void>) => { checkGate = value; },
-    sendGate: (value: Promise<void>) => { sendGate = value; }, revoke: () => { allowed = false; } };
+    sendGate: (value: Promise<void>) => { sendGate = value; }, revoke: () => { allowed = false; },
+    agent: (value: { uid: string; generation: number }) => { agent = value; } };
 }
 
 test('discovery and explicit choice create no Task; connected ordinary text reaches only pinned inbox', async t => {
@@ -666,4 +668,52 @@ test('stale ready disconnect does not confirm that a newly linked account is dis
   d.delegated.accounts.inspect = async () => ({ generation: 2, linked: true });
   f.outcome({ kind: 'delivered', providerMessageId: 'receipt' });
   assert.equal((await f.run('disconnect', 'old-disconnect')).kind, 'duplicate'); assert.equal(f.sent.length, sends);
+});
+
+// Orka pins a session to its first Task's Agent revision and names it by Binding UID (#75).
+for (const kind of ['personal', 'groupChat'] as const) test(`${kind} chat keeps its Binding while the Agent is unchanged and moves to a new one after a change, across restart`, async t => {
+  const f = await fixture(t, 2, undefined, kind); const first = await f.provision('primary', f.event.contextId, kind);
+  const claim = (): IngressClaim => ({ externalEventId: f.event.externalEventId, attemptId: randomUUID(), attempt: 1, event: f.event });
+  const reconciles = () => f.checks.filter(c => c.startsWith('reconcile:')).length;
+  for (let i = 0; i < 2; i++) assert.equal(await f.sink.preflight('primary', claim(), context().signal), true);
+  assert.deepEqual(await f.directory.getConnection(f.event.contextId, context()), first); assert.equal(reconciles(), 0); assert.deepEqual(f.logs, []);
+
+  f.agent({ uid: 'agent-uid', generation: 2 }); const sink = f.restart();
+  assert.equal(await sink.preflight('primary', claim(), context().signal), true);
+  const renewed = (await f.directory.getConnection(f.event.contextId, context()))!;
+  assert.equal(renewed.epoch, 1); assert.equal(renewed.bindingName, bindingName(f.scope, f.event.contextId, first.identityDigest, 1));
+  assert.deepEqual(renewed.agent, { uid: 'agent-uid', generation: 2 }); assert.equal(renewed.state === 'provisioned' && renewed.binding.name, renewed.bindingName);
+  assert.deepEqual([renewed.chatKind, renewed.targetId, renewed.identityDigest], [first.chatKind, first.targetId, first.identityDigest]);
+  assert.equal(reconciles(), 1);
+  assert.deepEqual(f.logs, [`session-renewed:primary {"binding":"${renewed.bindingName}","epoch":1,"fromAgentGeneration":1,"toAgentGeneration":2}`]);
+
+  assert.equal(await f.restart().preflight('primary', claim(), context().signal), true);
+  assert.deepEqual(await f.directory.getConnection(f.event.contextId, context()), renewed); assert.equal(reconciles(), 1);
+});
+
+test('a chat saved before Agent revisions were recorded moves once, then stays', async t => {
+  const f = await fixture(t); await f.provision('primary', f.event.contextId, 'personal', true);
+  const claim = (): IngressClaim => ({ externalEventId: f.event.externalEventId, attemptId: randomUUID(), attempt: 1, event: f.event });
+  assert.equal(await f.sink.preflight('primary', claim(), context().signal), true);
+  assert.equal(await f.sink.preflight('primary', claim(), context().signal), true);
+  const saved = (await f.directory.getConnection(f.event.contextId, context()))!;
+  assert.deepEqual([saved.epoch, saved.agent], [1, { uid: 'agent-uid', generation: 1 }]); assert.match(f.logs[0]!, /"fromAgentGeneration":"unknown"/u);
+  assert.equal(f.logs.length, 1);
+});
+
+test('a failed move leaves the chat on its current Binding and retries on the next forward', async t => {
+  const f = await fixture(t); const pinned = await f.provision();
+  const claim = (): IngressClaim => ({ externalEventId: f.event.externalEventId, attemptId: randomUUID(), attempt: 1, event: f.event });
+  f.agent({ uid: 'agent-uid', generation: 2 }); const reconcile = f.slots[0]!.provisioner.reconcile;
+  f.slots[0]!.provisioner.reconcile = async () => { throw new BindingCheckError('target-paused'); };
+  assert.equal(await f.sink.preflight('primary', claim(), context().signal), false);
+  assert.deepEqual(await f.directory.getConnection(f.event.contextId, context()), pinned);
+  f.slots[0]!.provisioner.reconcile = reconcile; await new Promise(resolve => setTimeout(resolve, 1010));
+  assert.equal(await f.sink.preflight('primary', claim(), context().signal), true);
+  assert.equal((await f.directory.getConnection(f.event.contextId, context()))!.epoch, 1);
+});
+
+test('connecting a chat records the Agent revision its first session will pin', async t => {
+  const f = await fixture(t); f.agent({ uid: 'agent-uid', generation: 4 }); await f.run('use primary');
+  assert.deepEqual((await f.directory.getConnection(f.event.contextId, context()))!.agent, { uid: 'agent-uid', generation: 4 });
 });

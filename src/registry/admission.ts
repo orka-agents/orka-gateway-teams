@@ -18,7 +18,7 @@ import { bindingName, controlFingerprint, parseUseCommand } from '../directory/c
 import type { Directory } from '../directory/store.js';
 import { BindingCheckError } from '../directory/provision.js';
 import type { createBindingProvisioner } from '../directory/provision.js';
-import { DirectoryError } from '../directory/types.js';
+import { DirectoryError, MAX_BINDING_EPOCH } from '../directory/types.js';
 import type { ConnectionRecord, ControlRecord, ControlReply, DirectoryContext } from '../directory/types.js';
 import type { AdmissionContext, AdmissionSink } from '../ingress/server.js';
 import type { AdmissionResult, IngressClaim, IngressPort, ReplyRoute } from '../ingress/types.js';
@@ -32,11 +32,11 @@ import { TableError } from '../storage/table/types.js';
 import type { ProviderMessage } from '../outbound/types.js';
 import type { RegistryConfig, RegistryTarget } from './config.js';
 
-type Category = BindingCheckError['category'] | 'graph-unavailable' | 'signin-required' | 'signin-complete';
+type Category = BindingCheckError['category'] | 'graph-unavailable' | 'signin-required' | 'signin-complete' | 'session-renewed';
 interface DelegatedOptions { accounts: AccountStore; auth: ReturnType<typeof createDelegatedAuth>; apiUri: string; connectionName: string; publicOrigin?: string }
 interface Slot { target: RegistryTarget; inbox: Pick<IngressPort, 'admit'>; provisioner: ReturnType<typeof createBindingProvisioner> }
 interface Options { proposals?: Pick<ReturnType<typeof createPullRequestService>, 'decide' | 'refresh'>; safeOutput?(text: string): boolean; github?: { accounts: AccountStore; auth: ReturnType<typeof createGitHub> }; delegated?: DelegatedOptions; config: RegistryConfig; directory: Directory; slots: readonly Slot[]; authority: LeaseAuthority; active(): boolean;
-  authorizer: Pick<ReturnType<typeof createGroupAuthorizer>, 'authorize'>; log(category: Category, targetId?: string): void }
+  authorizer: Pick<ReturnType<typeof createGroupAuthorizer>, 'authorize'>; log(category: Category, targetId?: string, detail?: Readonly<Record<string, string | number>>): void }
 
 /** Four complete consumers share the directory's four places, including control settlement.
  * No waiting queue, cached Binding authority, replacement target or second sender. */
@@ -81,17 +81,38 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
       if (!active(ctx)) cancelled();
     });
   }
-  async function check(slot: Slot, connection: ConnectionRecord, ctx: DirectoryContext, reconcile = false): Promise<ConnectionRecord> {
+  /** Orka pins a session to the Agent revision of its first Task. When the front Agent has changed since,
+   * move the chat to a new, higher-priority Binding: Orka names sessions by Binding UID, so the next
+   * Task starts a new session. The old Binding, session and history stay untouched. */
+  async function follow(slot: Slot, connection: ConnectionRecord, ctx: DirectoryContext): Promise<ConnectionRecord> {
+    const k8s = { signal: ctx.signal, deadline: ctx.deadline, allowed: () => active(ctx) };
+    const agent = await slot.provisioner.revision(k8s); assertActive(ctx);
+    // A chat recorded before revisions were tracked has an unknown pin: one fresh session beats a known failure.
+    if (connection.state !== 'provisioned' || connection.agent?.uid === agent.uid && connection.agent.generation === agent.generation) return connection;
+    const epoch = (connection.epoch ?? 0) + 1;
+    if (epoch > MAX_BINDING_EPOCH) throw new BindingCheckError('binding-conflict');
+    const { binding: _binding, agent: previous, ...base } = connection;
+    const reserved: ConnectionRecord = { ...base, epoch, state: 'reserved',
+      bindingName: bindingName(scope, connection.conversationId, connection.identityDigest, epoch) };
+    const binding = await slot.provisioner.reconcile(reserved, k8s); assertActive(ctx);
+    const saved = await directory.updateConnection(connection, { ...reserved, state: 'provisioned', binding, agent }, ctx);
+    options.log('session-renewed', slot.target.id, { binding: saved.bindingName, epoch,
+      fromAgentGeneration: previous?.generation ?? 'unknown', toAgentGeneration: agent.generation });
+    return saved;
+  }
+  async function check(slot: Slot, connection: ConnectionRecord, ctx: DirectoryContext, reconcile = false, renew = false): Promise<ConnectionRecord> {
     assertActive(ctx); const id = slot.target.id; const state = paused.get(id);
     if (state?.pending) { await joinRecovery(state.pending, ctx); assertActive(ctx); }
     else if (state && performance.now() < state.next) throw new BindingCheckError('target-paused');
     const run = async () => {
       try {
         assertActive(ctx);
-        const evidence = await slot.provisioner[reconcile ? 'reconcile' : 'check'](connection,
-          { signal: ctx.signal, deadline: ctx.deadline, allowed: () => active(ctx) });
+        const k8s = { signal: ctx.signal, deadline: ctx.deadline, allowed: () => active(ctx) };
+        // A new chat's first session will pin the Agent revision current now.
+        const agent = reconcile && connection.state === 'reserved' ? await slot.provisioner.revision(k8s) : undefined;
+        const evidence = await slot.provisioner[reconcile ? 'reconcile' : 'check'](connection, k8s);
         assertActive(ctx);
-        const saved = reconcile ? await directory.markProvisioned(connection, evidence, ctx) : connection;
+        const saved = reconcile ? await directory.markProvisioned(connection, evidence, ctx, agent) : renew ? await follow(slot, connection, ctx) : connection;
         assertActive(ctx); paused.delete(id); logged.delete(id); return saved;
       } catch (error) {
         if (error instanceof BindingCheckError && active(ctx)) {
@@ -532,7 +553,8 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
         if (!slot || !connection || connection.state !== 'provisioned' || !validConnection(connection, slot, claim.event, connection.chatKind)) {
           log('binding-conflict', targetId); return false;
         }
-        await check(slot, connection, ctx); assertActive(ctx); return true;
+        // Last step before Orka sees the event: move the chat first if its front Agent changed.
+        await check(slot, connection, ctx, false, true); assertActive(ctx); return true;
       } catch (error) {
         if (transient(error) || error instanceof DirectoryError && error.code === 'unready' && !active(ctx)) return false;
         throw error;

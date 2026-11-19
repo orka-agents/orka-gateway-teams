@@ -61,7 +61,7 @@ async function fixture(t: test.TestContext, initialize = true, count = 2, expiry
     const target = String(req.headers['fixture-target']); const saved = bindings.get(target)!; const path = new URL(req.url!, 'https://localhost').pathname;
     let value: unknown;
     if (path.endsWith('/gateways/teams')) value = { apiVersion: 'gateway.orka.ai/v1alpha1', kind: 'Gateway', metadata: { namespace: 'default', name: 'teams', uid: 'gateway-uid', generation: 1 }, status: { ready: true, observedGeneration: 1 } };
-    else if (path.endsWith('/agents/front')) value = { apiVersion: 'core.orka.ai/v1alpha1', kind: 'Agent', metadata: { namespace: 'default', name: 'front' } };
+    else if (path.endsWith('/agents/front')) value = { apiVersion: 'core.orka.ai/v1alpha1', kind: 'Agent', metadata: { namespace: 'default', name: 'front', uid: 'agent-uid', generation: 1 } };
     else if (path.endsWith('/gatewaybindings') && req.method === 'POST') {
       let text = ''; for await (const chunk of req) text += chunk;
       const created = JSON.parse(text); value = { ...created, metadata: { ...created.metadata, uid: randomUUID(), generation: 1 }, status: { ready: true, observedGeneration: 1 } };

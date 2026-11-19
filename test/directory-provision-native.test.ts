@@ -41,7 +41,7 @@ for (const mode of ['ack', 'lost', 'conflict', 'lie', 'foreign', 'revoked'] as c
     }
     let value: unknown;
     if (req.url === `${root}/gateways/teams`) value = { apiVersion: 'gateway.orka.ai/v1alpha1', kind: 'Gateway', metadata: { namespace: 'default', name: 'teams', uid: 'gateway-uid', generation: 2 }, status: { ready: true, observedGeneration: 2 } };
-    else if (req.url === '/apis/core.orka.ai/v1alpha1/namespaces/default/agents/front') value = { apiVersion: 'core.orka.ai/v1alpha1', kind: 'Agent', metadata: { namespace: 'default', name: 'front' } };
+    else if (req.url === '/apis/core.orka.ai/v1alpha1/namespaces/default/agents/front') value = { apiVersion: 'core.orka.ai/v1alpha1', kind: 'Agent', metadata: { namespace: 'default', name: 'front', uid: 'agent-uid', generation: 1 } };
     else if (req.url === `${root}/gatewaybindings?limit=100`) value = { apiVersion: 'gateway.orka.ai/v1alpha1', kind: 'GatewayBindingList', metadata: {}, items: binding ? [binding] : [] };
     else if (req.url === `${root}/gatewaybindings/${connection.bindingName}`) value = binding;
     else assert.fail('Unexpected Kubernetes destination');

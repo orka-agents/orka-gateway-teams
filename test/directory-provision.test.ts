@@ -82,3 +82,41 @@ test('cross-target, cancelled, expired and unprovisioned check cannot start Kube
   await assert.rejects(f.provisioner.reconcile(f.connection, { ...f.context(), signal: abort.signal }));
   await assert.rejects(f.provisioner.reconcile(f.connection, f.context(-1))); assert.equal(f.reads(), 0); assert.equal(f.creates(), 0);
 });
+
+// Orka names a session by Binding UID: a later epoch must be a new, outranking Binding beside the old one.
+test('a later epoch creates its own higher-priority Binding and leaves the earlier one untouched', async () => {
+  const target = snapshotRegistry(registryInput()).targets[0]!; const s = target.config.scope; const scope = { appId: s.appId, tenantId: s.tenantId };
+  const name = (epoch: number) => bindingName(scope, '19:exact', target.identityDigest!, epoch);
+  const spec = (priority: number) => ({ gatewayRef: { name: 'teams' }, agentRef: { name: 'front' }, match: { accountId: s.tenantId, contextId: '19:exact' },
+    priority, senderPolicy: { mode: 'all' }, session: { mode: 'context-sender' } });
+  const annotations = { 'gateway.orka.ai/teams-target-digest': target.identityDigest, 'gateway.orka.ai/teams-gateway-uid': target.gatewayUid };
+  const bindings = new Map<string, any>([[name(0), { apiVersion: 'gateway.orka.ai/v1alpha1', kind: 'GatewayBinding',
+    metadata: { namespace: 'default', name: name(0), uid: 'uid-0', generation: 1, annotations }, spec: spec(0), status: { ready: true, observedGeneration: 1 } }]]);
+  const original = structuredClone(bindings.get(name(0)));
+  const agent = { apiVersion: 'core.orka.ai/v1alpha1', kind: 'Agent', metadata: { namespace: 'default', name: 'front', uid: 'agent-uid', generation: 7 } };
+  const provisioner = createBindingProvisioner(target, {
+    async getGateway() { return { apiVersion: 'gateway.orka.ai/v1alpha1', kind: 'Gateway', metadata: { namespace: 'default', name: 'teams', uid: target.gatewayUid, generation: 1 }, status: { ready: true, observedGeneration: 1 } }; },
+    async getAgent() { return structuredClone(agent); }, async listBindings() { return structuredClone([...bindings.values()]); },
+    async getBinding(n: string) { return structuredClone(bindings.get(n)); },
+    async createBinding(value: any) { bindings.set(value.metadata.name, { ...structuredClone(value), metadata: { ...value.metadata, uid: 'uid-1', generation: 1 }, status: { ready: true, observedGeneration: 1 } }); return { kind: 'ack' as const }; },
+  });
+  const context = { signal: new AbortController().signal, deadline: performance.now() + 2000, allowed: () => true };
+  assert.deepEqual(await provisioner.revision(context), { uid: 'agent-uid', generation: 7 });
+  const next: ConnectionRecord = { schema: 1, kind: 'conn', scope, conversationId: '19:exact', chatKind: 'personal', targetId: target.id,
+    identityDigest: target.identityDigest!, bindingName: name(1), epoch: 1, state: 'reserved' };
+  const evidence = await provisioner.reconcile(next, context);
+  assert.deepEqual([evidence.name, evidence.uid, evidence.spec], [name(1), 'uid-1', spec(1)]);
+  assert.deepEqual(bindings.get(name(0)), original);
+  // A move that stopped before its directory write leaves the next epoch beside the current one: still checkable, then adoptable.
+  const { epoch: _epoch, ...base } = next;
+  const first: ConnectionRecord = { ...base, bindingName: name(0), state: 'provisioned', binding: { namespace: 'default', name: name(0), uid: 'uid-0', generation: 1, spec: spec(0) } };
+  assert.equal((await provisioner.check(first, context)).uid, 'uid-0');
+  assert.equal((await provisioner.reconcile(next, context)).uid, 'uid-1');
+  // A sibling name is trusted only with the exact spec and markers this gateway would create.
+  bindings.get(name(1)).spec.priority = 1000; await assert.rejects(provisioner.check(first, context), { category: 'binding-conflict' });
+  bindings.get(name(1)).spec.priority = 1; bindings.get(name(1)).metadata.annotations = {};
+  await assert.rejects(provisioner.check(first, context), { category: 'binding-conflict' });
+  bindings.set(name(2), { ...structuredClone(bindings.get(name(0))), metadata: { ...bindings.get(name(0)).metadata, name: name(2) }, spec: spec(2) });
+  bindings.get(name(1)).metadata.annotations = annotations;
+  await assert.rejects(provisioner.check(first, context), { category: 'binding-conflict' }, 'two epochs ahead is not a stopped move');
+});

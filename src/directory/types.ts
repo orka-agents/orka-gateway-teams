@@ -7,10 +7,16 @@ export interface BindingEvidence {
   namespace: string; name: string; uid: string; generation: number;
   spec: { [key: string]: CanonicalValue };
 }
+/** The front Agent revision a chat's Orka session is pinned to. */
+export interface AgentRevision { uid: string; generation: number }
+/** A chat moves to a new Binding, and so a new Orka session, when its front Agent changes. */
+export const MAX_BINDING_EPOCH = 1000;
 interface RecordBase { schema: 1; scope: DirectoryScope; conversationId: string; chatKind: 'personal' | 'groupChat' }
 export type ConnectionRecord = RecordBase & {
   kind: 'conn'; targetId: string; identityDigest: string; bindingName: string;
-} & ({ state: 'reserved'; binding?: never } | { state: 'provisioned'; binding: BindingEvidence });
+  /** Absent means 0: the chat's first Binding. */
+  epoch?: number;
+} & ({ state: 'reserved'; binding?: never; agent?: never } | { state: 'provisioned'; binding: BindingEvidence; agent?: AgentRevision });
 export interface ControlRoute {
   serviceUrl: string; channelId: 'msteams'; bot: { id: string; role: 'bot' };
   conversation: { id: string; tenantId: string; conversationType: 'personal' | 'groupChat' };

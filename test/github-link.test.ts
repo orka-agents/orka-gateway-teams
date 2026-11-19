@@ -59,7 +59,7 @@ async function setup(t: test.TestContext, chatKind: 'personal' | 'groupChat' = '
   const sink = createRegistryAdmission({ config, directory, authority, active: () => allowed,
     delegated: { accounts, auth, apiUri: 'api://gateway', connectionName: 'workiq', publicOrigin: origin }, github: { accounts: githubAccounts, auth: github },
     authorizer: { authorize: async () => policy }, log: category => logs.push(category),
-    slots: [{ target, inbox: { admit: async () => { work++; return { kind: 'accepted', replyTarget: 'rt' }; } }, provisioner: { check: async () => evidence, reconcile: async () => evidence } }] });
+    slots: [{ target, inbox: { admit: async () => { work++; return { kind: 'accepted', replyTarget: 'rt' }; } }, provisioner: { check: async () => evidence, reconcile: async () => evidence, revision: async () => ({ uid: 'agent-uid', generation: 1 }) } }] });
   sink.bindControlSender({ send: async (_route, message) => { sent.push(JSON.stringify(message)); return outcome; } });
   const routeBase = { serviceUrl: target.config.receiver.serviceUrls[0]!, channelId: 'msteams' as const, bot: { id: '28:fixture-app', role: 'bot' as const } };
   const route: ReplyRoute = chatKind === 'groupChat' ? { ...routeBase,
