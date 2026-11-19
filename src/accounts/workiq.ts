@@ -21,6 +21,16 @@ export function workIQArguments(input: unknown): WorkIQArguments {
   }
   return { question: v.question, ...(location ? { location } : {}) };
 }
+function partText(input: unknown): string | undefined {
+  const p = object(input, ['text', 'data', 'metadata', 'mediaType', 'filename']);
+  if (['mediaType', 'filename'].some(k => p[k] !== undefined && typeof p[k] !== 'string')) throw failure();
+  if (Object.hasOwn(p, 'data')) {
+    if (Object.hasOwn(p, 'text')) throw failure();
+    return undefined; // A2A 1.0 permits any JSON data value; do not return it or follow its references.
+  }
+  if (typeof p.text !== 'string' || !p.text.trim()) throw failure();
+  return p.text;
+}
 function completedText(input: unknown, id: string): string {
   const v = object(input, ['jsonrpc', 'id', 'result']); if (v.jsonrpc !== '2.0' || v.id !== id) throw failure();
   const result = object(v.result, ['task']); const task = object(result.task);
@@ -29,9 +39,9 @@ function completedText(input: unknown, id: string): string {
   const texts: string[] = [];
   for (const artifact of task.artifacts) {
     const a = object(artifact); if (!Array.isArray(a.parts) || !a.parts.length || a.parts.length > 128) throw failure();
-    for (const part of a.parts) { const p = object(part, ['text', 'metadata']); if (typeof p.text !== 'string' || !p.text.trim()) throw failure(); texts.push(p.text); }
+    for (const part of a.parts) { const text = partText(part); if (text !== undefined) texts.push(text); }
   }
-  const text = texts.join('\n'); if (Buffer.byteLength(text) > 131072) throw failure(); return text;
+  const text = texts.join('\n'); if (!texts.length || Buffer.byteLength(text) > 131072) throw failure(); return text;
 }
 /** Fixed read-only A2A call. The native request seam is for library tests, never runtime routing configuration. */
 export function createWorkIQ(deps: { request?: typeof https.request } = {}) {
