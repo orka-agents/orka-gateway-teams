@@ -33,7 +33,9 @@ export function createTaskService(options: {
   auth: { exchange(token: string, ctx: DirectoryContext): Promise<AccountTokens>; refresh(token: string, ctx: DirectoryContext): Promise<AccountTokens> };
   github?: { accounts: AccountStore; auth: Pick<ReturnType<typeof createGitHub>, 'refresh' | 'tool' | 'safeOutput'> };
   proposals?: ReturnType<typeof createPullRequestService>;
-  workiq?: Parameters<typeof createWorkIQ>[0]; now?: () => number; privateCredentials?: readonly string[]; log?(category: 'grant-binding-conflict'): void;
+  workiq?: Parameters<typeof createWorkIQ>[0]; now?: () => number; privateCredentials?: readonly string[];
+  /** Fixed categories only: tool names, refusal steps and error codes, never values. */
+  log?(category: string): void;
 }) {
   const now = options.now ?? Date.now; const provider = createWorkIQ(options.workiq);
   const targets = options.targets.map(t => ({ ...t, expected: digest(t.taskPassToken) }));
@@ -80,11 +82,12 @@ export function createTaskService(options: {
   }
   async function call(tool: string, token: string, input: unknown, supplied: DirectoryContext, operation?: string): Promise<TaskReply> {
     const writing = writeTool(tool); const key = passKey(token); const pass = passes.get(key); passes.delete(key); // Consume before any await, including storage/renewal.
-    if (!pass || pass.expiresAt <= now() || !pass.grant.binding || pass.grant.binding.deadline <= now()) return refusal('tool-unavailable', writing ? 503 : 403);
+    const refused = (reason: string, error = 'tool-unavailable', status = writing ? 503 : 403) => { options.log?.(`task-tool-refused ${tool} ${reason}`); return refusal(error, status); };
+    if (!pass || pass.expiresAt <= now() || !pass.grant.binding || pass.grant.binding.deadline <= now()) return refused('pass');
     const frozen = pass.grant;
     let args: unknown;
     try { args = tool === 'workiq' ? workIQArguments(input) : githubArguments(tool as GitHubTool, input); if (writing) operationKey(operation); }
-    catch { return refusal('tool-unavailable', writing ? 400 : 403); }
+    catch { return refused('arguments', 'tool-unavailable', writing ? 400 : 403); }
     const guards: ReturnType<AccountStore['watch']>[] = [];
     const ctx = { ...supplied, deadline: Math.min(supplied.deadline, performance.now() + frozen.binding!.deadline - now()),
       authorizeWrite: () => active(supplied) && pass.expiresAt > now() && frozen.binding!.deadline > now() && guards.every(g => g.active()) };
@@ -100,35 +103,36 @@ export function createTaskService(options: {
     };
     let acquired: Awaited<ReturnType<AccountStore['acquire']>> | undefined;
     try {
-      if (!await live() || tool !== 'workiq' && !frozen.githubGeneration) return refusal('signin-required', writing ? 503 : 403);
+      if (!await live() || tool !== 'workiq' && !frozen.githubGeneration) return refused('grant', 'signin-required');
       const subject = { objectId: frozen.objectId }; const g = options.github;
       acquired = tool === 'workiq' ? await options.accounts.acquire(subject, frozen.generation, assertion => options.auth.exchange(assertion, ctx), ctx,
         refreshToken => options.auth.refresh(refreshToken, ctx)) : await g!.accounts.acquire(subject, frozen.githubGeneration!, async () => { throw new Error(); }, ctx,
           refreshToken => g!.auth.refresh(refreshToken, ctx));
-      if (acquired.kind !== 'token') return refusal('signin-required', writing ? 503 : 403);
+      if (acquired.kind !== 'token') return refused('signin', 'signin-required');
       // Own refresh must finish first. From here neither account may mutate across awaits.
       guards.push(options.accounts.watch(subject));
       if (frozen.githubGeneration && g) guards.push(g.accounts.watch(subject));
       // Selected acquisition already pins its row. Fence late UNKNOWN writes on
       // the other required account too; uncertainty/conflict refuses, never retries.
       if (tool !== 'workiq' ? !await options.accounts.pin(subject, frozen.generation, ctx) :
-        frozen.githubGeneration && g && !await g.accounts.pin(subject, frozen.githubGeneration, ctx)) return refusal('signin-required', writing ? 503 : 403);
+        frozen.githubGeneration && g && !await g.accounts.pin(subject, frozen.githubGeneration, ctx)) return refused('pin', 'signin-required');
       // A lookup failure may conceal an earlier successful effect: write storage uncertainty is always503.
       const proposing = tool === 'github-propose-pull-request';
       const reservation = writing && !proposing ? await options.accounts.reserveWrite(frozen, tool, operation!, args, ctx) : undefined;
-      if (reservation?.kind === 'uncertain') return refusal('tool-unavailable', 503);
-      if (!await options.authority.revalidate() || !await live()) return refusal('tool-unavailable', writing ? 503 : 403);
+      if (reservation?.kind === 'uncertain') return refused('storage');
+      if (!await options.authority.revalidate() || !await live()) return refused('authority');
       if (reservation?.kind === 'done') {
-        return await safeOutput(frozen, reservation.text, token, acquired.accessToken, ctx) && await live() ?
-          { status: 200, body: { text: reservation.text } } : refusal('tool-unavailable', 503);
+        if (!await safeOutput(frozen, reservation.text, token, acquired.accessToken, ctx)) return refused('output');
+        return await live() ? { status: 200, body: { text: reservation.text } } : refused('authority');
       }
-      if (proposing && !options.proposals) return refusal('tool-unavailable', 503);
+      if (proposing && !options.proposals) return refused('unavailable');
       const result = proposing ? await options.proposals!.propose(frozen, args as Record<string, string>, operation!, acquired.accessToken, ctx,
         text => safeOutput(frozen, text, token, acquired!.kind === 'token' ? acquired!.accessToken : '', ctx)) :
         tool === 'workiq' ? await provider.ask(args, acquired.accessToken, ctx) : await g!.auth.tool(tool as GitHubTool, args, acquired.accessToken, ctx);
-      if (!await safeOutput(frozen, result.text, token, acquired.accessToken, ctx) || !await live()) return refusal('tool-unavailable', writing ? 503 : 403);
+      if (!await safeOutput(frozen, result.text, token, acquired.accessToken, ctx)) return refused('output');
+      if (!await live()) return refused('authority');
       if (reservation?.kind === 'send') await options.accounts.completeWrite(reservation.id, result.text, ctx);
-      if (!active(ctx)) return refusal('tool-unavailable', writing ? 503 : 403);
+      if (!active(ctx)) return refused('authority');
       return { status: 200, body: result };
     } catch (e) {
       // Native handoff is over; invalidating its rejected credential must not fence itself.
@@ -136,7 +140,8 @@ export function createTaskService(options: {
       if (e instanceof GitHubError && e.code === 'unauthorized' && tool !== 'workiq' && acquired?.kind === 'token') {
         try { await options.github!.accounts.invalidate({ objectId: frozen.objectId }, frozen.githubGeneration!, acquired.accessToken, ctx); } catch { /* No retry or newer-token invalidation. */ }
       }
-      return refusal('tool-unavailable', e instanceof AccountError && e.code === 'operation-conflict' ? 403 : writing ? 503 : 403);
+      return refused(e instanceof AccountError ? `account-${e.code}` : e instanceof GitHubError ? `github-${e.code}` : 'error',
+        'tool-unavailable', e instanceof AccountError && e.code === 'operation-conflict' ? 403 : writing ? 503 : 403);
     } finally { for (const guard of guards) guard.release(); }
   }
   return {

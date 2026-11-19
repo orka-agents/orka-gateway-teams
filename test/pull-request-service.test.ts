@@ -27,9 +27,10 @@ async function setup(t: test.TestContext) {
   const ch = await ghAccounts.challenge(f.subject, 'chat-private', 'github', context()); await ghAccounts.claim(ch, context());
   await ghAccounts.complete(ch, { accessToken: 'GH_ACCESS_PRIVATE', refreshToken: 'GH_REFRESH_PRIVATE', providerUserId: '12345', expiresAt: f.now() + 100_000, refreshExpiresAt: f.now() + 1_000_000 }, context());
   const github = createGitHub({ clientId: 'client', clientSecret: 'CLIENT_PRIVATE', publicOrigin: 'https://signin.example.invalid' }, { request: remote.request }); t.after(() => github.close());
-  let author: unknown = commit(); let total = 1; let oversized = false; let heldPage = false; let complete = true; let longFiles = false;
+  let author: unknown = commit(); let total = 1; let oversized = false; let heldPage = false; let complete = true; let longFiles = false; let missingHead = false; const logs: string[] = [];
   remote.behavior((req, res) => {
     if (req.path === '/user') return void res.end('{"id":12345,"login":"sender"}');
+    if (missingHead && req.path.includes('/git/ref/heads/')) { res.statusCode = 404; return void res.end('{"message":"Not Found"}'); }
     if (req.path.includes('/git/ref/heads/')) return void res.end(JSON.stringify({ ref: 'refs/heads/orka/fix', object: { type: 'commit', sha: 'a'.repeat(40) } }));
     if (heldPage && req.path.endsWith('page=2')) return;
     res.end(oversized ? 'x'.repeat(1024 * 1024 + 1) : JSON.stringify({ total_commits: total, base_commit: { sha: 'b'.repeat(40) },
@@ -41,16 +42,16 @@ async function setup(t: test.TestContext) {
     proposalOrigin: { conversationId, replyTarget, route, senderMRI, objectId, displayName, activityId } };
   await f.store.reserveGrant(grant, context());
   let outcome: 'delivered' | 'uncertain' | 'unavailable' = 'delivered';
-  const proposals = createPullRequestService({ accounts: f.store, githubAccounts: ghAccounts, github, scope: { appId: binding.appId, tenantId: binding.tenantId }, now: f.now,
+  const proposals = createPullRequestService({ accounts: f.store, githubAccounts: ghAccounts, github, scope: { appId: binding.appId, tenantId: binding.tenantId }, now: f.now, log: c => logs.push(c),
     postProposal: async (proposal, ctx) => { assert.equal((await f.store.getProposal(proposal.id, ctx))?.proposal.state, 'pending'); sent++; return outcome; } });
   const service = createTaskService({ accounts: f.store, authority: f.authority, now: f.now,
     targets: [{ id: 'tools', gatewayUid: 'gateway', identityDigest: f.input.targetDigest, taskPassToken: 'CONTROLLER_PRIVATE' }],
     auth: { exchange: async () => { throw new Error('not SSO'); }, refresh: async () => { throw new Error('not renewal'); } },
-    github: { accounts: ghAccounts, auth: github }, proposals, privateCredentials: ['DELIVERY_PRIVATE', 'QUOTED_"_PRIVATE'] }); t.after(() => service.close());
+    github: { accounts: ghAccounts, auth: github }, proposals, privateCredentials: ['DELIVERY_PRIVATE', 'QUOTED_"_PRIVATE'], log: c => logs.push(c) }); t.after(() => service.close());
   const body = { protocolVersion: 'orka.gateway.v1', grantRef: grant.ref, namespaceUID: 'ns', gatewayUID: 'gateway', taskUID: 'task', tools: grant.tools, deadline: new Date(f.now() + 600000).toISOString() };
   const issue = async (input = body) => { const r = await service.handle('/v1/task-passes', 'CONTROLLER_PRIVATE', input, context()); assert.equal(r.status, 200); return (r.body as { pass: string }).pass; };
   const call = async (value: unknown = args, key = 'operation', ctx = context()) => service.handle('/v1/task-tools/github-propose-pull-request', await issue(), value, ctx, key);
-  return { ...f, ...remote, github, proposals, service, grant, body, issue, call, sent: () => sent,
+  return { ...f, ...remote, github, proposals, service, grant, body, issue, call, sent: () => sent, logs, missingHead: (v: boolean) => { missingHead = v; },
     total: (n: number) => { total = n; }, author: (v: unknown) => { author = v; }, oversized: () => { oversized = true; },
     holdPage: () => { heldPage = true; }, longFiles: () => { longFiles = true; }, incomplete: () => { complete = false; }, outcome: (v: typeof outcome) => { outcome = v; } };
 }
@@ -186,6 +187,24 @@ test('pagination_checks_later_authors and compare_requires_every_git_author', as
   }
   assert.equal(f.sent(), 0); f.author(commit()); assert.equal((await f.call()).status, 200);
   assert.ok(f.requests.some(r => r.path.includes('b'.repeat(40) + '...' + 'a'.repeat(40)) && r.path.endsWith('page=2')));
+});
+test('refused proposals log the step they stopped at, without values', async t => {
+  const f = await setup(t); const refused = 'task-tool-refused github-propose-pull-request github-unavailable';
+  f.missingHead(true); assert.equal((await f.call(args, 'missing-head')).status, 503);
+  assert.deepEqual(f.logs.splice(0), ['pull-request-proposal-refused github-facts-head', refused]);
+  f.missingHead(false); f.author(commit('Foreign')); f.total(101);
+  assert.equal((await f.call(args, 'foreign-author')).status, 503);
+  assert.deepEqual(f.logs.splice(0), ['pull-request-proposal-refused github-facts-authors', refused]);
+  f.author(commit()); f.total(1); f.outcome('unavailable');
+  assert.equal((await f.call(args, 'no-card')).status, 503);
+  assert.deepEqual(f.logs.splice(0), ['pull-request-proposal-refused card', refused]);
+  f.outcome('delivered'); const pass = await f.issue();
+  assert.equal((await f.service.handle('/v1/task-tools/github-propose-pull-request', pass, args, context(), 'sent')).status, 200);
+  assert.deepEqual(f.logs, [], 'a sent card logs no refusal');
+  assert.equal((await f.service.handle('/v1/task-tools/github-propose-pull-request', pass, args, context(), 'reused')).status, 503);
+  assert.deepEqual(f.logs.splice(0), ['task-tool-refused github-propose-pull-request pass']);
+  assert.equal((await f.call({ ...args, title: 'changed' }, 'sent')).status, 403);
+  assert.deepEqual(f.logs.splice(0), ['pull-request-proposal-refused replay', 'task-tool-refused github-propose-pull-request account-operation-conflict']);
 });
 test('compare_over_1MiB_is_fixed_unavailable and paginated_author_checks_stop_at_existing_deadline_without_card', async t => {
   const f = await setup(t); f.oversized(); assert.equal((await f.call()).status, 503); assert.equal(f.sent(), 0);

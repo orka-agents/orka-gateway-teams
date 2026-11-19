@@ -409,6 +409,18 @@ preview count to fit the encrypted document budget; the card shows “+N more”
 are explicitly incomplete. Long labels/descriptions are visibly truncated to
 preserve the existing 20 KiB message budget; full diffs and patches are not stored.
 
+A refused task-tool call still answers only `tool-unavailable` (or `signin-required`),
+but stderr gets one line naming where it stopped, with no values:
+`teams-ingress: task-tool-refused <tool> <reason>`, where reason is `pass`, `arguments`,
+`grant`, `signin`, `pin`, `storage`, `authority` (lease, grant or deadline no longer
+current), `unavailable`, `output`, `github-<code>`, `account-<code>` or `error`.
+A refused proposal logs one more line before that one:
+`teams-ingress: pull-request-proposal-refused <step>`. The step is `grant`, `arguments`,
+`storage`, `replay` (same operation, different arguments), `github-identity`, `output`,
+`card`, or `github-facts-<read>`, where the read is `start` (deadline or read limit),
+`user`, `head`, `compare`, `authors` or `files`. For example, `github-facts-head`
+means the branch wasn't readable yet.
+
 Proposals are encrypted and expire 60 minutes after durable preparation. Preview
 preparation keeps its 48 KiB document budget, leaving room for later claim/result
 metadata within a 60 KiB proposal-document ceiling (still below the 64 KiB binary
