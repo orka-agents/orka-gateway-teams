@@ -106,7 +106,7 @@ export async function startTargetOutboundServer(config: { host: string; port: nu
         if (req.url === '/v1/task-tools/workiq') {
           // Only a fully received, authenticated Work IQ call may outlive the ten-second input budget.
           if (controller.signal.aborted || performance.now() >= deadline) throw new HttpFailure(408);
-          deadline = (starts.get(req.socket) ?? performance.now()) + 90000;
+          deadline = performance.now() + 90000;
           const remaining = Math.max(1, Math.ceil(deadline - performance.now()));
           clearTimeout(timer); timer = setTimeout(expire, remaining); timer.unref();
           clearTimeout(connectionTimers.get(req.socket));

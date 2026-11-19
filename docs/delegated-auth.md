@@ -253,7 +253,9 @@ Arguments are closed JSON:
 include it for time-sensitive questions, with an IANA time zone and integer
 UTC offset in minutes from -840 through 840. Arguments cannot choose a sender,
 credential, destination, headers or provider conversation. Successful output is
-`{"text":"..."}` from completed Work IQ text artifacts only. Other states,
+`{"text":"..."}` from completed Work IQ text artifacts only. Valid A2A `data`
+parts are ignored without exposing their values; mixed, malformed or ambiguous
+parts follow the strict response rules. Other states,
 unsupported responses and transport failures return fixed `tool-unavailable`;
 unusable account generations return `signin-required`.
 
@@ -267,9 +269,11 @@ uncertain responses are not resent. Work IQ remains read-only. GitHub writes use
 the durable reservation below and do not bypass Orka's approvals.
 
 Task calls share the outbound listener's 32-handler limit and ten-second absolute
-budget, including account reads, lease checks and refresh. Work IQ may exceed that
-budget in practice; no live latency result is established. Internal account and
-tool concurrency limits may return a fixed refusal rather than queue work.
+input budget, including authentication, account reads, lease checks and refresh.
+After an authenticated Work IQ request body is fully received within that limit,
+its provider work gets a fresh 90-second absolute budget with a one-second
+settlement reserve. Internal account and tool concurrency limits may return a
+fixed refusal rather than queue work.
 
 A child-capable Orka controller checks the executing Task and UID/snapshot-pinned
 ancestors, provenance, gateway origin and live cancellation before requesting and
