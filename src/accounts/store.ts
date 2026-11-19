@@ -287,24 +287,25 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     return v;
   }
   return {
-    async visitRecoverableProposals(ctx: DirectoryContext, visit: (p: Proposal) => Promise<void>): Promise<void> {
-      // Visit after the scan releases its slot: each visit takes its own, so recovery
-      // never holds two of the three and starves a live card decision.
-      const claimed = await run(ctx, async c => {
-        if (provider !== 'workiq') bad('invalid-input'); const seen = new Map<string, Proposal>();
+    visitRecoverableProposals(ctx: DirectoryContext, visit: (p: Proposal) => Promise<void>): Promise<void> {
+      // The scan lends its slot to each visit, whose store calls take their own, so
+      // recovery holds one slot at a time and a live card decision still fits.
+      // close() still drains the scan: table.close() waits for the traversal.
+      const scan: Promise<void> = run(ctx, async c => {
+        if (provider !== 'workiq') bad('invalid-input'); const seen = new Set<string>();
         await table.visitProposals(c, async encrypted => {
           const doc = unseal(encrypted);
           const id = doc.kind === 'proposal' ? doc.proposal.id : doc.kind === 'proposal-selector' && doc.state === 'claimed' ? doc.proposalId : undefined;
           if (!id || seen.has(id)) return;
           const version = await proposalVersion(id, c); const p = version?.proposal;
           if (!p?.claim || p.claim.decision === 'revise') return;
-          seen.set(id, p);
+          // The service owns projection repair, after excluding its live claims/effects.
+          seen.add(id); work.delete(scan);
+          try { await visit(p); } finally { work.add(scan); }
+          check(c);
         });
-        return [...seen.values()];
       });
-      // The service owns projection repair, after excluding its live claims/effects.
-      for (const p of claimed) { check(ctx); await visit(p); }
-      check(ctx);
+      return scan;
     },
     proposalWriteOutcome(p: Proposal, ctx: DirectoryContext): Promise<ProposalOutcome | undefined> {
       return run(ctx, async c => {
