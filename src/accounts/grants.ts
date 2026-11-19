@@ -4,7 +4,7 @@ import { integer, object } from '../storage/table/codec.js';
 import { proposalOrigin } from './pull-request-proposal.js';
 import type { ProposalOrigin } from './pull-request-proposal.js';
 
-export const githubTools = ['github-read-file', 'github-list-issues', 'github-create-issue', 'github-create-pull-request', 'github-propose-pull-request'] as const;
+export const githubTools = ['github-read-file', 'github-list-issues', 'github-read-issue', 'github-create-issue', 'github-create-pull-request', 'github-propose-pull-request'] as const;
 export type GitHubTool = typeof githubTools[number];
 export const writeTool = (tool: string) => tool === 'github-create-issue' || tool === 'github-create-pull-request' || tool === 'github-propose-pull-request';
 export function operationKey(value: unknown): string {

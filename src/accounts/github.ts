@@ -11,9 +11,14 @@ import type { Proposal, ProposalFacts, ProposalResult } from './pull-request-pro
 
 export class GitHubError extends Error { constructor(readonly code = 'unavailable') { super('GitHub sign-in unavailable'); } }
 export function githubArguments(tool: GitHubTool, input: unknown): Record<string, string> {
-  const keys = tool === 'github-read-file' ? ['path', 'ref'] : tool === 'github-list-issues' ? ['state'] :
+  const keys = tool === 'github-read-file' ? ['path', 'ref'] : tool === 'github-list-issues' ? ['state'] : tool === 'github-read-issue' ? [] :
     tool === 'github-create-issue' ? ['title', 'body'] : ['title', 'body', 'head', 'base'];
-  const v = fields(input, ['owner', 'repo', ...keys]); const out: Record<string, string> = {};
+  const v = fields(input, ['owner', 'repo', ...keys, ...(tool === 'github-read-issue' ? ['number'] : [])]); const out: Record<string, string> = {};
+  if (tool === 'github-read-issue') {
+    // Accept the canonical decimal string too: the task service passes normalized arguments on to the request.
+    const n = typeof v.number === 'string' && /^[1-9][0-9]{0,9}$/u.test(v.number) ? Number(v.number) : v.number;
+    if (!Number.isSafeInteger(n) || (n as number) < 1 || (n as number) > 2 ** 31 - 1) throw failure(); out.number = String(n);
+  }
   const text = (key: string, max: number, optional = false) => {
     const value = v[key]; if (value === undefined && optional) return;
     if (typeof value !== 'string' || Buffer.byteLength(value) > max || key !== 'body' && !value.trim() ||
@@ -31,6 +36,13 @@ export function githubArguments(tool: GitHubTool, input: unknown): Record<string
 }
 
 const failure = () => new GitHubError();
+const ISSUE_BODY_BYTES = 16384;
+/** Cut at a code point so the JSON-escaped text stays within max bytes, keeping the whole tool result bounded. */
+function clip(text: string, max: number): [string, boolean] {
+  let size = 0; let end = 0;
+  for (const ch of text) { size += Buffer.byteLength(JSON.stringify(ch)) - 2; if (size > max) return [text.slice(0, end), true]; end += ch.length; }
+  return [text, false];
+}
 const credential = (v: unknown): v is string => typeof v === 'string' && v.length <= 16384 && /^[A-Za-z0-9._~+/-]+=*$/u.test(v);
 const object = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v);
 /** GitHub App web flow only. Destinations and headers cannot be selected by a caller. */
@@ -197,6 +209,7 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
         const args = githubArguments(tool, input); const root = `/repos/${encodeURIComponent(args.owner!)}/${encodeURIComponent(args.repo!)}`;
         let path: string; let body: Record<string, string> | undefined;
         if (tool === 'github-read-file') path = `${root}/contents/${args.path!.split('/').map(encodeURIComponent).join('/')}${args.ref === undefined ? '' : '?' + new URLSearchParams({ ref: args.ref })}`;
+        else if (tool === 'github-read-issue') path = `${root}/issues/${args.number}`;
         else if (tool === 'github-list-issues') path = `${root}/issues?${new URLSearchParams({ state: args.state ?? 'open', per_page: '30', page: '1' })}`;
         else { path = root + (tool === 'github-create-issue' ? '/issues' : '/pulls'); const { owner: _owner, repo: _repo, ...data } = args; body = data; }
         const value = await json(token, {}, ctx, { path, ...(body ? { body } : {}) }); active(ctx);
@@ -209,6 +222,15 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
           const encoded = value.content.replace(/[\r\n]/gu, ''); const bytes = Buffer.from(encoded, 'base64');
           if (bytes.length > 32768 || bytes.toString('base64') !== encoded || value.size !== bytes.length) throw failure();
           text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        } else if (tool === 'github-read-issue') {
+          if (!object(value) || value.number !== Number(args.number) || typeof value.title !== 'string' || Buffer.byteLength(value.title) > 1024 ||
+            !['open', 'closed'].includes(value.state as string) || value.body !== null && typeof value.body !== 'string' || !Array.isArray(value.labels)) throw failure();
+          const result = url(value, 'pull_request' in value ? 'pull' : 'issues');
+          const labels = value.labels.slice(0, 20).map(l => { const name = object(l) ? l.name : l;
+            if (typeof name !== 'string' || Buffer.byteLength(name) > 256) throw failure(); return name; });
+          const [body, truncated] = clip(value.body ?? '', ISSUE_BODY_BYTES);
+          text = JSON.stringify({ number: result.number, title: value.title, state: value.state, labels, url: result.url, body,
+            ...(truncated ? { bodyTruncated: `Body cut at ${ISSUE_BODY_BYTES} bytes; the full text is at url.` } : {}) });
         } else if (tool === 'github-list-issues') {
           if (!Array.isArray(value) || value.length > 30) throw failure();
           text = JSON.stringify(value.map(v => { const result = url(v, object(v) && 'pull_request' in v ? 'pull' : 'issues');

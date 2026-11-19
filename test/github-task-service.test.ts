@@ -10,7 +10,7 @@ import { binding, context, deferred } from './support/directory-table.js';
 import { grantsFixture } from './support/task-grants.js';
 import { toolsFixture } from './support/github-tools.js';
 import { completed, workIQFixture } from './support/workiq.js';
-const tools = ['workiq', 'github-read-file', 'github-list-issues', 'github-create-issue', 'github-create-pull-request'];
+const tools = ['workiq', 'github-read-file', 'github-list-issues', 'github-read-issue', 'github-create-issue', 'github-create-pull-request'];
 const args = { owner: 'acme', repo: 'repo', title: 'Reviewed issue' };
 async function setup(t: test.TestContext, linked = true) {
   const f = await grantsFixture(t); const remote = await toolsFixture(t); const w = await workIQFixture(t);
@@ -417,4 +417,23 @@ for (const tool of ['workiq', 'github-create-issue']) test(`${tool} pin relies o
   const result = await f.service.handle('/v1/task-tools/' + tool, pass, tool === 'workiq' ? { question: 'Question' } : args, context(), 'pin-readback');
   assert.equal(pins, 1); assert.equal(result.status, 200);
   assert.equal(f.requests.length, tool === 'workiq' ? 0 : 1); assert.equal(f.w.bodies.length, tool === 'workiq' ? 1 : 0);
+});
+
+test('github-read-issue reads as the linked sender, refuses unlinked, unbound and unreadable issues without other effects', async t => {
+  const issue = { owner: 'acme', repo: 'repo', number: 71 };
+  const unlinked = await setup(t, false);
+  assert.deepEqual(await unlinked.call('github-read-issue', issue, undefined), { status: 403, body: { error: 'signin-required' } }); assert.equal(unlinked.requests.length, 0);
+  const f = await setup(t);
+  f.behavior((req, res) => res.end(JSON.stringify({ number: 71, title: 'Two installs share a reader', state: 'closed', body: 'Steps', labels: [{ name: 'bug' }],
+    html_url: 'https://github.com/acme/repo/issues/71', user: { login: 'not-forwarded' } })));
+  const read = await f.call('github-read-issue', issue, undefined);
+  assert.equal(read.status, 200); assert.deepEqual(JSON.parse((read.body as { text: string }).text), { number: 71, title: 'Two installs share a reader', state: 'closed',
+    labels: ['bug'], url: 'https://github.com/acme/repo/issues/71', body: 'Steps' });
+  assert.deepEqual(f.requests.map(r => [r.method, r.path, r.authorization]), [['GET', '/repos/acme/repo/issues/71', 'Bearer GH_ACCESS_PRIVATE']]);
+  // The gateway has no repository list: GitHub's own 404 for a missing issue or a repository the linked account cannot read is a fixed refusal.
+  f.behavior((_req, res) => { res.statusCode = 404; res.end('{"message":"Not Found"}'); });
+  assert.deepEqual(await f.call('github-read-issue', { ...issue, repo: 'private' }, undefined), { status: 403, body: { error: 'tool-unavailable' } });
+  const pass = await f.issue(f.service, { ...f.body, taskUID: 'child', parentTaskUID: 'task', tools: ['github-list-issues'] });
+  assert.notEqual((await f.service.handle('/v1/task-tools/github-read-issue', pass, issue, context())).status, 200);
+  assert.equal((await f.call('github-read-issue', { ...issue, number: 0 }, undefined)).status, 403); assert.equal(f.requests.length, 2);
 });
