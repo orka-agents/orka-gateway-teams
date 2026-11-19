@@ -55,6 +55,16 @@ test('real listener accepts only dedicated issuance bearer and exact #1110 body/
   assert.ok(f.logs.includes('grant-binding-conflict'));
 });
 
+test('the real listener logs a spent or expired pass as a fixed pass refusal', async t => {
+  const f = await fixture(t); const spent = await f.issue();
+  assert.equal((await f.post('/v1/task-tools/workiq', spent.pass, { question: 'Question' })).status, 200);
+  assert.deepEqual(f.logs.filter(l => l.startsWith('task-tool-refused')), [], 'a served call logs no refusal');
+  assert.notEqual((await f.post('/v1/task-tools/workiq', spent.pass, { question: 'Again' })).status, 200);
+  const expired = await f.issue(); f.advance(290_001);
+  assert.notEqual((await f.post('/v1/task-tools/workiq', expired.pass, { question: 'Late' })).status, 200);
+  assert.deepEqual(f.logs.filter(l => l.startsWith('task-tool-refused')), ['task-tool-refused workiq pass', 'task-tool-refused workiq pass']);
+  assert.equal(f.w.bodies.length, 1);
+});
 test('authenticated Work IQ can finish after the old nine-second provider budget', { timeout: 20000 }, async t => {
   const f = await fixture(t); const pass = await f.issue();
   f.w.behavior((_req, res, body) => { setTimeout(() => res.end(JSON.stringify(completed(body.id))), 11000); });

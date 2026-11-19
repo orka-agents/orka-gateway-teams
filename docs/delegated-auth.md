@@ -411,9 +411,9 @@ preserve the existing 20 KiB message budget; full diffs and patches are not stor
 
 A refused task-tool call still answers only `tool-unavailable` (or `signin-required`),
 but stderr gets one line naming where it stopped, with no values:
-`teams-ingress: task-tool-refused <tool> <reason>`, where reason is `pass`, `arguments`,
+`teams-ingress: task-tool-refused <tool> <reason>`, where reason is `pass` (spent, expired or unknown), `arguments`,
 `grant`, `signin`, `pin`, `storage`, `authority` (lease, grant or deadline no longer
-current), `unavailable`, `output`, `github-<code>`, `account-<code>` or `error`.
+current), `busy`, `unavailable`, `output`, `github-<code>`, `account-<code>` or `error`.
 A refused proposal logs one more line before that one:
 `teams-ingress: pull-request-proposal-refused <step>`. The step is `grant`, `arguments`,
 `storage`, `replay` (same operation, different arguments), `github-identity`, `output`,

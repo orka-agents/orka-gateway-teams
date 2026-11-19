@@ -46,6 +46,7 @@ export function createTaskService(options: {
   const purge = () => { for (const [k, p] of passes) if (p.expiresAt <= now()) passes.delete(k); };
   const targetFor = (token: string) => { const hash = digest(token); return targets.find(t => timingSafeEqual(t.expected, hash)); };
   const passKey = (token: string) => digest(token).toString('hex');
+  const logRefusal = (tool: string | undefined, reason: string) => { if (tool) options.log?.(`task-tool-refused ${tool} ${reason}`); };
   const toolFor = (path: string) => ['workiq', ...(options.github ? githubTools : [])].find(t => path === `/v1/task-tools/${t}`);
   async function githubLive(grant: TaskGrant, ctx: DirectoryContext) {
     if (!grant.githubGeneration || !options.github) return false;
@@ -58,8 +59,11 @@ export function createTaskService(options: {
     return options.github.auth.safeOutput(text) && await options.github.accounts.safeOutput({ objectId: grant.objectId }, a.generation, text, ctx);
   }
   function authenticate(path: string, token: string): boolean {
-    if (closed || !options.authority.allowed()) { clear(); return false; } purge();
-    return path === '/v1/task-passes' ? !!targetFor(token) : toolFor(path) !== undefined && passes.has(passKey(token));
+    if (closed || !options.authority.allowed()) { clear(); logRefusal(toolFor(path), 'authority'); return false; } purge();
+    if (path === '/v1/task-passes') return !!targetFor(token);
+    // A spent, expired or unknown pass stops here, before handle().
+    const tool = toolFor(path); if (tool && !passes.has(passKey(token))) { logRefusal(tool, 'pass'); return false; }
+    return tool !== undefined;
   }
   async function issue(token: string, input: unknown, ctx: DirectoryContext): Promise<TaskReply> {
     const target = targetFor(token); if (!target) return refusal('tool-unavailable', 401);
@@ -82,7 +86,7 @@ export function createTaskService(options: {
   }
   async function call(tool: string, token: string, input: unknown, supplied: DirectoryContext, operation?: string): Promise<TaskReply> {
     const writing = writeTool(tool); const key = passKey(token); const pass = passes.get(key); passes.delete(key); // Consume before any await, including storage/renewal.
-    const refused = (reason: string, error = 'tool-unavailable', status = writing ? 503 : 403) => { options.log?.(`task-tool-refused ${tool} ${reason}`); return refusal(error, status); };
+    const refused = (reason: string, error = 'tool-unavailable', status = writing ? 503 : 403) => { logRefusal(tool, reason); return refusal(error, status); };
     if (!pass || pass.expiresAt <= now() || !pass.grant.binding || pass.grant.binding.deadline <= now()) return refused('pass');
     const frozen = pass.grant;
     let args: unknown;
@@ -147,14 +151,14 @@ export function createTaskService(options: {
   return {
     authenticate,
     handle(path: string, token: string, input: unknown, supplied: DirectoryContext, operation?: string): Promise<TaskReply> {
-      if (!active(supplied)) return Promise.resolve(refusal('tool-unavailable', writeTool(toolFor(path) ?? '') ? 503 : 403));
-      if (work.size >= 4) return Promise.resolve(refusal('tool-unavailable', 503));
+      if (!active(supplied)) { logRefusal(toolFor(path), 'authority'); return Promise.resolve(refusal('tool-unavailable', writeTool(toolFor(path) ?? '') ? 503 : 403)); }
+      if (work.size >= 4) { logRefusal(toolFor(path), 'busy'); return Promise.resolve(refusal('tool-unavailable', 503)); }
       const ctx = { ...supplied, signal: AbortSignal.any([supplied.signal, shutdown.signal]), authorizeWrite: () => !closed && options.authority.allowed() && supplied.authorizeWrite?.() !== false };
       const pending = Promise.resolve().then(() => {
         const tool = toolFor(path);
-        if (!active(ctx)) return refusal('tool-unavailable', writeTool(tool ?? '') ? 503 : 403);
+        if (!active(ctx)) { logRefusal(tool, 'authority'); return refusal('tool-unavailable', writeTool(tool ?? '') ? 503 : 403); }
         return path === '/v1/task-passes' ? issue(token, input, ctx) : tool ? call(tool, token, input, ctx, operation) : refusal();
-      }).catch(() => refusal('tool-unavailable', writeTool(toolFor(path) ?? '') ? 503 : 403));
+      }).catch(() => { logRefusal(toolFor(path), 'error'); return refusal('tool-unavailable', writeTool(toolFor(path) ?? '') ? 503 : 403); });
       work.add(pending); void pending.then(() => work.delete(pending)); return pending;
     },
     async close(): Promise<void> { closed = true; clear(); shutdown.abort(); options.authority.lost.removeEventListener('abort', clear); await Promise.allSettled(work); await provider.close(); },
