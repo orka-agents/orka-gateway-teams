@@ -287,19 +287,28 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     return v;
   }
   return {
-    visitRecoverableProposals(ctx: DirectoryContext, visit: (p: Proposal) => Promise<void>): Promise<void> {
-      return run(ctx, async c => {
-        if (provider !== 'workiq') bad('invalid-input'); const seen = new Set<string>();
-        await table.visitProposals(c, async encrypted => {
-          const doc = unseal(encrypted);
-          const id = doc.kind === 'proposal' ? doc.proposal.id : doc.kind === 'proposal-selector' && doc.state === 'claimed' ? doc.proposalId : undefined;
-          if (!id || seen.has(id)) return;
-          const version = await proposalVersion(id, c); const p = version?.proposal;
-          if (!p?.claim || p.claim.decision === 'revise') return;
-          // The service owns projection repair, after excluding its live claims/effects.
-          seen.add(id); await visit(p); check(c);
+    async visitRecoverableProposals(context: DirectoryContext, visit: (p: Proposal) => Promise<void>): Promise<void> {
+      // Read and decode one page per slot, then visit it with no slot held: recovery
+      // never stacks its scan on its visits, and a failed later page keeps earlier progress.
+      const ctx = { ...context }; const nextPage = table.proposalPages(); const seen = new Set<string>();
+      for (;;) {
+        const found = await run(ctx, async c => {
+          if (provider !== 'workiq') bad('invalid-input');
+          const rows = await nextPage(c); if (!rows) return undefined; const claimed: Proposal[] = [];
+          for (const encrypted of rows) {
+            const doc = unseal(encrypted);
+            const id = doc.kind === 'proposal' ? doc.proposal.id : doc.kind === 'proposal-selector' && doc.state === 'claimed' ? doc.proposalId : undefined;
+            if (!id || seen.has(id)) continue;
+            const version = await proposalVersion(id, c); const p = version?.proposal;
+            if (!p?.claim || p.claim.decision === 'revise') continue;
+            seen.add(id); claimed.push(p);
+          }
+          return claimed;
         });
-      });
+        if (!found) return;
+        // The service owns projection repair, after excluding its live claims/effects.
+        for (const p of found) { await visit(p); check(ctx); }
+      }
     },
     proposalWriteOutcome(p: Proposal, ctx: DirectoryContext): Promise<ProposalOutcome | undefined> {
       return run(ctx, async c => {
