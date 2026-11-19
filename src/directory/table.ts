@@ -180,26 +180,37 @@ export function createNativeTable<K extends object, V, R>(input: DirectoryBindin
       return { kind: (response.status === 204 || (tag === undefined && response.status === 201)) && !response.body.length ? 'ack' : 'uncertain' };
     });
   }
-  function list(context: DirectoryContext, armedOnly = false, visit?: (row: R) => Promise<void>, proposalsOnly = false) {
+  // One traversal's guards span its pages; each call reads the next page within the caller's slot.
+  function pages(armedOnly: boolean, proposalsOnly: boolean) {
+    const seenRows = new Set<string>(); const seenCursors = new Set<string>();
+    let next: ReturnType<typeof cursor>; let size = 0; let count = 0; let done = false;
+    return async (ctx: DirectoryContext): Promise<R[] | undefined> => {
+      if (done) return undefined; if (count++ >= 1000) throw unready();
+      const response = await native(query(undefined, armedOnly, next, proposalsOnly), 'GET', ctx);
+      if (response.status !== 200) throw failed();
+      size += response.body.length;
+      if (size > 32 * 1024 * 1024) throw unready();
+      const rows = page(response, 4);
+      for (const row of rows) {
+        const key = codec.row(row);
+        if (seenRows.has(key) || armedOnly && !codec.armed(row) || proposalsOnly && (key < 'proposal_' || key >= 'proposal`')) throw corrupt();
+        seenRows.add(key); if (seenRows.size > 100000) throw unready();
+      }
+      next = cursor(response); if (!next) done = true;
+      else { const serialized = JSON.stringify(next); if (seenCursors.has(serialized)) throw unready(); seenCursors.add(serialized); }
+      return rows;
+    };
+  }
+  function list(context: DirectoryContext, armedOnly = false, visit?: (row: R) => Promise<void>) {
     return run(context, async ctx => {
-      const rows: R[] = []; const seenRows = new Set<string>(); const seenCursors = new Set<string>();
-      let next: ReturnType<typeof cursor>; let size = 0;
-      for (let count = 0; count < 1000; count++) {
-        const response = await native(query(undefined, armedOnly, next, proposalsOnly), 'GET', ctx);
-        if (response.status !== 200) throw failed();
-        size += response.body.length;
-        if (size > 32 * 1024 * 1024) throw unready();
-        for (const row of page(response, 4)) {
-          const key = codec.row(row);
-          if (seenRows.has(key) || armedOnly && !codec.armed(row) || proposalsOnly && (key < 'proposal_' || key >= 'proposal`')) throw corrupt();
-          seenRows.add(key); if (seenRows.size > 100000) throw unready();
+      const rows: R[] = []; const nextPage = pages(armedOnly, false);
+      for (let found = await nextPage(ctx); found; found = await nextPage(ctx)) {
+        for (const row of found) {
           // Recover as we traverse: an exhausted later page must not erase progress.
           if (visit) { await visit(row); usable(ctx); } else rows.push(row);
         }
-        next = cursor(response); if (!next) return rows;
-        const serialized = JSON.stringify(next); if (seenCursors.has(serialized)) throw unready(); seenCursors.add(serialized);
       }
-      throw unready();
+      return rows;
     });
   }
   return Object.freeze({
@@ -235,8 +246,8 @@ export function createNativeTable<K extends object, V, R>(input: DirectoryBindin
       return mutation(key, value, context, tag);
     },
     list,
-    // Fixed internal account-row range, never caller-controlled OData.
-    visitProposals: (context: DirectoryContext, visit: (row: R) => Promise<void>) => list(context, false, visit, true),
+    // Fixed internal account-row range, never caller-controlled OData. Each page holds a slot only while it is read.
+    proposalPages() { const nextPage = pages(false, true); return (context: DirectoryContext) => run(context, nextPage); },
     close() {
       closed = true;
       for (const controller of cancellations) controller.abort();

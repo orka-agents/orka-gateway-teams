@@ -56,10 +56,10 @@ test('server_side_range_excludes_other_provider_rows_and_obeys_continuations wit
   assert.ok(queries.every(r => r.url.searchParams.get('$filter')?.endsWith("and RowKey ge 'proposal_' and RowKey lt 'proposal`'")));
   assert.equal(f.requests.length, 0);
 });
-test('recovery visits leave the scan slot free for live store work', async t => {
+test('recovery visits hold no scan slot, leaving live reads and the disconnect reserve', async t => {
   const f = await decisionsFixture(t); await claim(f); const store = f.open(); let visits = 0;
   await store.visitRecoverableProposals(context(), async p => {
-    visits++; await Promise.all([1, 2, 3].map(() => store.getProposal(p.id, context())));
+    visits++; await Promise.all([...[1, 2, 3].map(() => store.getProposal(p.id, context())), store.disconnect(f.subject, context())]);
   });
   assert.equal(visits, 1);
 });
