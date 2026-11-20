@@ -151,4 +151,10 @@ test('a target task timeout goes on the next epoch\'s Binding; earlier epochs wi
   // A Binding whose timeout changed after it was recorded is still a conflict.
   bindings.get(name(1)).spec.taskDefaults.timeout = '24h';
   await assert.rejects(provisioner.check(second, context), { category: 'binding-conflict' });
+  // A move interrupted before its directory write, then retried after the timeout was configured, adopts the Binding it created.
+  bindings.delete(name(1)); bindings.set(name(1), { ...structuredClone(original), metadata: { ...original.metadata, name: name(1), uid: 'uid-1' }, spec: spec(1) });
+  const adopted = await provisioner.reconcile({ ...base, bindingName: name(1), epoch: 1, state: 'reserved' }, context);
+  assert.deepEqual([adopted.uid, adopted.spec], ['uid-1', spec(1)]);
+  bindings.get(name(1)).spec.priority = 9;
+  await assert.rejects(provisioner.reconcile({ ...base, bindingName: name(1), epoch: 1, state: 'reserved' }, context), { category: 'binding-conflict' });
 });

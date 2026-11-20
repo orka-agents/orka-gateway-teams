@@ -26,6 +26,10 @@ function metadata(value: Record<string, unknown>, kind: string, version: string,
   if (value.apiVersion !== version || value.kind !== kind || meta.namespace !== namespace || meta.name !== name || meta.deletionTimestamp !== undefined) conflict();
   return meta;
 }
+/** Task defaults don't route: an epoch created before a timeout change keeps its own. */
+function routing(spec: Record<string, unknown>): Record<string, unknown> {
+  const { taskDefaults: _taskDefaults, ...rest } = spec; return rest;
+}
 function ready(value: Record<string, unknown>, current: number): boolean {
   const status = object(value.status ?? {}); return status.ready === true && status.observedGeneration === current;
 }
@@ -87,11 +91,9 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
     if (!Number.isSafeInteger(epoch) || (epoch as number) < 0 || (epoch as number) > current + 1 || epoch === current ||
         meta.name !== bindingName(value.scope, value.conversationId, value.identityDigest, epoch as number)) return false;
     const annotations = object(meta.annotations ?? {});
-    // Task defaults don't route, and an epoch created before a timeout change keeps its own.
-    const { taskDefaults: _expected, ...expected } = desired({ ...value, epoch, bindingName: meta.name } as ConnectionRecord).spec;
-    const { taskDefaults: _actual, ...actual } = object(binding.spec);
+    const expected = desired({ ...value, epoch, bindingName: meta.name } as ConnectionRecord).spec;
     return annotations[digestMarker] === target.identityDigest && annotations[gatewayMarker] === target.gatewayUid &&
-      canonicalJSON(actual) === canonicalJSON(expected);
+      canonicalJSON(routing(object(binding.spec))) === canonicalJSON(routing(expected));
   }
   async function overlap(value: ConnectionRecord, context: KubernetesContext): Promise<void> {
     active(context); const bindings = await client.listBindings(context); active(context);
@@ -107,8 +109,9 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
   function evidence(value: ConnectionRecord, binding: Record<string, unknown>): BindingEvidence {
     const meta = metadata(binding, 'GatewayBinding', apiVersion, namespace, value.bindingName);
     const uid = identity(meta.uid); const current = generation(meta.generation); const spec = object(binding.spec);
-    const expected = value.state === 'provisioned' ? value.binding.spec : desired(value).spec;
-    if (canonicalJSON(spec) !== canonicalJSON(expected)) conflict();
+    // A recorded Binding must match exactly. An unrecorded one may predate a timeout change; it keeps its own.
+    if (value.state === 'provisioned' ? canonicalJSON(spec) !== canonicalJSON(value.binding.spec) :
+      canonicalJSON(routing(spec)) !== canonicalJSON(routing(desired(value).spec))) conflict();
     if (value.state === 'provisioned' && (uid !== value.binding.uid || current !== value.binding.generation)) conflict();
     const annotations = object(meta.annotations);
     if (annotations[digestMarker] !== target.identityDigest || annotations[gatewayMarker] !== target.gatewayUid) conflict();
