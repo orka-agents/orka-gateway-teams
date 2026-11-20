@@ -33,7 +33,9 @@ export function createTaskService(options: {
   auth: { exchange(token: string, ctx: DirectoryContext): Promise<AccountTokens>; refresh(token: string, ctx: DirectoryContext): Promise<AccountTokens> };
   github?: { accounts: AccountStore; auth: Pick<ReturnType<typeof createGitHub>, 'refresh' | 'tool' | 'safeOutput'> };
   proposals?: ReturnType<typeof createPullRequestService>;
-  workiq?: Parameters<typeof createWorkIQ>[0]; now?: () => number; privateCredentials?: readonly string[]; log?(category: 'grant-binding-conflict'): void;
+  workiq?: Parameters<typeof createWorkIQ>[0]; now?: () => number; privateCredentials?: readonly string[];
+  /** Fixed categories only: tool names, refusal steps and error codes, never values. */
+  log?(category: string): void;
 }) {
   const now = options.now ?? Date.now; const provider = createWorkIQ(options.workiq);
   const targets = options.targets.map(t => ({ ...t, expected: digest(t.taskPassToken) }));
@@ -44,6 +46,7 @@ export function createTaskService(options: {
   const purge = () => { for (const [k, p] of passes) if (p.expiresAt <= now()) passes.delete(k); };
   const targetFor = (token: string) => { const hash = digest(token); return targets.find(t => timingSafeEqual(t.expected, hash)); };
   const passKey = (token: string) => digest(token).toString('hex');
+  const logRefusal = (tool: string | undefined, reason: string) => { if (tool) options.log?.(`task-tool-refused ${tool} ${reason}`); };
   const toolFor = (path: string) => ['workiq', ...(options.github ? githubTools : [])].find(t => path === `/v1/task-tools/${t}`);
   async function githubLive(grant: TaskGrant, ctx: DirectoryContext) {
     if (!grant.githubGeneration || !options.github) return false;
@@ -56,8 +59,11 @@ export function createTaskService(options: {
     return options.github.auth.safeOutput(text) && await options.github.accounts.safeOutput({ objectId: grant.objectId }, a.generation, text, ctx);
   }
   function authenticate(path: string, token: string): boolean {
-    if (closed || !options.authority.allowed()) { clear(); return false; } purge();
-    return path === '/v1/task-passes' ? !!targetFor(token) : toolFor(path) !== undefined && passes.has(passKey(token));
+    if (closed || !options.authority.allowed()) { clear(); logRefusal(toolFor(path), 'authority'); return false; } purge();
+    if (path === '/v1/task-passes') return !!targetFor(token);
+    // A spent, expired or unknown pass stops here, before handle().
+    const tool = toolFor(path); if (tool && !passes.has(passKey(token))) { logRefusal(tool, 'pass'); return false; }
+    return tool !== undefined;
   }
   async function issue(token: string, input: unknown, ctx: DirectoryContext): Promise<TaskReply> {
     const target = targetFor(token); if (!target) return refusal('tool-unavailable', 401);
@@ -80,11 +86,12 @@ export function createTaskService(options: {
   }
   async function call(tool: string, token: string, input: unknown, supplied: DirectoryContext, operation?: string): Promise<TaskReply> {
     const writing = writeTool(tool); const key = passKey(token); const pass = passes.get(key); passes.delete(key); // Consume before any await, including storage/renewal.
-    if (!pass || pass.expiresAt <= now() || !pass.grant.binding || pass.grant.binding.deadline <= now()) return refusal('tool-unavailable', writing ? 503 : 403);
+    const refused = (reason: string, error = 'tool-unavailable', status = writing ? 503 : 403) => { logRefusal(tool, reason); return refusal(error, status); };
+    if (!pass || pass.expiresAt <= now() || !pass.grant.binding || pass.grant.binding.deadline <= now()) return refused('pass');
     const frozen = pass.grant;
     let args: unknown;
     try { args = tool === 'workiq' ? workIQArguments(input) : githubArguments(tool as GitHubTool, input); if (writing) operationKey(operation); }
-    catch { return refusal('tool-unavailable', writing ? 400 : 403); }
+    catch { return refused('arguments', 'tool-unavailable', writing ? 400 : 403); }
     const guards: ReturnType<AccountStore['watch']>[] = [];
     const ctx = { ...supplied, deadline: Math.min(supplied.deadline, performance.now() + frozen.binding!.deadline - now()),
       authorizeWrite: () => active(supplied) && pass.expiresAt > now() && frozen.binding!.deadline > now() && guards.every(g => g.active()) };
@@ -100,35 +107,36 @@ export function createTaskService(options: {
     };
     let acquired: Awaited<ReturnType<AccountStore['acquire']>> | undefined;
     try {
-      if (!await live() || tool !== 'workiq' && !frozen.githubGeneration) return refusal('signin-required', writing ? 503 : 403);
+      if (!await live() || tool !== 'workiq' && !frozen.githubGeneration) return refused('grant', 'signin-required');
       const subject = { objectId: frozen.objectId }; const g = options.github;
       acquired = tool === 'workiq' ? await options.accounts.acquire(subject, frozen.generation, assertion => options.auth.exchange(assertion, ctx), ctx,
         refreshToken => options.auth.refresh(refreshToken, ctx)) : await g!.accounts.acquire(subject, frozen.githubGeneration!, async () => { throw new Error(); }, ctx,
           refreshToken => g!.auth.refresh(refreshToken, ctx));
-      if (acquired.kind !== 'token') return refusal('signin-required', writing ? 503 : 403);
+      if (acquired.kind !== 'token') return refused('signin', 'signin-required');
       // Own refresh must finish first. From here neither account may mutate across awaits.
       guards.push(options.accounts.watch(subject));
       if (frozen.githubGeneration && g) guards.push(g.accounts.watch(subject));
       // Selected acquisition already pins its row. Fence late UNKNOWN writes on
       // the other required account too; uncertainty/conflict refuses, never retries.
       if (tool !== 'workiq' ? !await options.accounts.pin(subject, frozen.generation, ctx) :
-        frozen.githubGeneration && g && !await g.accounts.pin(subject, frozen.githubGeneration, ctx)) return refusal('signin-required', writing ? 503 : 403);
+        frozen.githubGeneration && g && !await g.accounts.pin(subject, frozen.githubGeneration, ctx)) return refused('pin', 'signin-required');
       // A lookup failure may conceal an earlier successful effect: write storage uncertainty is always503.
       const proposing = tool === 'github-propose-pull-request';
       const reservation = writing && !proposing ? await options.accounts.reserveWrite(frozen, tool, operation!, args, ctx) : undefined;
-      if (reservation?.kind === 'uncertain') return refusal('tool-unavailable', 503);
-      if (!await options.authority.revalidate() || !await live()) return refusal('tool-unavailable', writing ? 503 : 403);
+      if (reservation?.kind === 'uncertain') return refused('storage');
+      if (!await options.authority.revalidate() || !await live()) return refused('authority');
       if (reservation?.kind === 'done') {
-        return await safeOutput(frozen, reservation.text, token, acquired.accessToken, ctx) && await live() ?
-          { status: 200, body: { text: reservation.text } } : refusal('tool-unavailable', 503);
+        if (!await safeOutput(frozen, reservation.text, token, acquired.accessToken, ctx)) return refused('output');
+        return await live() ? { status: 200, body: { text: reservation.text } } : refused('authority');
       }
-      if (proposing && !options.proposals) return refusal('tool-unavailable', 503);
+      if (proposing && !options.proposals) return refused('unavailable');
       const result = proposing ? await options.proposals!.propose(frozen, args as Record<string, string>, operation!, acquired.accessToken, ctx,
         text => safeOutput(frozen, text, token, acquired!.kind === 'token' ? acquired!.accessToken : '', ctx)) :
         tool === 'workiq' ? await provider.ask(args, acquired.accessToken, ctx) : await g!.auth.tool(tool as GitHubTool, args, acquired.accessToken, ctx);
-      if (!await safeOutput(frozen, result.text, token, acquired.accessToken, ctx) || !await live()) return refusal('tool-unavailable', writing ? 503 : 403);
+      if (!await safeOutput(frozen, result.text, token, acquired.accessToken, ctx)) return refused('output');
+      if (!await live()) return refused('authority');
       if (reservation?.kind === 'send') await options.accounts.completeWrite(reservation.id, result.text, ctx);
-      if (!active(ctx)) return refusal('tool-unavailable', writing ? 503 : 403);
+      if (!active(ctx)) return refused('authority');
       return { status: 200, body: result };
     } catch (e) {
       // Native handoff is over; invalidating its rejected credential must not fence itself.
@@ -136,20 +144,21 @@ export function createTaskService(options: {
       if (e instanceof GitHubError && e.code === 'unauthorized' && tool !== 'workiq' && acquired?.kind === 'token') {
         try { await options.github!.accounts.invalidate({ objectId: frozen.objectId }, frozen.githubGeneration!, acquired.accessToken, ctx); } catch { /* No retry or newer-token invalidation. */ }
       }
-      return refusal('tool-unavailable', e instanceof AccountError && e.code === 'operation-conflict' ? 403 : writing ? 503 : 403);
+      return refused(e instanceof AccountError ? `account-${e.code}` : e instanceof GitHubError ? `github-${e.code}` : 'error',
+        'tool-unavailable', e instanceof AccountError && e.code === 'operation-conflict' ? 403 : writing ? 503 : 403);
     } finally { for (const guard of guards) guard.release(); }
   }
   return {
     authenticate,
     handle(path: string, token: string, input: unknown, supplied: DirectoryContext, operation?: string): Promise<TaskReply> {
-      if (!active(supplied)) return Promise.resolve(refusal('tool-unavailable', writeTool(toolFor(path) ?? '') ? 503 : 403));
-      if (work.size >= 4) return Promise.resolve(refusal('tool-unavailable', 503));
+      if (!active(supplied)) { logRefusal(toolFor(path), 'authority'); return Promise.resolve(refusal('tool-unavailable', writeTool(toolFor(path) ?? '') ? 503 : 403)); }
+      if (work.size >= 4) { logRefusal(toolFor(path), 'busy'); return Promise.resolve(refusal('tool-unavailable', 503)); }
       const ctx = { ...supplied, signal: AbortSignal.any([supplied.signal, shutdown.signal]), authorizeWrite: () => !closed && options.authority.allowed() && supplied.authorizeWrite?.() !== false };
       const pending = Promise.resolve().then(() => {
         const tool = toolFor(path);
-        if (!active(ctx)) return refusal('tool-unavailable', writeTool(tool ?? '') ? 503 : 403);
+        if (!active(ctx)) { logRefusal(tool, 'authority'); return refusal('tool-unavailable', writeTool(tool ?? '') ? 503 : 403); }
         return path === '/v1/task-passes' ? issue(token, input, ctx) : tool ? call(tool, token, input, ctx, operation) : refusal();
-      }).catch(() => refusal('tool-unavailable', writeTool(toolFor(path) ?? '') ? 503 : 403));
+      }).catch(() => { logRefusal(toolFor(path), 'error'); return refusal('tool-unavailable', writeTool(toolFor(path) ?? '') ? 503 : 403); });
       work.add(pending); void pending.then(() => work.delete(pending)); return pending;
     },
     async close(): Promise<void> { closed = true; clear(); shutdown.abort(); options.authority.lost.removeEventListener('abort', clear); await Promise.allSettled(work); await provider.close(); },

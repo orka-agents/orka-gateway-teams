@@ -13,6 +13,8 @@ import { canonicalJSON } from '../directory/codec.js';
 
 export function createPullRequestService(options: { accounts: AccountStore; githubAccounts: AccountStore;
   github: Pick<ReturnType<typeof createGitHub>, 'readProposalFacts' | 'readUserId' | 'readHead' | 'findPullRequest' | 'openProposedPullRequest' | 'refresh'>; scope: DirectoryScope; now?: () => number;
+  /** Fixed categories only: the step a proposal stopped at, never values. */
+  log?(category: string): void;
   postProposal(proposal: Proposal, ctx: DirectoryContext): Promise<'delivered' | 'uncertain' | 'unavailable'>;
   decisions?: { authority: LeaseAuthority; connected(p: Proposal, ctx: DirectoryContext): Promise<boolean>;
     admitRevision?(p: Proposal, ctx: ExchangeContext): Promise<Exclude<RevisionAdmission, 'pending'>>;
@@ -178,15 +180,18 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
 
     async propose(grant: TaskGrant, input: Record<string, string>, operation: string, token: string, ctx: DirectoryContext,
       safeOutput: (text: string) => Promise<boolean>): Promise<{ text: string }> {
+      let step = 'grant';
+      try {
       if (!grant.proposalOrigin || !grant.binding || !grant.githubGeneration || grant.proposalOrigin.objectId !== grant.objectId) throw new GitHubError();
-      const args = githubArguments('github-propose-pull-request', input);
+      step = 'arguments'; const args = githubArguments('github-propose-pull-request', input);
       const canonicalArgs = { ...args, body: args.body ?? '' };
       const id = proposalIdentity(grant.ref, grant.binding.taskUID, operation);
-      let p = (await options.accounts.getProposal(id, ctx))?.proposal;
-      if (p && canonicalJSON(proposalArgs(p)) !== canonicalJSON(canonicalArgs)) throw new AccountError('operation-conflict');
+      step = 'storage'; let p = (await options.accounts.getProposal(id, ctx))?.proposal;
+      step = 'replay'; if (p && canonicalJSON(proposalArgs(p)) !== canonicalJSON(canonicalArgs)) throw new AccountError('operation-conflict');
       if (p?.claim?.decision === 'revise') return { text: 'This approval request is no longer pending. Ask again for a new card.' };
       if (!p) {
-        const facts = await options.github.readProposalFacts(args, token, ctx);
+        step = 'github-facts'; const facts = await options.github.readProposalFacts(args, token, ctx);
+        step = 'github-identity';
         if (facts.githubId !== await options.githubAccounts.providerIdentity({ objectId: grant.objectId }, grant.githubGeneration, ctx)) throw new GitHubError();
         const createdAt = now();
         p = { ...grant.proposalOrigin, ...facts, ...options.scope, ...canonicalArgs, id, revision: 1, state: 'pending',
@@ -194,13 +199,14 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
           grantRef: grant.ref, taskUID: grant.binding.taskUID, createdAt, expiresAt: createdAt + 3_600_000, payloadDigest: '' } as Proposal;
         p.payloadDigest = proposalDigest(p);
       }
-      if (!await safeOutput(proposalOutput(p))) throw new GitHubError();
-      p = await options.accounts.reserveProposal({ ...p, state: 'pending' }, operation, ctx);
+      step = 'output'; if (!await safeOutput(proposalOutput(p))) throw new GitHubError();
+      step = 'storage'; p = await options.accounts.reserveProposal({ ...p, state: 'pending' }, operation, ctx);
       if (p.state !== 'pending') return { text: 'This approval request is no longer pending. Ask again for a new card.' };
-      const sent = await options.postProposal(p, ctx);
+      step = 'card'; const sent = await options.postProposal(p, ctx);
       if (sent === 'unavailable') throw new GitHubError();
       return { text: sent === 'delivered' ? 'Approval card sent to the requester.' :
         'The approval request is saved, but I could not confirm the card arrived. Check this conversation before asking again.' };
+      } catch (e) { options.log?.(`pull-request-proposal-refused ${step}${e instanceof GitHubError && e.step ? `-${e.step}` : ''}`); throw e; }
     },
   };
 }

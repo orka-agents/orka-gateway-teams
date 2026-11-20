@@ -9,7 +9,8 @@ import { githubTools } from './grants.js';
 import type { GitHubTool } from './grants.js';
 import type { Proposal, ProposalFacts, ProposalResult } from './pull-request-proposal.js';
 
-export class GitHubError extends Error { constructor(readonly code = 'unavailable') { super('GitHub sign-in unavailable'); } }
+/** step is a fixed proposal-read stage for logs, never a value. */
+export class GitHubError extends Error { constructor(readonly code = 'unavailable', readonly step?: string) { super('GitHub sign-in unavailable'); } }
 export function githubArguments(tool: GitHubTool, input: unknown): Record<string, string> {
   const keys = tool === 'github-read-file' ? ['path', 'ref'] : tool === 'github-list-issues' ? ['state'] : tool === 'github-read-issue' ? [] :
     tool === 'github-create-issue' ? ['title', 'body'] : ['title', 'body', 'head', 'base'];
@@ -169,18 +170,19 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
     },
     safeOutput: (text: string) => !text.includes(config.clientSecret),
     readProposalFacts(args: Record<string, string>, token: string, ctx: DirectoryContext): Promise<ProposalFacts> {
+      let step = 'start';
       const pending = (async () => {
         active(ctx); if (!credential(token) || work.size >= 4) throw failure(); githubArguments('github-propose-pull-request', args);
         const root = `/repos/${encodeURIComponent(args.owner!)}/${encodeURIComponent(args.repo!)}`;
         const get = async (path: string) => { const v = await json(token, {}, ctx, { path }); active(ctx); if (!object(v)) throw failure(); return v; };
         const sha = (v: unknown) => { if (typeof v !== 'string' || !/^[a-f0-9]{40}$/u.test(v)) throw failure(); return v; };
         const count = (v: unknown) => { if (!Number.isSafeInteger(v) || (v as number) < 0) throw failure(); return v as number; };
-        const user = await get('/user');
+        step = 'user'; const user = await get('/user');
         if (!Number.isSafeInteger(user.id) || (user.id as number) <= 0 || typeof user.login !== 'string' || !/^[A-Za-z0-9-]{1,39}$/u.test(user.login)) throw failure();
-        const ref = await get(`${root}/git/ref/heads/${args.head!.split('/').map(encodeURIComponent).join('/')}`);
+        step = 'head'; const ref = await get(`${root}/git/ref/heads/${args.head!.split('/').map(encodeURIComponent).join('/')}`);
         if (ref.ref !== `refs/heads/${args.head}` || !object(ref.object) || ref.object.type !== 'commit') throw failure();
         const headSHA = sha(ref.object.sha);
-        const first = await get(`${root}/compare/${encodeURIComponent(args.base!)}...${headSHA}?per_page=100&page=1`);
+        step = 'compare'; const first = await get(`${root}/compare/${encodeURIComponent(args.base!)}...${headSHA}?per_page=100&page=1`);
         if (!object(first.base_commit)) throw failure(); const baseSHA = sha(first.base_commit.sha); const total = count(first.total_commits);
         if (!total) throw failure(); let checked = 0;
         const authors = (v: Record<string, unknown>) => {
@@ -190,9 +192,9 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
           }
           checked += v.commits.length;
         };
-        authors(first);
+        step = 'authors'; authors(first);
         while (checked < total) authors(await get(`${root}/compare/${baseSHA}...${headSHA}?per_page=100&page=${checked / 100 + 1}`));
-        if (!Array.isArray(first.files) || first.files.length > 300) throw failure(); let additions = 0; let deletions = 0;
+        step = 'files'; if (!Array.isArray(first.files) || first.files.length > 300) throw failure(); let additions = 0; let deletions = 0;
         const files = first.files.map(file => {
           if (!object(file) || typeof file.filename !== 'string' || !file.filename || Buffer.byteLength(file.filename) > 4096 || /[\p{Cc}\uD800-\uDFFF]/u.test(file.filename)) throw failure();
           const a = count(file.additions); const d = count(file.deletions); additions = count(additions + a); deletions = count(deletions + d);
@@ -200,7 +202,7 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
         });
         return { headSHA, baseSHA, githubId: String(user.id), githubLogin: user.login, commits: total, files: files.slice(0, 10),
           fileCount: files.length, additions, deletions, filesComplete: files.length < 300 };
-      })().catch((e: unknown) => { throw e instanceof GitHubError ? e : failure(); });
+      })().catch((e: unknown) => { throw new GitHubError(e instanceof GitHubError ? e.code : 'unavailable', step); });
       work.add(pending); void pending.then(() => work.delete(pending), () => work.delete(pending)); return pending;
     },
     tool(tool: GitHubTool, input: unknown, token: string, ctx: DirectoryContext): Promise<{ text: string }> {
