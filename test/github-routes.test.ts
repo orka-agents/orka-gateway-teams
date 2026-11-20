@@ -44,8 +44,11 @@ test('native GET callback passes unique success/denial fields and exactly one co
   for (const headers of [{}, { cookie: cookie + '; ' + cookie }, { cookie: cookie + '; __Host-github-link=' }, { cookie: '__Host-github-link=wrong' }, { cookie: [cookie, cookie] }]) {
     assert.equal((await call(f.port, '/github/callback?code=c&state=s', 'GET', '', headers)).status, 400);
   }
-  for (const query of ['code=c&state=s&state=t', 'code=c&state=s&unexpected=1', 'code=c&state=s&error=e', 'code=c', 'state=s'])
+  for (const query of ['code=c&state=s&state=t', 'code=c&state=s&unexpected=1&unexpected=2', 'code=c&state=s&error=e', 'code=c&state=s&error=', 'code=&state=s&error=e', 'code=&state=s', 'code=c', 'state=s'])
     assert.equal((await call(f.port, '/github/callback?' + query, 'GET', '', { cookie })).status, 400);
   assert.equal(f.calls.length, before);
+  // GitHub may add parameters the flow doesn't use; they're dropped, never passed on.
+  const extra = await call(f.port, '/github/callback?code=c&state=s&iss=https%3A%2F%2Fgithub.com', 'GET', '', { cookie }); assert.equal(extra.status, 200);
+  assert.deepEqual(f.calls.at(-1)!.fields, [['code', 'c'], ['state', 's']]);
   assert.equal((await call(f.port, '/github/callback?code=c&state=s', 'POST', '', { cookie })).status, 404);
 });

@@ -226,8 +226,14 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     const ctx = { ...supplied, deadline: Math.min(supplied.deadline, performance.now() + 4000), signal: AbortSignal.any([supplied.signal, controller.signal]), authorizeWrite: () => active(ctx) };
     try {
       assertActive(ctx); if (!record(input) || input.type !== 'invoke' || input.name !== 'adaptiveCard/action' || !record(input.conversation) || !record(input.from)) return denied;
-      const value = object(input.value, ['action', 'trigger']); const action = object(value.action, ['type', 'verb', 'data', 'id', 'title']);
-      const revise = action.verb === 'pr-revise'; const data = object(action.data, ['proposal', 'rev', 'digest', ...(revise ? ['note'] : [])]);
+      // Teams adds fields of its own (for example trigger and isRefresh in data); read only the known ones and log the names of the rest.
+      const pick = (v: unknown, keys: readonly string[], where: string) => {
+        const all = object(v); const extra = Object.keys(all).filter(k => !keys.includes(k));
+        if (extra.length) process.stderr.write(`teams-ingress: card-action-extra ${where} ${extra.map(k => /^[A-Za-z0-9_]{1,32}$/u.test(k) ? k : '?').join(',')}\n`);
+        return Object.fromEntries(keys.filter(k => Object.hasOwn(all, k)).map(k => [k, all[k]]));
+      };
+      const value = pick(input.value, ['action', 'trigger'], 'value'); const action = pick(value.action, ['type', 'verb', 'data', 'id', 'title'], 'action');
+      const revise = action.verb === 'pr-revise'; const data = pick(action.data, ['proposal', 'rev', 'digest', ...(revise ? ['note'] : [])], 'data');
       if (action.type !== 'Action.Execute' || !['pr-refresh', 'pr-approve', 'pr-reject', 'pr-revise'].includes(String(action.verb)) || data.rev !== 1 || typeof data.proposal !== 'string' || typeof data.digest !== 'string' ||
         !supplied.subject.objectId || input.from.aadObjectId !== supplied.subject.objectId) return denied;
       let p = (await options.delegated.accounts.getProposal(data.proposal, ctx))?.proposal;
