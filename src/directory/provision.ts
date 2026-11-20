@@ -66,7 +66,8 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
       spec: { gatewayRef: { name: scope.gatewayName }, agentRef: { name: target.frontAgent.name },
         // Orka routes to the highest-priority ready match, so a later epoch takes over the chat.
         match: { accountId: scope.tenantId, contextId: value.conversationId }, priority: value.epoch ?? 0,
-        senderPolicy: { mode: 'all' }, session: { mode: value.chatKind === 'personal' ? 'context-sender' : 'context' } },
+        senderPolicy: { mode: 'all' }, session: { mode: value.chatKind === 'personal' ? 'context-sender' : 'context' },
+        ...(target.taskTimeout === undefined ? {} : { taskDefaults: { timeout: target.taskTimeout } }) },
     };
   }
   async function gateway(context: KubernetesContext, waitReady: boolean): Promise<void> {
@@ -86,9 +87,11 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
     if (!Number.isSafeInteger(epoch) || (epoch as number) < 0 || (epoch as number) > current + 1 || epoch === current ||
         meta.name !== bindingName(value.scope, value.conversationId, value.identityDigest, epoch as number)) return false;
     const annotations = object(meta.annotations ?? {});
-    const expected = desired({ ...value, epoch, bindingName: meta.name } as ConnectionRecord).spec;
+    // Task defaults don't route, and an epoch created before a timeout change keeps its own.
+    const { taskDefaults: _expected, ...expected } = desired({ ...value, epoch, bindingName: meta.name } as ConnectionRecord).spec;
+    const { taskDefaults: _actual, ...actual } = object(binding.spec);
     return annotations[digestMarker] === target.identityDigest && annotations[gatewayMarker] === target.gatewayUid &&
-      canonicalJSON(object(binding.spec)) === canonicalJSON(expected);
+      canonicalJSON(actual) === canonicalJSON(expected);
   }
   async function overlap(value: ConnectionRecord, context: KubernetesContext): Promise<void> {
     active(context); const bindings = await client.listBindings(context); active(context);

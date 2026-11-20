@@ -120,3 +120,14 @@ for (const kind of ['symlink', 'hardlink', 'public', 'oversized'] as const) test
   }
   assert.throws(() => parseRegistryConfig(f.env), ConfigurationError);
 });
+test('a target task timeout is optional, kept as written and bounded by Orka\'s 24h', () => {
+  assert.equal(snapshotRegistry(registryInput()).targets[0]!.taskTimeout, undefined);
+  for (const value of ['75m', '24h', '1440m']) {
+    const input = registryInput(); (input.targets[0] as Record<string, unknown>).taskTimeout = value;
+    assert.equal(snapshotRegistry(input).targets[0]!.taskTimeout, value);
+  }
+  for (const value of ['0m', '1441m', '25h', '75', '1h30m', ' 75m', 75, '']) {
+    const input = registryInput(); (input.targets[0] as Record<string, unknown>).taskTimeout = value;
+    assert.throws(() => snapshotRegistry(input), ConfigurationError, String(value));
+  }
+});
