@@ -45,7 +45,7 @@ function targetMetadata(input: Record<string, unknown>, config: TableServeConfig
     ...(input.taskTimeout === undefined ? {} : { taskTimeout: taskTimeout(input.taskTimeout) }) };
 }
 // Orka accepts a Binding timeout up to 24h.
-function taskTimeout(value: unknown): string {
+export function taskTimeout(value: unknown): string {
   const match = typeof value === 'string' ? /^([1-9][0-9]{0,3})(m|h)$/u.exec(value) : null;
   if (!match || Number(match[1]) * (match[2] === 'h' ? 60 : 1) > 1440) throw new ConfigurationError();
   return value as string;

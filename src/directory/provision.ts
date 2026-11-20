@@ -1,7 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { identity } from '../ingress/codec.js';
 import type { RegistryTarget } from '../registry/config.js';
-import { snapshotRegistry } from '../registry/config.js';
+import { snapshotRegistry, taskTimeout } from '../registry/config.js';
 import type { createKubernetesReader, KubernetesContext } from '../registry/kubernetes.js';
 import { bindingName, canonicalJSON, snapshotDirectoryRecord } from './codec.js';
 import type { AgentRevision, BindingEvidence, CanonicalValue, ConnectionRecord } from './types.js';
@@ -26,9 +26,13 @@ function metadata(value: Record<string, unknown>, kind: string, version: string,
   if (value.apiVersion !== version || value.kind !== kind || meta.namespace !== namespace || meta.name !== name || meta.deletionTimestamp !== undefined) conflict();
   return meta;
 }
-/** Task defaults don't route: an epoch created before a timeout change keeps its own. */
+/** A timeout doesn't route: an epoch created before a timeout change keeps its own. Any other task default must match. */
 function routing(spec: Record<string, unknown>): Record<string, unknown> {
-  const { taskDefaults: _taskDefaults, ...rest } = spec; return rest;
+  const { taskDefaults, ...rest } = spec;
+  if (taskDefaults === undefined) return rest;
+  const defaults = object(taskDefaults);
+  if (Object.keys(defaults).length !== 1) return spec;
+  try { taskTimeout(defaults.timeout); return rest; } catch { return spec; }
 }
 function ready(value: Record<string, unknown>, current: number): boolean {
   const status = object(value.status ?? {}); return status.ready === true && status.observedGeneration === current;

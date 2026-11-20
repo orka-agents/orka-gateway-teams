@@ -122,9 +122,11 @@ for (const kind of ['symlink', 'hardlink', 'public', 'oversized'] as const) test
 });
 test('a target task timeout is optional, kept as written and bounded by Orka\'s 24h', () => {
   assert.equal(snapshotRegistry(registryInput()).targets[0]!.taskTimeout, undefined);
+  const digest = snapshotRegistry(registryInput()).targets[0]!.identityDigest;
   for (const value of ['75m', '24h', '1440m']) {
     const input = registryInput(); (input.targets[0] as Record<string, unknown>).taskTimeout = value;
     assert.equal(snapshotRegistry(input).targets[0]!.taskTimeout, value);
+    assert.equal(snapshotRegistry(input).targets[0]!.identityDigest, digest, 'a chat keeps its target when the timeout changes');
   }
   for (const value of ['0m', '1441m', '25h', '75', '1h30m', ' 75m', 75, '']) {
     const input = registryInput(); (input.targets[0] as Record<string, unknown>).taskTimeout = value;

@@ -155,6 +155,11 @@ test('a target task timeout goes on the next epoch\'s Binding; earlier epochs wi
   bindings.delete(name(1)); bindings.set(name(1), { ...structuredClone(original), metadata: { ...original.metadata, name: name(1), uid: 'uid-1' }, spec: spec(1) });
   const adopted = await provisioner.reconcile({ ...base, bindingName: name(1), epoch: 1, state: 'reserved' }, context);
   assert.deepEqual([adopted.uid, adopted.spec], ['uid-1', spec(1)]);
+  bindings.get(name(1)).spec.taskDefaults = { timeout: '75m', retryPolicy: { maxRetries: 3 } };
+  await assert.rejects(provisioner.reconcile({ ...base, bindingName: name(1), epoch: 1, state: 'reserved' }, context), { category: 'binding-conflict' });
+  await assert.rejects(provisioner.check(first, context), { category: 'binding-conflict' }, 'a sibling may differ only in its timeout');
+  bindings.get(name(1)).spec.taskDefaults = { timeout: '2h' };
+  assert.equal((await provisioner.reconcile({ ...base, bindingName: name(1), epoch: 1, state: 'reserved' }, context)).uid, 'uid-1');
   bindings.get(name(1)).spec.priority = 9;
   await assert.rejects(provisioner.reconcile({ ...base, bindingName: name(1), epoch: 1, state: 'reserved' }, context), { category: 'binding-conflict' });
 });
