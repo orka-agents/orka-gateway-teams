@@ -137,7 +137,12 @@ export class NativeAdapter implements IHttpServerAdapter {
     if (req.method === 'GET' && req.url!.startsWith('/github/callback?')) {
       if (req.url!.length > 8192) throw new HttpFailure(413);
       const form = new URLSearchParams(req.url!.slice('/github/callback?'.length)); const keys = [...form.keys()];
-      if (keys.some(k => !['code', 'state', 'error', 'error_description', 'error_uri'].includes(k)) || new Set(keys).size !== keys.length ||
+      // GitHub may add parameters this flow doesn't use; ignore them, but log their names so a change is visible.
+      const known = ['code', 'state', 'error', 'error_description', 'error_uri'];
+      const extra = keys.filter(k => !known.includes(k));
+      if (extra.length) process.stderr.write(`teams-ingress: github-callback-extra ${extra.map(k => /^[A-Za-z0-9_]{1,32}$/u.test(k) ? k : '?').join(',')}\n`);
+      for (const k of extra) form.delete(k);
+      if (extra.length > 4 || new Set(keys).size !== keys.length ||
         !form.get('state') || !!form.get('code') === !!form.get('error') || req.headersDistinct.cookie?.length !== 1) throw new HttpFailure(400);
       const cookies = req.headers.cookie!.split(';').map(v => v.trim()).filter(v => v.startsWith('__Host-github-link='));
       const cookie = cookies[0]?.slice('__Host-github-link='.length);
