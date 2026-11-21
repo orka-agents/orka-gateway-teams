@@ -350,3 +350,20 @@ test('card_invoke_actual_wire_body_preserved and extra_card_wrapper_fields_never
   const before = invoked; assert.equal((await post(receiver.port, auth.token({ aud: 'wrong-app' }), body)).status, 401); assert.equal(invoked, before);
   assert.equal((await post(receiver.port, auth.token(), { ...body, conversation: { ...body.conversation, tenantId: 'other' } })).status, 403);
 });
+
+test('a card invoke the sink never sees, or fails on, still logs one fixed line', async t => {
+  const auth = await authFixture(t); let invoked = 0; const output: string[] = [];
+  const receiver = await startReceiver(receiverConfig, { scope, admit() { throw new Error('not a message'); },
+    cardAction: async () => { invoked++; throw new Error('PRIVATE_FAILURE'); } }, auth.dependencies);
+  t.after(() => receiver.stop());
+  const body = activity(); Object.assign(body, { type: 'invoke', name: 'adaptiveCard/action', value: { action: { type: 'Action.Execute', verb: 'pr-approve', data: { note: 'PRIVATE_NOTE' } } } });
+  const stderr = t.mock.method(process.stderr, 'write', (value: unknown) => { output.push(String(value)); return true; });
+  const unsigned = await post(receiver.port, auth.token(), body);
+  body.from.aadObjectId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const failed = await post(receiver.port, auth.token(), body);
+  const foreign = await post(receiver.port, auth.token(), { ...body, conversation: { ...body.conversation, tenantId: 'other' } });
+  stderr.mock.restore();
+  assert.deepEqual([unsigned.status, failed.status, foreign.status, invoked], [403, 403, 403, 1]);
+  assert.deepEqual(output.filter(line => line.includes('card-action')), ['teams-ingress: card-action status=403 outcome=denied-sender\n', 'teams-ingress: card-action status=403 outcome=denied-error\n']);
+  assert.doesNotMatch(output.join(''), /PRIVATE|aaaaaaaa/u);
+});

@@ -130,10 +130,12 @@ async function startPreparedReceiver(config: ReceiverConfig, sink: AdmissionSink
     }
     if (input.type === 'invoke' && input.name === 'adaptiveCard/action' && sink.cardAction) {
       const subject = readPolicySubject(input, config.tenantId);
-      if (!subject.objectId || !controlRecipient(input)) return { status: 403 };
+      // The sink logs every invoke it sees; these two never reach it or leave it without a line.
+      const unseen = (outcome: 'sender' | 'error') => { process.stderr.write(`teams-ingress: card-action status=403 outcome=denied-${outcome}\n`); return { status: 403 }; };
+      if (!subject.objectId || !controlRecipient(input)) return unseen('sender');
       try { return await sink.cardAction(input, Object.freeze({ ...adapter.requestContext, subject,
         delegatedTenant: record(input.channelData) && record(input.channelData.tenant) && input.channelData.tenant.id === config.tenantId,
-        controlRecipient: controlRecipient(input)! })); } catch { return { status: 403 }; }
+        controlRecipient: controlRecipient(input)! })); } catch { return unseen('error'); }
     }
     const converted = convertActivity(input as unknown as Activity, { tenantId: config.tenantId, replyTarget: randomUUID() });
     if (converted.kind === 'invalid') return { status: 400 };

@@ -32,7 +32,7 @@ import { TableError } from '../storage/table/types.js';
 import type { ProviderMessage } from '../outbound/types.js';
 import type { RegistryConfig, RegistryTarget } from './config.js';
 
-type Category = BindingCheckError['category'] | 'graph-unavailable' | 'signin-required' | 'signin-complete' | 'session-renewed';
+type Category = BindingCheckError['category'] | 'graph-unavailable' | 'signin-required' | 'signin-complete' | 'session-renewed' | 'card-action';
 interface DelegatedOptions { accounts: AccountStore; auth: ReturnType<typeof createDelegatedAuth>; apiUri: string; connectionName: string; publicOrigin?: string }
 interface Slot { target: RegistryTarget; inbox: Pick<IngressPort, 'admit'>; provisioner: ReturnType<typeof createBindingProvisioner> }
 interface Options { proposals?: Pick<ReturnType<typeof createPullRequestService>, 'decide' | 'refresh'>; safeOutput?(text: string): boolean; github?: { accounts: AccountStore; auth: ReturnType<typeof createGitHub> }; delegated?: DelegatedOptions; config: RegistryConfig; directory: Directory; slots: readonly Slot[]; authority: LeaseAuthority; active(): boolean;
@@ -220,26 +220,41 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     }
     finally { consumers--; }
   }
+  // One line per card invoke: fixed words, the proposal id and field names only, never what the person or the agent wrote.
   async function cardAction(input: unknown, supplied: ExchangeContext): Promise<{ status: number; body: unknown }> {
+    const started = performance.now(); const seen: CardActionSeen = { stage: options.delegated ? 'busy' : 'unavailable', extra: [] };
+    const result = await handleCardAction(input, supplied, seen);
+    options.log('card-action', seen.targetId, { verb: seen.verb ?? 'unknown', ...(seen.trigger ? { trigger: seen.trigger } : {}),
+      ...(seen.proposal ? { proposal: seen.proposal } : {}), ...cardActionClient(input), status: result.status,
+      outcome: result.status === 200 && seen.state ? seen.state : `denied-${seen.stage}`, ms: Math.round(performance.now() - started),
+      ...(seen.extra.length ? { extra: seen.extra.join(';') } : {}) });
+    return result;
+  }
+  async function handleCardAction(input: unknown, supplied: ExchangeContext, seen: CardActionSeen): Promise<{ status: number; body: unknown }> {
     const denied = { status: 403, body: {} }; if (consumers >= 4 || !options.delegated) return denied; consumers++;
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 4000); timer.unref();
     const ctx = { ...supplied, deadline: Math.min(supplied.deadline, performance.now() + 4000), signal: AbortSignal.any([supplied.signal, controller.signal]), authorizeWrite: () => active(ctx) };
     try {
-      assertActive(ctx); if (!record(input) || input.type !== 'invoke' || input.name !== 'adaptiveCard/action' || !record(input.conversation) || !record(input.from)) return denied;
+      seen.stage = 'activity'; assertActive(ctx); if (!record(input) || input.type !== 'invoke' || input.name !== 'adaptiveCard/action' || !record(input.conversation) || !record(input.from)) return denied;
       // Teams adds fields of its own (for example trigger and isRefresh in data); read only the known ones and log the names of the rest.
+      seen.stage = 'action';
       const pick = (v: unknown, keys: readonly string[], where: string) => {
         const all = object(v); const extra = Object.keys(all).filter(k => !keys.includes(k));
-        if (extra.length) process.stderr.write(`teams-ingress: card-action-extra ${where} ${extra.map(k => /^[A-Za-z0-9_]{1,32}$/u.test(k) ? k : '?').join(',')}\n`);
+        if (extra.length) seen.extra.push(`${where}:${extra.slice(0, 16).map(k => /^[A-Za-z0-9_]{1,32}$/u.test(k) ? k : '?').join(',')}`);
         return Object.fromEntries(keys.filter(k => Object.hasOwn(all, k)).map(k => [k, all[k]]));
       };
       const value = pick(input.value, ['action', 'trigger'], 'value'); const action = pick(value.action, ['type', 'verb', 'data', 'id', 'title'], 'action');
+      if (cardVerbs.includes(String(action.verb))) seen.verb = String(action.verb);
+      if (value.trigger !== undefined) seen.trigger = value.trigger === 'automatic' || value.trigger === 'manual' ? value.trigger : 'unknown';
       const revise = action.verb === 'pr-revise'; const data = pick(action.data, ['proposal', 'rev', 'digest', ...(revise ? ['note'] : [])], 'data');
-      if (action.type !== 'Action.Execute' || !['pr-refresh', 'pr-approve', 'pr-reject', 'pr-revise'].includes(String(action.verb)) || data.rev !== 1 || typeof data.proposal !== 'string' || typeof data.digest !== 'string' ||
+      if (typeof data.proposal === 'string' && /^[a-f0-9]{64}$/u.test(data.proposal)) seen.proposal = data.proposal;
+      if (action.type !== 'Action.Execute' || !cardVerbs.includes(String(action.verb)) || data.rev !== 1 || typeof data.proposal !== 'string' || typeof data.digest !== 'string' ||
         !supplied.subject.objectId || input.from.aadObjectId !== supplied.subject.objectId) return denied;
-      let p = (await options.delegated.accounts.getProposal(data.proposal, ctx))?.proposal;
-      if (!p || p.conversationId !== input.conversation.id || input.conversation.tenantId !== undefined && p.tenantId !== input.conversation.tenantId || p.payloadDigest !== data.digest || p.revision !== data.rev ||
-        !await proposalConnection(p, supplied.subject, ctx)) return denied;
+      seen.stage = 'proposal'; let p = (await options.delegated.accounts.getProposal(data.proposal, ctx))?.proposal;
+      if (!p || p.conversationId !== input.conversation.id || input.conversation.tenantId !== undefined && p.tenantId !== input.conversation.tenantId || p.payloadDigest !== data.digest || p.revision !== data.rev) return denied;
+      seen.targetId = p.targetId; seen.stage = 'connection'; if (!await proposalConnection(p, supplied.subject, ctx)) return denied;
       if (action.verb !== 'pr-refresh') {
+        seen.stage = 'decision';
         if (!options.proposals || supplied.subject.objectId !== p.objectId) return denied;
         if (revise && (!supplied.delegatedTenant || supplied.controlRecipient?.id !== p.senderMRI || typeof data.note !== 'string' ||
           input.serviceUrl !== p.route.serviceUrl || !record(input.recipient) || input.recipient.id !== p.route.bot.id ||
@@ -247,7 +262,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
         p = await options.proposals.decide(p, revise ? 'revise' : action.verb === 'pr-approve' ? 'approve' : 'reject', identity(input.id), ctx, revise ? data.note as string : undefined);
       }
       if (action.verb === 'pr-refresh' && supplied.subject.objectId === p.objectId) options.proposals?.refresh(p, ctx);
-      let card = buildPullRequestCard(p, supplied.subject.objectId === p.objectId ? 'sender' : 'room', !!options.proposals);
+      seen.stage = 'output'; let card = buildPullRequestCard(p, supplied.subject.objectId === p.objectId ? 'sender' : 'room', !!options.proposals);
       if (!await safeProposal(p, proposalOutput(p), ctx) || !await safeProposal(p, JSON.stringify(card), ctx)) {
         if (p.state !== 'revise-requested' || supplied.subject.objectId !== p.objectId || !supplied.controlRecipient) return denied;
         const subject = { objectId: p.objectId }; const current = await options.delegated.accounts.inspect(subject, ctx);
@@ -260,7 +275,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
           ...(card.refresh ? { refresh: { ...card.refresh, userIds: [supplied.controlRecipient.id] } } : {}) };
         if (!await safeProposal(p, JSON.stringify(card), ctx, current.generation, github?.generation ?? p.githubGeneration)) return denied;
       }
-      assertActive(ctx); return { status: 200, body: { cardInvokeResponse: { statusCode: 200, type: 'application/vnd.microsoft.card.adaptive', value: card } } };
+      assertActive(ctx); seen.state = p.state; return { status: 200, body: { cardInvokeResponse: { statusCode: 200, type: 'application/vnd.microsoft.card.adaptive', value: card } } };
     } catch { return denied; }
     finally { clearTimeout(timer); consumers--; }
   }
@@ -571,6 +586,18 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
 }
 
 function record(v: unknown): v is Record<string, unknown> { return v !== null && typeof v === 'object' && !Array.isArray(v); }
+const cardVerbs = ['pr-refresh', 'pr-approve', 'pr-reject', 'pr-revise'];
+interface CardActionSeen { stage: 'unavailable' | 'busy' | 'activity' | 'action' | 'proposal' | 'connection' | 'decision' | 'output';
+  verb?: string; trigger?: string; proposal?: string; targetId?: string; state?: string; extra: string[] }
+/** Where the invoke came from: the service URL's host and the platform name Teams reports for the client, each only in a fixed shape. */
+function cardActionClient(input: unknown): { service?: string; platform?: string } {
+  if (!record(input)) return {};
+  let service: string | undefined;
+  try { service = typeof input.serviceUrl === 'string' && input.serviceUrl.length <= 2048 ? new URL(input.serviceUrl).hostname : undefined; } catch { /* Not a URL. */ }
+  const info = Array.isArray(input.entities) ? input.entities.slice(0, 16).find(e => record(e) && e.type === 'clientInfo') as Record<string, unknown> | undefined : undefined;
+  return { ...(service === undefined ? {} : { service: /^[a-z0-9.-]{1,253}$/u.test(service) ? service : '?' }),
+    ...(info?.platform === undefined ? {} : { platform: typeof info.platform === 'string' && /^[A-Za-z0-9]{1,16}$/u.test(info.platform) ? info.platform : '?' }) };
+}
 function formatControl(reply: ControlReply, delegated?: DelegatedOptions, chatKind?: string): ProviderMessage {
   if (reply.kind === 'signin' || reply.kind === 'github-signin') {
     if (!delegated) throw new DirectoryError('unready');

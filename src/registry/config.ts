@@ -12,13 +12,15 @@ export interface RegistryTarget {
   taskTimeout?: string;
   /** Repositories this target's GitHub task tools may use: lower-case "owner/repo" or "owner/*". Absent or empty allows none. */
   githubRepositories?: readonly string[];
+  /** Log the title and description of each pull request this target proposes, before its card is posted. Off unless true. */
+  logProposalText?: boolean;
   config: TableServeConfig; readonly identityDigest?: string; taskPassToken?: string;
 }
 export interface SigninConfig { accountTable: string; keyFile: string; apiUri: string; connectionName: string; publicOrigin?: string }
 export interface GitHubConfig { clientId: string; clientSecretFile: string }
 export interface RegistryConfig { github?: Readonly<GitHubConfig>; sso?: Readonly<SigninConfig>; schemaVersion: 1; directoryTable?: string; groupPolicyFile?: string; targets: readonly RegistryTarget[] }
 const perTarget = ['ORKA_BASE_URL', 'ORKA_GATEWAY_NAMESPACE', 'ORKA_GATEWAY_NAME', 'ORKA_BEARER_TOKEN', 'ORKA_OUTBOUND_BEARER_TOKEN', 'ORKA_CA_FILE', 'TABLE_INGRESS_STORE_ID', 'TABLE_DELIVERY_STORE_ID'];
-const metadataKeys = ['id', 'label', 'gatewayUid', 'frontAgent', 'kubernetesBaseUrl', 'kubernetesTokenFile', 'kubernetesCaFile', 'taskTimeout', 'githubRepositories'];
+const metadataKeys = ['id', 'label', 'gatewayUid', 'frontAgent', 'kubernetesBaseUrl', 'kubernetesTokenFile', 'kubernetesCaFile', 'taskTimeout', 'githubRepositories', 'logProposalText'];
 
 export function canonicalKubernetesUrl(value: unknown): string {
   if (typeof value !== 'string' || value.length > 4096 || /[\s\\]/u.test(value)) throw new ConfigurationError();
@@ -45,8 +47,10 @@ function targetMetadata(input: Record<string, unknown>, config: TableServeConfig
     kubernetesBaseUrl: canonicalKubernetesUrl(input.kubernetesBaseUrl), kubernetesTokenFile: absoluteFile(input.kubernetesTokenFile),
     ...(input.kubernetesCaFile === undefined ? {} : { kubernetesCaFile: absoluteFile(input.kubernetesCaFile) }),
     ...(input.taskTimeout === undefined ? {} : { taskTimeout: taskTimeout(input.taskTimeout) }),
-    ...(input.githubRepositories === undefined ? {} : { githubRepositories: githubRepositories(input.githubRepositories) }) };
+    ...(input.githubRepositories === undefined ? {} : { githubRepositories: githubRepositories(input.githubRepositories) }),
+    ...(input.logProposalText === undefined ? {} : { logProposalText: flag(input.logProposalText) }) };
 }
+function flag(value: unknown): boolean { if (typeof value !== 'boolean') throw new ConfigurationError(); return value; }
 // The same owner and repository characters the GitHub tools accept; GitHub compares both without case.
 function githubRepositories(value: unknown): readonly string[] {
   if (!Array.isArray(value) || value.length > 256) throw new ConfigurationError();

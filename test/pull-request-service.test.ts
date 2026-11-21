@@ -21,13 +21,14 @@ async function revisionStatus(f: Awaited<ReturnType<typeof decisionsFixture>>, s
 }
 const args = { owner: 'example', repo: 'project', base: 'main', head: 'orka/fix', title: 'Retry the lease read', body: 'Agent-written description' };
 const commit = (name = 'Orka Publisher', email = 'publisher@orka.ai') => ({ sha: 'a'.repeat(40), commit: { author: { name, email }, committer: { name: 'Other', email: 'other@example.invalid' } }, author: null });
-async function setup(t: test.TestContext, githubRepositories: readonly string[] = ['example/project']) {
+async function setup(t: test.TestContext, githubRepositories: readonly string[] = ['example/project'], logProposalText?: boolean) {
   const f = await grantsFixture(t); const remote = await toolsFixture(t); let sent = 0;
   const ghAccounts = createAccountStore(binding, Buffer.alloc(32, 7), f.dependencies, f.authority, f.now, 'github'); t.after(() => ghAccounts.close());
   const ch = await ghAccounts.challenge(f.subject, 'chat-private', 'github', context()); await ghAccounts.claim(ch, context());
   await ghAccounts.complete(ch, { accessToken: 'GH_ACCESS_PRIVATE', refreshToken: 'GH_REFRESH_PRIVATE', providerUserId: '12345', expiresAt: f.now() + 100_000, refreshExpiresAt: f.now() + 1_000_000 }, context());
   const github = createGitHub({ clientId: 'client', clientSecret: 'CLIENT_PRIVATE', publicOrigin: 'https://signin.example.invalid' }, { request: remote.request }); t.after(() => github.close());
   let author: unknown = commit(); let total = 1; let oversized = false; let heldPage = false; let complete = true; let longFiles = false; let missingHead = false; const logs: string[] = [];
+  const texts: { line: string; cardsBefore: number }[] = [];
   remote.behavior((req, res) => {
     if (req.path === '/user') return void res.end('{"id":12345,"login":"sender"}');
     if (missingHead && req.path.includes('/git/ref/heads/')) { res.statusCode = 404; return void res.end('{"message":"Not Found"}'); }
@@ -43,7 +44,8 @@ async function setup(t: test.TestContext, githubRepositories: readonly string[] 
   await f.store.reserveGrant(grant, context());
   let outcome: 'delivered' | 'uncertain' | 'unavailable' = 'delivered';
   const proposals = createPullRequestService({ accounts: f.store, githubAccounts: ghAccounts, github, scope: { appId: binding.appId, tenantId: binding.tenantId }, now: f.now, log: c => logs.push(c),
-    targets: [{ id: 'tools', githubRepositories }],
+    targets: [{ id: 'tools', githubRepositories, ...(logProposalText === undefined ? {} : { logProposalText }) }, { id: 'other', logProposalText: true }],
+    logProposalText: line => texts.push({ line, cardsBefore: sent }),
     postProposal: async (proposal, ctx) => { assert.equal((await f.store.getProposal(proposal.id, ctx))?.proposal.state, 'pending'); sent++; return outcome; } });
   const service = createTaskService({ accounts: f.store, authority: f.authority, now: f.now,
     targets: [{ id: 'tools', gatewayUid: 'gateway', identityDigest: f.input.targetDigest, taskPassToken: 'CONTROLLER_PRIVATE', githubRepositories }],
@@ -52,7 +54,7 @@ async function setup(t: test.TestContext, githubRepositories: readonly string[] 
   const body = { protocolVersion: 'orka.gateway.v1', grantRef: grant.ref, namespaceUID: 'ns', gatewayUID: 'gateway', taskUID: 'task', tools: grant.tools, deadline: new Date(f.now() + 600000).toISOString() };
   const issue = async (input = body) => { const r = await service.handle('/v1/task-passes', 'CONTROLLER_PRIVATE', input, context()); assert.equal(r.status, 200); return (r.body as { pass: string }).pass; };
   const call = async (value: unknown = args, key = 'operation', ctx = context()) => service.handle('/v1/task-tools/github-propose-pull-request', await issue(), value, ctx, key);
-  return { ...f, ...remote, github, proposals, service, grant, body, issue, call, sent: () => sent, logs, missingHead: (v: boolean) => { missingHead = v; },
+  return { ...f, ...remote, github, proposals, service, grant, body, issue, call, sent: () => sent, logs, texts, missingHead: (v: boolean) => { missingHead = v; },
     total: (n: number) => { total = n; }, author: (v: unknown) => { author = v; }, oversized: () => { oversized = true; },
     holdPage: () => { heldPage = true; }, longFiles: () => { longFiles = true; }, incomplete: () => { complete = false; }, outcome: (v: typeof outcome) => { outcome = v; } };
 }
@@ -206,6 +208,32 @@ test('refused proposals log the step they stopped at, without values', async t =
   assert.deepEqual(f.logs.splice(0), ['task-tool-refused github-propose-pull-request pass']);
   assert.equal((await f.call({ ...args, title: 'changed' }, 'sent')).status, 403);
   assert.deepEqual(f.logs.splice(0), ['pull-request-proposal-refused replay', 'task-tool-refused github-propose-pull-request account-operation-conflict']);
+});
+test('a target with logProposalText logs the proposal text on one line before its card is posted', async t => {
+  const f = await setup(t, undefined, true); const written = { ...args, title: 'Retry "the" lease read', body: 'First line\nSecond line\twith a tab\r\n\u2028and more' };
+  assert.equal((await f.call(written)).status, 200);
+  const id = proposalIdentity(f.grant.ref, 'task', 'operation');
+  assert.deepEqual(f.texts, [{ cardsBefore: 0, line: `pull-request-proposal-text (tools) ${JSON.stringify({ proposal: id, repository: 'example/project', base: 'main', head: 'orka/fix', title: written.title, body: written.body })}` }]);
+  assert.doesNotMatch(f.texts[0]!.line, /[\r\n]/u, 'the text stays on one line');
+  const parsed = JSON.parse(f.texts[0]!.line.slice('pull-request-proposal-text (tools) '.length)) as Record<string, string>;
+  assert.equal(parsed.body, written.body); assert.equal(f.sent(), 1); assert.deepEqual(f.logs, [], 'the routine log holds none of it');
+  // A repeated call offers the same card again, so it logs the same line again.
+  assert.equal((await f.call(written)).status, 200); assert.deepEqual([f.texts.length, f.sent()], [2, 2]); assert.equal(f.texts[1]!.line, f.texts[0]!.line);
+  // The line is written before the card, so a card that did not arrive can still be read.
+  f.outcome('unavailable'); assert.equal((await f.call(args, 'no-card')).status, 503); assert.equal(f.texts.length, 3);
+  for (const secret of ['GH_ACCESS_PRIVATE', 'CLIENT_PRIVATE', 'CONTROLLER_PRIVATE', 'GH_REFRESH_PRIVATE']) assert.ok(!JSON.stringify(f.texts).includes(secret));
+});
+for (const flag of [undefined, false]) test(`a target with logProposalText ${flag} logs no proposal text`, async t => {
+  const f = await setup(t, undefined, flag); assert.equal((await f.call()).status, 200); assert.equal(f.sent(), 1);
+  assert.deepEqual(f.texts, [], 'another target turning it on changes nothing here');
+  assert.ok(!JSON.stringify(f.logs).includes(args.title) && !JSON.stringify(f.logs).includes(args.body));
+});
+test('proposal text that fails the output check, or never becomes a proposal, is not logged', async t => {
+  const f = await setup(t, undefined, true);
+  for (const secret of ['GH_ACCESS_PRIVATE', 'CLIENT_PRIVATE', 'DELIVERY_PRIVATE', 'CONTROLLER_PRIVATE']) assert.equal((await f.call({ ...args, body: `see ${secret}` }, 'secret-' + secret)).status, 503);
+  f.missingHead(true); assert.equal((await f.call(args, 'missing-head')).status, 503);
+  assert.deepEqual(f.texts, []); assert.equal(f.sent(), 0);
+  const outside = await setup(t, ['example/other'], true); assert.equal((await outside.call()).status, 200); assert.deepEqual(outside.texts, []);
 });
 test('compare_over_1MiB_is_fixed_unavailable and paginated_author_checks_stop_at_existing_deadline_without_card', async t => {
   const f = await setup(t); f.oversized(); assert.equal((await f.call()).status, 503); assert.equal(f.sent(), 0);

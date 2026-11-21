@@ -14,9 +14,11 @@ import { canonicalJSON } from '../directory/codec.js';
 export function createPullRequestService(options: { accounts: AccountStore; githubAccounts: AccountStore;
   github: Pick<ReturnType<typeof createGitHub>, 'readProposalFacts' | 'readUserId' | 'readHead' | 'findPullRequest' | 'openProposedPullRequest' | 'refresh'>; scope: DirectoryScope; now?: () => number;
   /** Each target's allowed repositories; a proposal for an unlisted target or repository makes no GitHub request. */
-  targets: readonly { id: string; githubRepositories?: readonly string[] }[];
+  targets: readonly { id: string; githubRepositories?: readonly string[]; logProposalText?: boolean }[];
   /** Fixed categories only: the step a proposal stopped at, never values. */
   log?(category: string): void;
+  /** Called only for a target with logProposalText: one line holding the text its card is about to show the sender. */
+  logProposalText?(line: string): void;
   postProposal(proposal: Proposal, ctx: DirectoryContext): Promise<'delivered' | 'uncertain' | 'unavailable'>;
   decisions?: { authority: LeaseAuthority; connected(p: Proposal, ctx: DirectoryContext): Promise<boolean>;
     admitRevision?(p: Proposal, ctx: ExchangeContext): Promise<Exclude<RevisionAdmission, 'pending'>>;
@@ -208,6 +210,9 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
       step = 'output'; if (!await safeOutput(proposalOutput(p))) throw new GitHubError();
       step = 'storage'; p = await options.accounts.reserveProposal({ ...p, state: 'pending' }, operation, ctx);
       if (p.state !== 'pending') return { text: 'This approval request is no longer pending. Ask again for a new card.' };
+      // Read by an operator before the sender decides; the text has passed the same output check as the card.
+      if (options.targets.find(t => t.id === p!.targetId)?.logProposalText) options.logProposalText?.(`pull-request-proposal-text (${p.targetId}) ${
+        JSON.stringify({ proposal: p.id, repository: `${p.owner}/${p.repo}`, base: p.base, head: p.head, title: p.title, body: p.body })}`);
       step = 'card'; const sent = await options.postProposal(p, ctx);
       if (sent === 'unavailable') throw new GitHubError();
       return { text: sent === 'delivered' ? 'Approval card sent to the requester.' :

@@ -34,7 +34,8 @@ import { deferred } from './support/ingress-auth.js';
 
 const context = (activityId: string = randomUUID()): AdmissionContext => ({ activityId, signal: new AbortController().signal,
   deadline: performance.now() + 10000, commandText: 'help', subject: { tenantId: expectedEvent.accountId, objectId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', chatKind: 'personal' } });
-async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<typeof createRegistryAdmission>[0]['delegated'], chatKind: 'personal' | 'groupChat' = 'personal') {
+async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<typeof createRegistryAdmission>[0]['delegated'], chatKind: 'personal' | 'groupChat' = 'personal',
+  proposals?: Parameters<typeof createRegistryAdmission>[0]['proposals']) {
   const input = registryInput(count); if (count === 32) for (const target of input.targets) target.label = '\\'.repeat(256);
   const config = snapshotRegistry(input); const scope = { appId: config.targets[0]!.config.scope.appId, tenantId: expectedEvent.accountId };
   const memory = memoryDirectoryTable(); const directory = await openDirectory(memory.table, context()); t.after(() => directory.close());
@@ -53,7 +54,7 @@ async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<ty
   const authority = { allowed: () => allowed, revalidate: async () => allowed, lost: new AbortController().signal };
   const logs: string[] = [];
   const makeSink = () => createRegistryAdmission({ config, directory, slots, authority, active: () => allowed,
-    ...(delegated ? { delegated } : {}),
+    ...(delegated ? { delegated } : {}), ...(proposals ? { proposals } : {}),
     authorizer: { authorize: async (...args) => { authorized++; return policyAuthorizer ? policyAuthorizer.authorize(...args) : eligible; } }, log: (category, target, detail) => logs.push(category + ':' + target + (detail ? ' ' + JSON.stringify(detail) : '')) });
   const sink = makeSink();
   const bindSender = (s: typeof sink) => s.bindControlSender({ send: async (route, message) => {
@@ -381,6 +382,90 @@ test('uncertain_card_send_never_resends_after_restart and refresh scopes identit
   p.state = 'superseded'; assert.match(JSON.stringify((await restarted.cardAction!(input, context())).body), /Replaced/);
   p.state = 'expired'; assert.match(JSON.stringify((await restarted.cardAction!(input, context())).body), /Expired/);
   f.policy({ kind: 'no-access', text: '' }); assert.equal((await restarted.cardAction!(input, context())).status, 403);
+});
+
+// What an operator needs to tell which client sent a card action and what it got back.
+async function cardLogFixture(t: test.TestContext) {
+  const d = delegatedFixture(); await d.delegated.accounts.complete(); const decided: string[] = [];
+  const f = await fixture(t, 2, d.delegated, 'personal', { refresh: () => {},
+    decide: async (p, decision) => { decided.push(decision); if (decision === 'reject') throw new Error('PRIVATE_FAILURE'); return { ...p, state: 'approving' }; } });
+  await f.provision();
+  const p: Proposal = { ...proposalFixture(), ...f.scope, objectId: d.ch.objectId, conversationId: f.event.contextId, route: f.route,
+    targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest!, title: 'PRIVATE_TITLE', body: 'PRIVATE_BODY' };
+  d.delegated.accounts.getProposal = async (...ids: unknown[]) => ids[0] === p.id ? { proposal: p, etag: 'W/"1"' } : undefined;
+  const data = { proposal: p.id, rev: 1, digest: p.payloadDigest };
+  const input = { type: 'invoke', name: 'adaptiveCard/action', id: 'invoke-1', channelId: 'msteams', serviceUrl: 'https://SMBA.example.invalid/amer/PRIVATE_PATH/?PRIVATE_QUERY=1',
+    entities: [{ type: 'mention', text: 'PRIVATE_MENTION' }, { type: 'clientInfo', platform: 'iOS', locale: 'PRIVATE_LOCALE', country: 'PRIVATE_COUNTRY', timezone: 'PRIVATE_ZONE' }],
+    conversation: { id: p.conversationId, tenantId: p.tenantId, conversationType: 'personal' }, from: { id: p.senderMRI, aadObjectId: p.objectId, name: 'PRIVATE_NAME' },
+    value: { action: { type: 'Action.Execute', verb: 'pr-refresh', data } } };
+  const act = async (changed: Record<string, unknown> = {}, action: Record<string, unknown> = {}, ctx = context()) => {
+    const before = f.logs.length;
+    const result = await f.sink.cardAction!({ ...input, ...changed, value: { ...input.value, ...(changed.value as object), action: { ...input.value.action, ...action } } }, ctx);
+    assert.equal(f.logs.length, before + 1, 'one line per invoke'); const line = /^card-action:(\S+) (\{.*\})$/u.exec(f.logs.at(-1)!); assert.ok(line);
+    const { ms, ...rest } = JSON.parse(line[2]!) as Record<string, unknown>; assert.ok(Number.isInteger(ms) && (ms as number) >= 0 && (ms as number) < 4500);
+    assert.equal(rest.status, result.status, 'the logged status is the one returned');
+    return { ...(line[1] === 'undefined' ? {} : { target: line[1] }), ...rest };
+  };
+  return { d, f, p, data, input, act, decided };
+}
+test('a card action logs one line: verb, trigger, proposal, service host, client platform, status, outcome and extra field names', async t => {
+  const { f, p, data, act, decided } = await cardLogFixture(t);
+  const seen = { target: 'primary', proposal: p.id, service: 'smba.example.invalid', platform: 'iOS', status: 200 };
+  assert.deepEqual(await act(), { ...seen, verb: 'pr-refresh', outcome: 'pending' });
+  // What Teams adds to an automatic refresh, and to a tap on Approve.
+  assert.deepEqual(await act({ value: { trigger: 'automatic' } }, { data: { ...data, trigger: 'automatic', isRefresh: true } }),
+    { ...seen, verb: 'pr-refresh', trigger: 'automatic', outcome: 'pending', extra: 'data:trigger,isRefresh' });
+  assert.deepEqual(await act({ value: { trigger: 'manual' } }, { verb: 'pr-approve', data: { ...data, imageUrl: 'PRIVATE_IMAGE', isButtonClickTrigger: true, trigger: 'manual' } }),
+    { ...seen, verb: 'pr-approve', trigger: 'manual', outcome: 'approving', extra: 'data:imageUrl,isButtonClickTrigger,trigger' });
+  assert.deepEqual(decided, ['approve']);
+  p.state = 'opened'; assert.deepEqual(await act(), { ...seen, verb: 'pr-refresh', outcome: 'opened' });
+  // Another desktop client, no client entity, no service URL: the line carries what is there.
+  assert.deepEqual(await act({ entities: [{ type: 'clientInfo', platform: 'Web' }] }), { ...seen, platform: 'Web', verb: 'pr-refresh', outcome: 'opened' });
+  const { service: _service, platform: _platform, ...bare } = seen;
+  assert.deepEqual(await act({ entities: undefined, serviceUrl: undefined }), { ...bare, verb: 'pr-refresh', outcome: 'opened' });
+  assert.doesNotMatch(JSON.stringify(f.logs), /PRIVATE|chat|29:|aaaaaaaa/u);
+  for (const value of [p.title, p.body, p.payloadDigest, p.objectId, p.senderMRI, p.conversationId, p.tenantId, p.displayName, p.githubLogin]) assert.ok(!JSON.stringify(f.logs).includes(value), value);
+});
+test('a refused card action logs the stage it stopped at with status 403', async t => {
+  const { d, f, p, data, act, decided } = await cardLogFixture(t);
+  const seen = { proposal: p.id, service: 'smba.example.invalid', platform: 'iOS', status: 403 }; const { proposal: _proposal, ...unread } = seen;
+  assert.deepEqual(await act({ from: 'PRIVATE_FROM' }), { ...unread, verb: 'unknown', outcome: 'denied-activity' });
+  assert.deepEqual(await act({}, { verb: 'PRIVATE_VERB' }), { ...seen, verb: 'unknown', outcome: 'denied-action' });
+  assert.deepEqual(await act({}, { type: 'Action.Submit' }), { ...seen, verb: 'pr-refresh', outcome: 'denied-action' });
+  assert.deepEqual(await act({ from: { id: '29:other', aadObjectId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' } }), { ...seen, verb: 'pr-refresh', outcome: 'denied-action' });
+  assert.deepEqual(await act({}, { data: { ...data, proposal: 'PRIVATE_ID' } }), { ...unread, verb: 'pr-refresh', outcome: 'denied-proposal' });
+  assert.deepEqual(await act({}, { data: { ...data, digest: 'PRIVATE_DIGEST' } }), { ...seen, verb: 'pr-refresh', outcome: 'denied-proposal' });
+  assert.deepEqual(await act({ conversation: { id: 'PRIVATE_CHAT', tenantId: p.tenantId, conversationType: 'personal' } }), { ...seen, verb: 'pr-refresh', outcome: 'denied-proposal' });
+  const other = { ...context(), subject: { ...context().subject, objectId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' } };
+  assert.deepEqual(await act({ from: { id: '29:other', aadObjectId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' } }, { verb: 'pr-approve' }, other),
+    { ...seen, target: 'primary', verb: 'pr-approve', outcome: 'denied-decision' });
+  assert.deepEqual(await act({}, { verb: 'pr-reject' }), { ...seen, target: 'primary', verb: 'pr-reject', outcome: 'denied-decision' });
+  assert.deepEqual(decided, ['reject'], 'only the sender reaches a decision');
+  d.delegated.accounts.safeOutput = async () => false;
+  assert.deepEqual(await act(), { ...seen, target: 'primary', verb: 'pr-refresh', outcome: 'denied-output' });
+  d.delegated.accounts.safeOutput = async () => true; f.policy({ kind: 'no-access', text: '' });
+  assert.deepEqual(await act(), { ...seen, target: 'primary', verb: 'pr-refresh', outcome: 'denied-connection' });
+  assert.doesNotMatch(JSON.stringify(f.logs), /PRIVATE|chat|29:|aaaaaaaa|bbbbbbbb/u);
+});
+test('card action field names, trigger, platform and service host are logged only in a fixed shape', async t => {
+  const { f, p, data, act } = await cardLogFixture(t);
+  const many = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`k${i}`, 'PRIVATE_VALUE']));
+  const line = await act({ serviceUrl: 'PRIVATE_NOT_A_URL', entities: [{ type: 'clientInfo', platform: 'PRIVATE PLATFORM' }],
+    value: { trigger: 'PRIVATE_TRIGGER', 'PRIVATE KEY': 1, ok_name: 'PRIVATE_VALUE' } },
+  { data: { ...data, ...many }, ['x'.repeat(33)]: 1, title: 'PRIVATE_TITLE', id: 'PRIVATE_ACTION_ID' });
+  assert.deepEqual(line, { target: 'primary', proposal: p.id, platform: '?', status: 200, verb: 'pr-refresh', trigger: 'unknown', outcome: 'pending',
+    extra: `value:?,ok_name;action:?;data:${Array.from({ length: 16 }, (_, i) => `k${i}`).join(',')}` });
+  assert.deepEqual(await act({ serviceUrl: 'https://[::1]/', entities: 'PRIVATE_ENTITIES' }), { target: 'primary', proposal: p.id, service: '?', status: 200, verb: 'pr-refresh', outcome: 'pending' });
+  assert.deepEqual(await act({ serviceUrl: 'https://x/' + 'p'.repeat(2048), entities: [{ type: 'clientInfo', platform: 7 }] }),
+    { target: 'primary', proposal: p.id, platform: '?', status: 200, verb: 'pr-refresh', outcome: 'pending' });
+  assert.doesNotMatch(JSON.stringify(f.logs), /PRIVATE/u);
+});
+test('a card action on a gateway without sign-in still logs its refusal', async t => {
+  const f = await fixture(t); const result = await f.sink.cardAction!({ type: 'invoke', name: 'adaptiveCard/action', serviceUrl: 'https://smba.example.invalid/',
+    value: { action: { type: 'Action.Execute', verb: 'pr-approve', data: {} } } }, context());
+  assert.equal(result.status, 403); assert.equal(f.logs.length, 1);
+  const { ms: _ms, ...line } = JSON.parse(f.logs[0]!.slice('card-action:undefined '.length)) as Record<string, unknown>;
+  assert.deepEqual(line, { verb: 'unknown', service: 'smba.example.invalid', status: 403, outcome: 'denied-unavailable' });
 });
 
 for (const crash of ['before', 'after'] as const) test(`normal Revise admission survives crash ${crash} durable inbox commit with one saved event`, async t => {

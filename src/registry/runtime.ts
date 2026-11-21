@@ -149,7 +149,8 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
         decisions: { authority, connected: (p, ctx) => admission ? admission.checkProposal(p, ctx) : Promise.resolve(false),
           admitRevision: (p, ctx) => admission ? admission.admitRevision(p, ctx) : Promise.resolve('full'),
           postDecision: async (p, ctx) => { if (admission) await admission.postDecision(p, ctx); } },
-        log: category => { process.stderr.write(`teams-ingress: ${category}\n`); } }) : undefined;
+        log: category => { process.stderr.write(`teams-ingress: ${category}\n`); },
+        logProposalText: line => { process.stderr.write(`teams-ingress: ${line}\n`); } }) : undefined;
       tasks = createTaskService({ accounts, auth: delegatedAuth!, authority, ...(proposals ? { proposals } : {}),
         ...(github && githubAccounts ? { github: { accounts: githubAccounts, auth: github } } : {}),
         targets: config.targets.map(t => ({ id: t.id, gatewayUid: t.gatewayUid, identityDigest: t.identityDigest!, taskPassToken: t.taskPassToken!,
