@@ -64,6 +64,11 @@ compared without case, as GitHub does. There are no other wildcards and at most
 repository. `github-create-pull-request` with a head from another owner's fork
 (`owner:branch`) also needs that owner's `owner/*` entry, because a fork can have any name. See [the repository list](delegated-auth.md#repository-list) for what
 a refused call returns.
+Optional per-target `logProposalText: true` logs the title and description of each
+pull request that target's Agents propose, before the card is posted, so an operator
+can read them ahead of the sender's decision. It is off by default because it puts
+Agent-written text in the log; see [the log lines](delegated-auth.md#pull-request-proposal-and-sender-decision).
+It is read at startup; changing it keeps a target's chats and sign-ins.
 
 **Upgrading:** earlier versions had no list and reached any repository the linked
 account and the GitHub App could. Add `githubRepositories` to each existing target

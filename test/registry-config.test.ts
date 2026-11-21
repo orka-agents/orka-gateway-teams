@@ -133,6 +133,21 @@ test('a target task timeout is optional, kept as written and bounded by Orka\'s 
     assert.throws(() => snapshotRegistry(input), ConfigurationError, String(value));
   }
 });
+test('a target logs proposal text only when logProposalText is true; the flag is not part of its identity', t => {
+  const digest = snapshotRegistry(registryInput()).targets[0]!.identityDigest;
+  assert.equal(snapshotRegistry(registryInput()).targets[0]!.logProposalText, undefined);
+  const set = (value: unknown) => { const input = registryInput(); (input.targets[0] as Record<string, unknown>).logProposalText = value; return input; };
+  for (const value of [true, false]) {
+    const targets = snapshotRegistry(set(value)).targets;
+    assert.equal(targets[0]!.logProposalText, value); assert.equal(targets[0]!.identityDigest, digest);
+    assert.equal(targets[1]!.logProposalText, undefined, 'each target has its own flag');
+  }
+  for (const value of ['true', 'false', 1, 0, null, [], {}, '']) assert.throws(() => snapshotRegistry(set(value)), ConfigurationError, JSON.stringify(value));
+  const f = registryFixture(t); (f.manifest.targets[1] as Record<string, unknown>).logProposalText = true; f.save();
+  assert.deepEqual(parseRegistryConfig(f.env).targets.map(target => target.logProposalText), [undefined, true]);
+  (f.manifest.targets[1] as Record<string, unknown>).logProposalText = 'yes'; f.save();
+  assert.throws(() => parseRegistryConfig(f.env), ConfigurationError);
+});
 test('a target lists its GitHub repositories in lower case; none by default, and the list is not part of its identity', t => {
   const digest = snapshotRegistry(registryInput()).targets[0]!.identityDigest;
   assert.equal(snapshotRegistry(registryInput()).targets[0]!.githubRepositories, undefined);
