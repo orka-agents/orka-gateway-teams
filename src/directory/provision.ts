@@ -1,7 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { identity } from '../ingress/codec.js';
 import type { RegistryTarget } from '../registry/config.js';
-import { snapshotRegistry } from '../registry/config.js';
+import { snapshotRegistry, taskTimeout } from '../registry/config.js';
 import type { createKubernetesReader, KubernetesContext } from '../registry/kubernetes.js';
 import { bindingName, canonicalJSON, snapshotDirectoryRecord } from './codec.js';
 import type { AgentRevision, BindingEvidence, CanonicalValue, ConnectionRecord } from './types.js';
@@ -25,6 +25,14 @@ function metadata(value: Record<string, unknown>, kind: string, version: string,
   const meta = object(value.metadata);
   if (value.apiVersion !== version || value.kind !== kind || meta.namespace !== namespace || meta.name !== name || meta.deletionTimestamp !== undefined) conflict();
   return meta;
+}
+/** A timeout doesn't route: an epoch created before a timeout change keeps its own. Any other task default must match. */
+function routing(spec: Record<string, unknown>): Record<string, unknown> {
+  const { taskDefaults, ...rest } = spec;
+  if (taskDefaults === undefined) return rest;
+  const defaults = object(taskDefaults);
+  if (Object.keys(defaults).length !== 1) return spec;
+  try { taskTimeout(defaults.timeout); return rest; } catch { return spec; }
 }
 function ready(value: Record<string, unknown>, current: number): boolean {
   const status = object(value.status ?? {}); return status.ready === true && status.observedGeneration === current;
@@ -66,7 +74,8 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
       spec: { gatewayRef: { name: scope.gatewayName }, agentRef: { name: target.frontAgent.name },
         // Orka routes to the highest-priority ready match, so a later epoch takes over the chat.
         match: { accountId: scope.tenantId, contextId: value.conversationId }, priority: value.epoch ?? 0,
-        senderPolicy: { mode: 'all' }, session: { mode: value.chatKind === 'personal' ? 'context-sender' : 'context' } },
+        senderPolicy: { mode: 'all' }, session: { mode: value.chatKind === 'personal' ? 'context-sender' : 'context' },
+        ...(target.taskTimeout === undefined ? {} : { taskDefaults: { timeout: target.taskTimeout } }) },
     };
   }
   async function gateway(context: KubernetesContext, waitReady: boolean): Promise<void> {
@@ -88,7 +97,7 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
     const annotations = object(meta.annotations ?? {});
     const expected = desired({ ...value, epoch, bindingName: meta.name } as ConnectionRecord).spec;
     return annotations[digestMarker] === target.identityDigest && annotations[gatewayMarker] === target.gatewayUid &&
-      canonicalJSON(object(binding.spec)) === canonicalJSON(expected);
+      canonicalJSON(routing(object(binding.spec))) === canonicalJSON(routing(expected));
   }
   async function overlap(value: ConnectionRecord, context: KubernetesContext): Promise<void> {
     active(context); const bindings = await client.listBindings(context); active(context);
@@ -104,8 +113,9 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
   function evidence(value: ConnectionRecord, binding: Record<string, unknown>): BindingEvidence {
     const meta = metadata(binding, 'GatewayBinding', apiVersion, namespace, value.bindingName);
     const uid = identity(meta.uid); const current = generation(meta.generation); const spec = object(binding.spec);
-    const expected = value.state === 'provisioned' ? value.binding.spec : desired(value).spec;
-    if (canonicalJSON(spec) !== canonicalJSON(expected)) conflict();
+    // A recorded Binding must match exactly. An unrecorded one may predate a timeout change; it keeps its own.
+    if (value.state === 'provisioned' ? canonicalJSON(spec) !== canonicalJSON(value.binding.spec) :
+      canonicalJSON(routing(spec)) !== canonicalJSON(routing(desired(value).spec))) conflict();
     if (value.state === 'provisioned' && (uid !== value.binding.uid || current !== value.binding.generation)) conflict();
     const annotations = object(meta.annotations);
     if (annotations[digestMarker] !== target.identityDigest || annotations[gatewayMarker] !== target.gatewayUid) conflict();

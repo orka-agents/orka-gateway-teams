@@ -8,13 +8,15 @@ import { absoluteFile, readRegistryFile } from './files.js';
 export interface RegistryTarget {
   id: string; label: string; gatewayUid: string; frontAgent: Readonly<{ namespace: string; name: string }>;
   kubernetesBaseUrl: string; kubernetesTokenFile: string; kubernetesCaFile?: string;
+  /** Orka Task timeout for this target's new Bindings, as a Go duration such as "75m". Orka's default is 30m. */
+  taskTimeout?: string;
   config: TableServeConfig; readonly identityDigest?: string; taskPassToken?: string;
 }
 export interface SigninConfig { accountTable: string; keyFile: string; apiUri: string; connectionName: string; publicOrigin?: string }
 export interface GitHubConfig { clientId: string; clientSecretFile: string }
 export interface RegistryConfig { github?: Readonly<GitHubConfig>; sso?: Readonly<SigninConfig>; schemaVersion: 1; directoryTable?: string; groupPolicyFile?: string; targets: readonly RegistryTarget[] }
 const perTarget = ['ORKA_BASE_URL', 'ORKA_GATEWAY_NAMESPACE', 'ORKA_GATEWAY_NAME', 'ORKA_BEARER_TOKEN', 'ORKA_OUTBOUND_BEARER_TOKEN', 'ORKA_CA_FILE', 'TABLE_INGRESS_STORE_ID', 'TABLE_DELIVERY_STORE_ID'];
-const metadataKeys = ['id', 'label', 'gatewayUid', 'frontAgent', 'kubernetesBaseUrl', 'kubernetesTokenFile', 'kubernetesCaFile'];
+const metadataKeys = ['id', 'label', 'gatewayUid', 'frontAgent', 'kubernetesBaseUrl', 'kubernetesTokenFile', 'kubernetesCaFile', 'taskTimeout'];
 
 export function canonicalKubernetesUrl(value: unknown): string {
   if (typeof value !== 'string' || value.length > 4096 || /[\s\\]/u.test(value)) throw new ConfigurationError();
@@ -39,7 +41,14 @@ function targetMetadata(input: Record<string, unknown>, config: TableServeConfig
   if (frontAgent.namespace !== config.scope.gatewayNamespace) throw new ConfigurationError();
   return { id, label, gatewayUid: text(input.gatewayUid), frontAgent,
     kubernetesBaseUrl: canonicalKubernetesUrl(input.kubernetesBaseUrl), kubernetesTokenFile: absoluteFile(input.kubernetesTokenFile),
-    ...(input.kubernetesCaFile === undefined ? {} : { kubernetesCaFile: absoluteFile(input.kubernetesCaFile) }) };
+    ...(input.kubernetesCaFile === undefined ? {} : { kubernetesCaFile: absoluteFile(input.kubernetesCaFile) }),
+    ...(input.taskTimeout === undefined ? {} : { taskTimeout: taskTimeout(input.taskTimeout) }) };
+}
+// Orka accepts a Binding timeout up to 24h.
+export function taskTimeout(value: unknown): string {
+  const match = typeof value === 'string' ? /^([1-9][0-9]{0,3})(m|h)$/u.exec(value) : null;
+  if (!match || Number(match[1]) * (match[2] === 'h' ? 60 : 1) > 1440) throw new ConfigurationError();
+  return value as string;
 }
 /** Public library boundary: callers cannot combine different shared identities or listeners. */
 export function snapshotRegistry(input: RegistryConfig): RegistryConfig {

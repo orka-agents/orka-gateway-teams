@@ -120,3 +120,46 @@ test('a later epoch creates its own higher-priority Binding and leaves the earli
   bindings.get(name(1)).metadata.annotations = annotations;
   await assert.rejects(provisioner.check(first, context), { category: 'binding-conflict' }, 'two epochs ahead is not a stopped move');
 });
+
+// Orka cancels a Task, and its children, at the Binding's timeout (30m by default).
+test('a target task timeout goes on the next epoch\'s Binding; earlier epochs without it stay trusted', async () => {
+  const input = registryInput(); (input.targets[0] as Record<string, unknown>).taskTimeout = '75m';
+  const target = snapshotRegistry(input).targets[0]!; const s = target.config.scope; const scope = { appId: s.appId, tenantId: s.tenantId };
+  const name = (epoch: number) => bindingName(scope, '19:exact', target.identityDigest!, epoch);
+  const spec = (priority: number) => ({ gatewayRef: { name: 'teams' }, agentRef: { name: 'front' }, match: { accountId: s.tenantId, contextId: '19:exact' },
+    priority, senderPolicy: { mode: 'all' }, session: { mode: 'context-sender' } });
+  const annotations = { 'gateway.orka.ai/teams-target-digest': target.identityDigest, 'gateway.orka.ai/teams-gateway-uid': target.gatewayUid };
+  const bindings = new Map<string, any>([[name(0), { apiVersion: 'gateway.orka.ai/v1alpha1', kind: 'GatewayBinding',
+    metadata: { namespace: 'default', name: name(0), uid: 'uid-0', generation: 1, annotations }, spec: spec(0), status: { ready: true, observedGeneration: 1 } }]]);
+  const original = structuredClone(bindings.get(name(0)));
+  const provisioner = createBindingProvisioner(target, {
+    async getGateway() { return { apiVersion: 'gateway.orka.ai/v1alpha1', kind: 'Gateway', metadata: { namespace: 'default', name: 'teams', uid: target.gatewayUid, generation: 1 }, status: { ready: true, observedGeneration: 1 } }; },
+    async getAgent() { return { apiVersion: 'core.orka.ai/v1alpha1', kind: 'Agent', metadata: { namespace: 'default', name: 'front', uid: 'agent-uid', generation: 2 } }; },
+    async listBindings() { return structuredClone([...bindings.values()]); }, async getBinding(n: string) { return structuredClone(bindings.get(n)); },
+    async createBinding(value: any) { bindings.set(value.metadata.name, { ...structuredClone(value), metadata: { ...value.metadata, uid: 'uid-1', generation: 1 }, status: { ready: true, observedGeneration: 1 } }); return { kind: 'ack' as const }; },
+  });
+  const context = { signal: new AbortController().signal, deadline: performance.now() + 2000, allowed: () => true };
+  const base = { schema: 1 as const, kind: 'conn' as const, scope, conversationId: '19:exact', chatKind: 'personal' as const, targetId: target.id, identityDigest: target.identityDigest! };
+  // The chat's current Binding was created before the timeout was configured: it is checked against its recorded spec.
+  const first: ConnectionRecord = { ...base, bindingName: name(0), state: 'provisioned', binding: { namespace: 'default', name: name(0), uid: 'uid-0', generation: 1, spec: spec(0) } };
+  assert.equal((await provisioner.check(first, context)).uid, 'uid-0');
+  const evidence = await provisioner.reconcile({ ...base, bindingName: name(1), epoch: 1, state: 'reserved' }, context);
+  assert.deepEqual(evidence.spec, { ...spec(1), taskDefaults: { timeout: '75m' } });
+  assert.deepEqual(bindings.get(name(0)), original);
+  const second: ConnectionRecord = { ...base, bindingName: name(1), epoch: 1, state: 'provisioned', binding: { namespace: 'default', name: name(1), uid: 'uid-1', generation: 1, spec: evidence.spec } };
+  assert.equal((await provisioner.check(second, context)).uid, 'uid-1');
+  // A Binding whose timeout changed after it was recorded is still a conflict.
+  bindings.get(name(1)).spec.taskDefaults.timeout = '24h';
+  await assert.rejects(provisioner.check(second, context), { category: 'binding-conflict' });
+  // A move interrupted before its directory write, then retried after the timeout was configured, adopts the Binding it created.
+  bindings.delete(name(1)); bindings.set(name(1), { ...structuredClone(original), metadata: { ...original.metadata, name: name(1), uid: 'uid-1' }, spec: spec(1) });
+  const adopted = await provisioner.reconcile({ ...base, bindingName: name(1), epoch: 1, state: 'reserved' }, context);
+  assert.deepEqual([adopted.uid, adopted.spec], ['uid-1', spec(1)]);
+  bindings.get(name(1)).spec.taskDefaults = { timeout: '75m', retryPolicy: { maxRetries: 3 } };
+  await assert.rejects(provisioner.reconcile({ ...base, bindingName: name(1), epoch: 1, state: 'reserved' }, context), { category: 'binding-conflict' });
+  await assert.rejects(provisioner.check(first, context), { category: 'binding-conflict' }, 'a sibling may differ only in its timeout');
+  bindings.get(name(1)).spec.taskDefaults = { timeout: '2h' };
+  assert.equal((await provisioner.reconcile({ ...base, bindingName: name(1), epoch: 1, state: 'reserved' }, context)).uid, 'uid-1');
+  bindings.get(name(1)).spec.priority = 9;
+  await assert.rejects(provisioner.reconcile({ ...base, bindingName: name(1), epoch: 1, state: 'reserved' }, context), { category: 'binding-conflict' });
+});

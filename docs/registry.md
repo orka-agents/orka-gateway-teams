@@ -51,6 +51,11 @@ version 1, at most 32 targets and at most 256 KiB. For example:
 
 Optional per-target `orkaCaFile` and `kubernetesCaFile` select PEM CA bundles;
 otherwise system trust applies. All file references are absolute and canonical.
+Optional per-target `taskTimeout` (for example `"75m"`, at most `24h`) sets
+`taskDefaults.timeout` on the Bindings the gateway creates for that target. Orka
+cancels a request's Task, and any Tasks it delegated, at that timeout; its default
+is 30 minutes. A chat keeps its current Binding until the front Agent changes, so
+a new value reaches an existing chat at its next Agent change.
 Orka URLs must have their canonical trailing slash. Kubernetes URLs are HTTPS
 origins with a trailing slash, without credentials, query, fragment or path prefix.
 The front Agent must be in the Gateway namespace. IDs match
