@@ -143,7 +143,7 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
       accounts = createAccountStore({ account: shared.config.storage.account, table: config.sso.accountTable,
         appId: shared.config.scope.appId, tenantId: shared.config.scope.tenantId }, key!,
       { token: provider.token, ...(deps.tableRequest ? { request: deps.tableRequest } : {}) }, authority); key!.fill(0);
-      proposals = github && githubAccounts ? createPullRequestService({ accounts, githubAccounts, github,
+      proposals = github && githubAccounts ? createPullRequestService({ accounts, githubAccounts, github, targets: config.targets,
         scope: { appId: shared.config.scope.appId, tenantId: shared.config.scope.tenantId },
         postProposal: (p, ctx) => admission ? admission.postProposal(p, ctx) : Promise.resolve('unavailable'),
         decisions: { authority, connected: (p, ctx) => admission ? admission.checkProposal(p, ctx) : Promise.resolve(false),
@@ -152,7 +152,8 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
         log: category => { process.stderr.write(`teams-ingress: ${category}\n`); } }) : undefined;
       tasks = createTaskService({ accounts, auth: delegatedAuth!, authority, ...(proposals ? { proposals } : {}),
         ...(github && githubAccounts ? { github: { accounts: githubAccounts, auth: github } } : {}),
-        targets: config.targets.map(t => ({ id: t.id, gatewayUid: t.gatewayUid, identityDigest: t.identityDigest!, taskPassToken: t.taskPassToken! })),
+        targets: config.targets.map(t => ({ id: t.id, gatewayUid: t.gatewayUid, identityDigest: t.identityDigest!, taskPassToken: t.taskPassToken!,
+          ...(t.githubRepositories ? { githubRepositories: t.githubRepositories } : {}) })),
         privateCredentials: config.targets.flatMap(t => [t.config.bearerToken, t.config.outbound!.bearerToken]),
         ...(deps.workiqRequest ? { workiq: { request: deps.workiqRequest } } : {}),
         log: category => { process.stderr.write(`teams-ingress: ${category}\n`); } });

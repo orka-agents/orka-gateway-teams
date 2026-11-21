@@ -7,14 +7,14 @@ import type { TaskGrant } from './grants.js';
 import { grantBinding, grantRef, githubTools, writeTool, operationKey } from './grants.js';
 import type { AccountStore, AccountTokens } from './store.js';
 import { AccountError } from './store.js';
-import { githubArguments, GitHubError } from './github.js';
+import { githubArguments, GitHubError, repositoryAllowed, REPOSITORY_NOT_ALLOWED } from './github.js';
 import type { createGitHub } from './github.js';
 import type { GitHubTool } from './grants.js';
 import type { createPullRequestService } from './pull-request-service.js';
 import { createWorkIQ, workIQArguments } from './workiq.js';
 
 export interface TaskReply { status: number; body: unknown }
-interface Target { id: string; gatewayUid: string; identityDigest: string; taskPassToken: string }
+interface Target { id: string; gatewayUid: string; identityDigest: string; taskPassToken: string; githubRepositories?: readonly string[] }
 const digest = (s: string) => createHash('sha256').update(s).digest();
 const refusal = (error = 'tool-unavailable', status = 403): TaskReply => ({ status, body: { error } });
 function deadline(input: unknown): number {
@@ -108,6 +108,12 @@ export function createTaskService(options: {
     let acquired: Awaited<ReturnType<AccountStore['acquire']>> | undefined;
     try {
       if (!await live() || tool !== 'workiq' && !frozen.githubGeneration) return refused('grant', 'signin-required');
+      // Only a grant that holds this tool learns the answer, before any token, reservation, replay or GitHub request.
+      // Orka hides a refusal's body from the agent, so this is a result.
+      const named = args as Record<string, string>;
+      if (tool !== 'workiq' && !repositoryAllowed(targets.find(t => t.id === frozen.targetId)?.githubRepositories, named.owner!, named.repo!)) {
+        logRefusal(tool, 'repository'); return { status: 200, body: { text: REPOSITORY_NOT_ALLOWED } };
+      }
       const subject = { objectId: frozen.objectId }; const g = options.github;
       acquired = tool === 'workiq' ? await options.accounts.acquire(subject, frozen.generation, assertion => options.auth.exchange(assertion, ctx), ctx,
         refreshToken => options.auth.refresh(refreshToken, ctx)) : await g!.accounts.acquire(subject, frozen.githubGeneration!, async () => { throw new Error(); }, ctx,
@@ -130,7 +136,7 @@ export function createTaskService(options: {
         return await live() ? { status: 200, body: { text: reservation.text } } : refused('authority');
       }
       if (proposing && !options.proposals) return refused('unavailable');
-      const result = proposing ? await options.proposals!.propose(frozen, args as Record<string, string>, operation!, acquired.accessToken, ctx,
+      const result = proposing ? await options.proposals!.propose(frozen, named, operation!, acquired.accessToken, ctx,
         text => safeOutput(frozen, text, token, acquired!.kind === 'token' ? acquired!.accessToken : '', ctx)) :
         tool === 'workiq' ? await provider.ask(args, acquired.accessToken, ctx) : await g!.auth.tool(tool as GitHubTool, args, acquired.accessToken, ctx);
       if (!await safeOutput(frozen, result.text, token, acquired.accessToken, ctx)) return refused('output');

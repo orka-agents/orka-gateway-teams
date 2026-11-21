@@ -133,3 +133,24 @@ test('a target task timeout is optional, kept as written and bounded by Orka\'s 
     assert.throws(() => snapshotRegistry(input), ConfigurationError, String(value));
   }
 });
+test('a target lists its GitHub repositories in lower case; none by default, and the list is not part of its identity', t => {
+  const digest = snapshotRegistry(registryInput()).targets[0]!.identityDigest;
+  assert.equal(snapshotRegistry(registryInput()).targets[0]!.githubRepositories, undefined);
+  const set = (value: unknown) => { const input = registryInput(); (input.targets[0] as Record<string, unknown>).githubRepositories = value; return input; };
+  const target = snapshotRegistry(set(['Orka-Agents/Orka', 'orka-agents/orka', 'Example/*', 'a/b_c.d-e'])).targets[0]!;
+  assert.deepEqual(target.githubRepositories, ['orka-agents/orka', 'example/*', 'a/b_c.d-e']);
+  assert.equal(Object.isFrozen(target.githubRepositories), true); assert.equal(target.identityDigest, digest);
+  assert.deepEqual(snapshotRegistry(set([])).targets[0]!.githubRepositories, []);
+  assert.equal(snapshotRegistry(set(['a/b'])).targets[1]!.githubRepositories, undefined, 'each target has its own list');
+  for (const value of ['example/project', {}, [7], [''], ['*'], ['*/*'], ['*/project'], ['example'], ['example/'], ['/project'], ['example/project/extra'],
+    ['example/pro*'], ['exam*/project'], ['example/**'], ['example/.'], ['example/..'], ['ex ample/project'], [' example/project'], ['example/project\n'],
+    ['exa_mple/project'], ['\u212Aample/project'], ['https://github.com/example/project'], ['a'.repeat(101) + '/project'], ['example/' + 'a'.repeat(101)],
+    Array.from({ length: 257 }, (_, i) => `example/project-${i}`)])
+    assert.throws(() => snapshotRegistry(set(value)), ConfigurationError, JSON.stringify(value).slice(0, 80));
+  assert.equal(snapshotRegistry(set(Array.from({ length: 256 }, (_, i) => `example/project-${i}`))).targets[0]!.githubRepositories!.length, 256);
+  const f = registryFixture(t); (f.manifest.targets[1] as Record<string, unknown>).githubRepositories = ['Example/Project', 'example/*']; f.save();
+  const parsed = parseRegistryConfig(f.env);
+  assert.deepEqual(parsed.targets.map(target => target.githubRepositories), [undefined, ['example/project', 'example/*']]);
+  (f.manifest.targets[1] as Record<string, unknown>).githubRepositories = 'example/project'; f.save();
+  assert.throws(() => parseRegistryConfig(f.env), ConfigurationError);
+});

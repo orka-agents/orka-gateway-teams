@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createGitHub, githubArguments } from '../src/accounts/github.js';
+import { createGitHub, githubArguments, repositoryAllowed, REPOSITORY_NOT_ALLOWED } from '../src/accounts/github.js';
 import { context, deferred } from './support/directory-table.js';
 import { toolsFixture } from './support/github-tools.js';
 
@@ -104,4 +104,16 @@ test('github-read-issue returns a bounded issue projection with a truncation not
   for (const number of [0, -1, 1.5, '071', '7.1', ' 71', 2 ** 31, String(2 ** 31), undefined]) assert.throws(() => githubArguments('github-read-issue', { ...repository, number }));
   assert.deepEqual(githubArguments('github-read-issue', { ...repository, number: '71' }), githubArguments('github-read-issue', { ...repository, number: 71 }));
   assert.throws(() => githubArguments('github-read-issue', { ...repository, number: 71, state: 'open' }));
+});
+test('a repository is allowed only by its own entry or its owner wildcard, compared without ASCII case', () => {
+  const list = ['example/project', 'acme/*'];
+  for (const [owner, repo] of [['example', 'project'], ['Example', 'PROJECT'], ['EXAMPLE', 'Project'], ['acme', 'repo'], ['ACME', 'Any.Repo_1-x'], ['acme', 'project']])
+    assert.equal(repositoryAllowed(list, owner!, repo!), true, `${owner}/${repo}`);
+  for (const [owner, repo] of [['example', 'other'], ['example', 'project2'], ['example', 'projec'], ['example', '*'], ['other', 'project'], ['acme-corp', 'repo'],
+    ['acm', 'repo'], ['*', 'project'], ['example/project', ''], ['', 'example/project'], ['acme/x', 'repo'], ['\u212Aacme', 'repo'], ['ac\u212Ae', 'repo'],
+    ['example', 'pro\u212Aect'], ['exa\u0130ple', 'project']])
+    assert.equal(repositoryAllowed(list, owner!, repo!), false, `${owner}/${repo}`);
+  assert.equal(repositoryAllowed(['ake/*'], 'a\u212Ae', 'repo'), false, 'only ASCII is folded');
+  assert.equal(repositoryAllowed(undefined, 'example', 'project'), false); assert.equal(repositoryAllowed([], 'example', 'project'), false);
+  assert.doesNotMatch(REPOSITORY_NOT_ALLOWED, /example|acme|project/u);
 });

@@ -95,3 +95,13 @@ test('shutdown_drains_held_lookup_before_store_close and recovery never posts', 
   await eventually(() => held); await other.close(); await recovery;
   assert.ok(f.requests.every(r => r.method === 'GET'));
 });
+test('recovery does not look in a repository that left the list: the proposal stays uncertain with no GitHub request', async t => {
+  const f = await decisionsFixture(t); await claim(f, true);
+  const narrowed = f.make(f.open(), undefined, [{ id: 'tools', githubRepositories: ['example/other'] }]); await narrowed.recover(context());
+  const p = (await f.store.getProposal(f.p.id, context()))!.proposal; assert.equal(p.state, 'uncertain');
+  assert.equal(f.requests.length, 0); assert.deepEqual(f.logs, ['pull-request-recovery-refused repository']);
+  narrowed.refresh(p); await eventually(() => f.logs.length === 2); assert.equal(f.requests.length, 0, 'a card refresh is refused the same way');
+  f.behavior((req, res) => res.end(JSON.stringify(req.path === '/user' ? { id: 123 } : [f.result()])));
+  const restored = f.make(f.open(), undefined, [{ id: 'tools', githubRepositories: ['Example/Project'.toLowerCase()] }]); await restored.recover(context());
+  assert.equal((await f.store.getProposal(f.p.id, context()))?.proposal.state, 'opened'); assert.ok(f.requests.length > 0 && f.requests.every(r => r.method === 'GET'));
+});

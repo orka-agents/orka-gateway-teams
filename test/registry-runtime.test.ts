@@ -35,6 +35,7 @@ import { payload } from './support/table-ingress-store.js';
 import { convertActivity } from '../src/teams/convert.js';
 import { createAccountStore } from '../src/accounts/store.js';
 import { grantReference } from '../src/accounts/grants.js';
+import { REPOSITORY_NOT_ALLOWED } from '../src/accounts/github.js';
 import { context as accountContext } from './support/directory-table.js';
 
 async function fixture(t: test.TestContext, initialize = true, count = 2, expirySeconds = 3600) {
@@ -608,7 +609,7 @@ for (const mode of ['group', 'user']) test(`${mode} policy: native registry wire
   const { toolsFixture } = await import('./support/github-tools.js'); const api = await toolsFixture(t);
   const keyFile = join(f.files, 'account-key'); const clientSecretFile = join(f.files, 'github-secret');
   writeFileSync(keyFile, 'ab'.repeat(32), { mode: 0o600 });
-  for (const target of f.config.targets) { target.config.receiver = { ...miConfig, managedIdentityHost: 'azure-container-apps' }; Object.assign(target, { taskPassToken: `controller-${target.id}` }); }
+  for (const target of f.config.targets) { target.config.receiver = { ...miConfig, managedIdentityHost: 'azure-container-apps' }; Object.assign(target, { taskPassToken: `controller-${target.id}`, githubRepositories: ['Acme/*'] }); }
   const origin = 'https://signin.example.invalid';
   const config = { ...f.config, sso: { accountTable: 'Accounts', keyFile, apiUri: 'api://gateway', connectionName: 'workiq', publicOrigin: origin },
     github: { clientId: 'Iv1.synthetic', clientSecretFile } };
@@ -684,6 +685,12 @@ for (const mode of ['group', 'user']) test(`${mode} policy: native registry wire
     assert.equal(result.status, 200); assert.deepEqual(await result.json(), { text: '{"number":8,"url":"https://github.com/acme/repo/issues/8"}' });
   };
   runtime = await startRegistryRuntime(config, deps); await execute(); assert.equal(api.requests.length, 1);
+  // The target's registry list reaches the listener: another owner gets the fixed refusal and no GitHub request.
+  const unlisted = await fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/task-passes`, { method: 'POST', headers: {
+    authorization: 'Bearer controller-primary', 'content-type': 'application/json' }, body: JSON.stringify(passBody) });
+  const refusedCall = await fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/task-tools/github-list-issues`, { method: 'POST', headers: {
+    authorization: 'Bearer ' + (await unlisted.json() as { pass: string }).pass, 'content-type': 'application/json' }, body: JSON.stringify({ owner: 'other', repo: 'repo' }) });
+  assert.equal(refusedCall.status, 200); assert.deepEqual(await refusedCall.json(), { text: REPOSITORY_NOT_ALLOWED }); assert.equal(api.requests.length, 1);
   await runtime.stop(); await runtime.done; runtime = await startRegistryRuntime(config, deps); await execute(); assert.equal(api.requests.length, 1);
   // Synthetic preview walk at the composed runtime boundary, with only GETs to GitHub.
   api.behavior((req, res) => res.end(JSON.stringify(req.path.includes('/git/ref/') ? { ref: 'refs/heads/orka/fix', object: { type: 'commit', sha: 'a'.repeat(40) } } :

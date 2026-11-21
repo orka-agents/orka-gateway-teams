@@ -6,13 +6,15 @@ import type { AccountStore } from './store.js';
 import { AccountError } from './store.js';
 import type { TaskGrant } from './grants.js';
 import type { createGitHub } from './github.js';
-import { githubArguments, GitHubError } from './github.js';
+import { githubArguments, GitHubError, repositoryAllowed } from './github.js';
 import { proposalIdentity, proposalDigest, proposalArgs, proposalOutput, projectClaim, claimEvidence } from './pull-request-proposal.js';
 import type { Proposal, ProposalOutcome, RevisionAdmission } from './pull-request-proposal.js';
 import { canonicalJSON } from '../directory/codec.js';
 
 export function createPullRequestService(options: { accounts: AccountStore; githubAccounts: AccountStore;
   github: Pick<ReturnType<typeof createGitHub>, 'readProposalFacts' | 'readUserId' | 'readHead' | 'findPullRequest' | 'openProposedPullRequest' | 'refresh'>; scope: DirectoryScope; now?: () => number;
+  /** Each target's allowed repositories; a proposal for an unlisted target or repository makes no GitHub request. */
+  targets: readonly { id: string; githubRepositories?: readonly string[] }[];
   /** Fixed categories only: the step a proposal stopped at, never values. */
   log?(category: string): void;
   postProposal(proposal: Proposal, ctx: DirectoryContext): Promise<'delivered' | 'uncertain' | 'unavailable'>;
@@ -23,6 +25,7 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
   const shutdown = new AbortController(); const effects = new Set<Promise<unknown>>(); const intake = new Set<Promise<unknown>>();
   const effectIds = new Set<string>(); let recovery: Promise<void> | undefined;
   const active = (ctx: DirectoryContext) => !closed && !!options.decisions?.authority.allowed() && !ctx.signal.aborted && performance.now() < ctx.deadline;
+  const allowed = (p: Proposal) => repositoryAllowed(options.targets.find(t => t.id === p.targetId)?.githubRepositories, p.owner, p.repo);
   async function generations(p: Proposal, ctx: DirectoryContext) {
     const subject = { objectId: p.objectId }; const a = await options.accounts.inspect(subject, ctx);
     const g = await options.githubAccounts.inspect(subject, ctx);
@@ -44,6 +47,8 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
     let outcome: ProposalOutcome;
     try {
       if (p.claim?.decision === 'reject') { await finish(p, undefined, bound); return; }
+      // The list may have changed since the card was posted.
+      if (!allowed(p)) { options.log?.('pull-request-approval-refused repository'); throw new GitHubError(); }
       if (!await generations(p, bound) || !await options.decisions!.connected(p, bound)) throw new GitHubError('signin-required');
       const subject = { objectId: p.objectId };
       const acquired = await options.githubAccounts.acquire(subject, p.githubGeneration, async () => { throw new GitHubError(); }, bound, refresh => options.github.refresh(refresh, bound));
@@ -96,6 +101,7 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
     const guards: ReturnType<AccountStore['watch']>[] = [];
     const bound = { ...ctx, authorizeWrite: () => active(ctx) && guards.every(g => g.active()) };
     try {
+      if (!allowed(p)) { options.log?.('pull-request-recovery-refused repository'); throw new GitHubError(); }
       const subject = { objectId: p.objectId };
       // Recovery never renews through GitHub's POST token endpoint. Expired credentials retain uncertainty.
       const account = await options.githubAccounts.acquire(subject, p.githubGeneration, async () => { throw new GitHubError(); }, bound);

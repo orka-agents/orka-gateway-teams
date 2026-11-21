@@ -137,3 +137,18 @@ test('expired_task_live_proposal_can_be_rejected without a Task pass or Orka tur
   const p = await f.decide('reject'); assert.equal(p.state, 'rejected');
   assert.equal(f.requests.length, 0); assert.equal(p.claim?.invokeActivityId, 'invoke');
 });
+for (const [name, targets] of [['removed from the list', [{ id: 'tools', githubRepositories: ['example/other', 'other/*'] }]], ['on a target with no list', [{ id: 'tools' }]],
+  ['on a target the gateway no longer has', [{ id: 'elsewhere', githubRepositories: ['example/*'] }]]] as const) test(`approving a card for a repository ${name} opens nothing and makes no GitHub request`, async t => {
+  const f = await decisionsFixture(t); const service = f.make(f.store, undefined, targets);
+  assert.equal((await service.decide(f.p, 'approve', 'invoke', f.ctx())).state, 'approving');
+  const p = await f.settled(); assert.equal(p.state, 'failed'); assert.deepEqual(p.outcome, { kind: 'failed' });
+  assert.equal(f.requests.length, 0); assert.deepEqual(f.logs, ['pull-request-approval-refused repository']);
+});
+test('approval opens the pull request for a wildcard or differently cased entry, and Reject needs no list', async t => {
+  const f = await decisionsFixture(t); const service = f.make(f.store, undefined, [{ id: 'tools', githubRepositories: ['example/*'] }]);
+  await service.decide(f.p, 'approve', 'invoke', f.ctx()); assert.equal((await f.settled()).state, 'opened');
+  assert.equal(f.requests.filter(r => r.method === 'POST').length, 1); assert.deepEqual(f.logs, []);
+  const g = await decisionsFixture(t); const denied = g.make(g.store, undefined, [{ id: 'tools' }]);
+  await denied.decide(g.p, 'reject', 'invoke', g.ctx()); assert.equal((await g.settled()).state, 'rejected');
+  assert.equal(g.requests.length, 0); assert.deepEqual(g.logs, []);
+});

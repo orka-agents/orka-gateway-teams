@@ -36,6 +36,14 @@ export function githubArguments(tool: GitHubTool, input: unknown): Record<string
   return out;
 }
 
+/** Fixed and value-free: the same text whether or not the repository exists. */
+export const REPOSITORY_NOT_ALLOWED = "This gateway's operator has not allowed its GitHub tools to use that repository. Nothing was read or changed; do not retry.";
+/** allowed holds lower-case "owner/repo" and "owner/*" entries. Only ASCII is folded, as GitHub names are ASCII. */
+export function repositoryAllowed(allowed: readonly string[] | undefined, owner: string, repo: string): boolean {
+  const lower = (s: string) => s.replace(/[A-Z]/gu, c => c.toLowerCase());
+  return !!allowed && (allowed.includes(`${lower(owner)}/*`) || allowed.includes(`${lower(owner)}/${lower(repo)}`));
+}
+
 const failure = () => new GitHubError();
 const ISSUE_BODY_BYTES = 16384;
 /** Cut at a code point so the JSON-escaped text stays within max bytes; the final 32 KiB check still bounds the whole result. */
