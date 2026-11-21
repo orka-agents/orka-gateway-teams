@@ -1,10 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import type { createPullRequestService } from '../accounts/pull-request-service.js';
-import { proposalOutput, proposalHash, proposalDecisionText } from '../accounts/pull-request-proposal.js';
+import { proposalOutput, proposalHash } from '../accounts/pull-request-proposal.js';
 import { createExternalEventId } from '../teams/ids.js';
 import type { Proposal, RevisionAdmission } from '../accounts/pull-request-proposal.js';
 import { object } from '../storage/table/codec.js';
-import { buildPullRequestCard } from '../teams/pull-request-card.js';
+import { buildPullRequestCard, pullRequestNotice } from '../teams/pull-request-card.js';
 import { MAX_OUTGOING_MESSAGE_BYTES } from '../teams/format.js';
 import { identity } from '../delivery/identity.js';
 import { AccountError } from '../accounts/store.js';
@@ -176,7 +176,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     if (!p || reply.kind === 'pr-approval' && p.state !== 'pending' || reply.kind === 'pr-decision' && reply.outcome !== proposalHash(p.outcome ?? p.state) || p.payloadDigest !== reply.digest || p.revision !== reply.rev || p.conversationId !== saved.conversationId || p.targetId !== reply.targetId) throw new DirectoryError('unready');
     const signin = p.outcome?.kind === 'signin-required';
     // Revocation fences private previews. This fixed notice copies no old account/proposal strings.
-    const card = signin ? { type: 'AdaptiveCard' as const, version: '1.5' as const, body: [{ type: 'TextBlock' as const, wrap: true, text: proposalDecisionText(p) }] } : buildPullRequestCard(p, 'room', !!options.proposals);
+    const card = signin ? pullRequestNotice('signin-expired') : buildPullRequestCard(p, 'room', !!options.proposals);
     const message: ProviderMessage = { type: 'message', replyToId: p.activityId, attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: card }] };
     const wire = JSON.stringify(message);
     const safe = signin ? options.safeOutput?.(wire) !== false && (!options.github || options.github.auth.safeOutput(wire)) :
@@ -278,9 +278,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
         const github = await options.github?.accounts.inspect(subject, ctx);
         if (current.generation === p.generation && (!github || github.generation === p.githubGeneration)) return denied;
         // A fresh sign-in can resume the saved turn, but cannot restore revoked private preview facts.
-        const text = p.revisionAdmission === 'delivered' ? 'Your revision was sent.' : p.revisionAdmission === 'signin-required' ?
-          'Sign in, then send your revision again.' : p.revisionAdmission === 'conflict' ? 'Your revision was not sent. Reply with what to change.' : 'Sending your revision…';
-        card = { type: 'AdaptiveCard', version: '1.5', body: [{ type: 'TextBlock', wrap: true, text }],
+        card = { ...pullRequestNotice(p.revisionAdmission),
           ...(card.refresh ? { refresh: { ...card.refresh, userIds: [supplied.controlRecipient.id] } } : {}) };
         if (!await safeProposal(p, JSON.stringify(card), ctx, current.generation, github?.generation ?? p.githubGeneration)) return denied;
       }

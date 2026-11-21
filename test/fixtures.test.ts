@@ -37,7 +37,7 @@ test('generic error delivery omits task and session references', () => {
 test('expected replies are one readable card, not text plus card', () => {
   for (const [message, delivery, title] of [
     [finalMessage, finalDelivery, 'Orka reply'],
-    [errorMessage, errorDelivery, 'Orka could not complete the request'],
+    [errorMessage, errorDelivery, "Couldn't complete the request"],
   ] as const) {
     assert.equal(message.type, 'message');
     assert.ok(message.text === undefined || message.text === '');
@@ -47,11 +47,12 @@ test('expected replies are one readable card, not text plus card', () => {
     const card = attachment.content;
     assert.equal(card.type, 'AdaptiveCard');
     assert.ok(card.fallbackText?.trim());
-    const heading = card.body?.[0];
-    const answer = card.body?.[1];
-    assert.ok(heading?.type === 'TextBlock');
+    const answer = card.body?.at(-1);
     assert.ok(answer?.type === 'TextBlock');
-    assert.equal(heading.text, title);
+    // The kind is always in the fallback; on the card only a failure needs a heading.
+    assert.ok(card.fallbackText?.startsWith(delivery.kind === 'final' ? `${title}: ` : 'Orka could not complete the request: '));
+    assert.equal(card.body?.length, delivery.kind === 'final' ? 1 : 2);
+    if (delivery.kind !== 'final') assert.ok(card.body?.[0]?.type === 'TextBlock' && card.body[0].text === title);
     assert.equal(answer.text, delivery.text);
     assert.equal(answer.wrap, true);
     assert.ok(Buffer.byteLength(JSON.stringify(message)) <= MAX_OUTGOING_MESSAGE_BYTES);

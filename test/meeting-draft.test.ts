@@ -53,27 +53,83 @@ test('fixed meeting URL independently encodes fields, never adds duration or gue
   assert.ok(url.includes('endTime=2028-03-01T00%3A15%3A00%2B05%3A30'));
   assert.equal(url.includes('duration'), false); assert.ok(url.length <= 2048); assert.equal(/[^\x20-\x7e]/u.test(url), false);
 });
-test('maximum escaped structured fields and roster labels fall back visibly without truncating the draft', () => {
-  const m: Record<string, string> = { ...metadata, 'meeting.subject': '\\'.repeat(200), 'meeting.attendees': 'named',
-    'meeting.durationMinutes': '480', 'meeting.preferredWindow': '\\'.repeat(256), 'meeting.suggestedStart': '2028-02-29T12:00:00Z' };
+const max = (attendees: 'everyone' | 'named') => { const m: Record<string, string> = { ...metadata, 'meeting.subject': '\\'.repeat(200), 'meeting.attendees': attendees,
+  'meeting.durationMinutes': '480', 'meeting.preferredWindow': '\\'.repeat(256), 'meeting.suggestedStart': '2028-02-29T12:00:00Z' };
   for (let i = 0; i < 5; i++) m[`meeting.agenda.${i}`] = '\\'.repeat(256);
-  for (let i = 0; i < 10; i++) m[`meeting.name.${i}`] = '\\'.repeat(128);
-  const draft = decodeMeetingDraft(m)!;
-  const before = JSON.stringify(draft);
+  if (attendees === 'named') for (let i = 0; i < 10; i++) m[`meeting.name.${i}`] = '\\'.repeat(128);
+  return decodeMeetingDraft(m)!; };
+const facts = (card: { body?: unknown[] }) => (card.body!.find((b: any) => b.type === 'FactSet') as any).facts as { title: string; value: string }[];
+const lines = (card: { body?: unknown[] }) => card.body!.filter((b: any) => b.type === 'TextBlock').map((b: any) => b.text as string);
+
+test('card layout: caption, bold subject, facts in the viewer\'s local time, agenda, then what happens next', () => {
+  const draft = decodeMeetingDraft({ ...metadata, 'meeting.agenda.1': 'Decide', 'meeting.preferredWindow': 'Tuesday afternoon', 'meeting.suggestedStart': '2026-11-24T21:00:00Z' })!;
+  const message = formatMeetingDraft(draft, { labels: ['Ada', 'Grace'], count: 2 }, 'https://teams.microsoft.com/l/meeting/new?subject=x', { requesterDisplayName: 'Ada' });
+  assert.deepEqual(message.attachments[0].content, { type: 'AdaptiveCard', version: '1.4',
+    fallbackText: 'Meeting draft. Nothing scheduled. Review the agenda, duration and time suggestions in Teams.',
+    body: [
+      { type: 'TextBlock', text: 'Meeting draft · asked by Ada', wrap: true, isSubtle: true, size: 'Small', spacing: 'None' },
+      { type: 'TextBlock', text: 'A \\+ B', wrap: true, weight: 'Bolder', size: 'Medium', spacing: 'Small' },
+      { type: 'FactSet', spacing: 'Small', facts: [
+        { title: 'When', value: '{{DATE(2026-11-24T21:00:00Z, SHORT)}} {{TIME(2026-11-24T21:00:00Z)}}–{{TIME(2026-11-24T21:30:00Z)}}' },
+        { title: 'Window', value: 'Tuesday afternoon' }, { title: 'Length', value: '30 min' }, { title: 'Who', value: 'Everyone here (2): Ada, Grace' }] },
+      { type: 'TextBlock', text: 'Agenda', wrap: true, weight: 'Bolder', size: 'Small', spacing: 'Medium' },
+      { type: 'TextBlock', text: '1. Review \\[design\\]\n2. Decide', wrap: true, spacing: 'Small' },
+      { type: 'TextBlock', text: 'Nothing is scheduled until you open it in Teams and send it.', wrap: true, isSubtle: true, size: 'Small', spacing: 'Medium' }],
+    actions: [{ type: 'Action.OpenUrl', title: 'Open in Teams', url: 'https://teams.microsoft.com/l/meeting/new?subject=x' }] });
+});
+
+test('facts: the window is "When" without a start; named people replace the roster; a personal chat has no asker', () => {
+  const windowOnly = decodeMeetingDraft({ ...metadata, 'meeting.preferredWindow': 'Next *week*' })!;
+  const card = formatMeetingDraft(windowOnly, { labels: [], count: 0 }, undefined, undefined, 'roster').attachments[0].content;
+  assert.deepEqual(facts(card), [{ title: 'When', value: 'Next \\*week\\*' }, { title: 'Length', value: '30 min' }, { title: 'Who', value: 'Everyone here' }]);
+  assert.equal(lines(card)[0], 'Meeting draft'); assert.equal(lines(card).at(-1), "Nothing is scheduled. Couldn't confirm who is in this chat, so there is no meeting link.");
+  const named = decodeMeetingDraft({ ...metadata, 'meeting.attendees': 'named', 'meeting.name.0': '[Ada]', 'meeting.name.1': 'Grace' })!;
+  assert.deepEqual(facts(formatMeetingDraft(named, { labels: ['Ada L', 'Grace H'], count: 2 }).attachments[0].content), [{ title: 'Length', value: '30 min' }, { title: 'Who', value: '\\[Ada\\], Grace' }]);
+  const many = formatMeetingDraft(windowOnly, { labels: Array.from({ length: 12 }, (_, i) => `P${i}`), count: 14 }).attachments[0].content;
+  assert.equal(facts(many).at(-1)!.value, 'Everyone here (14): P0, P1, P2, P3, P4, P5, P6, P7, P8, P9; 4 more');
+  assert.equal(lines(many).at(-1), 'Nothing is scheduled. This draft has no meeting link.');
+  assert.equal(lines(formatMeetingDraft(windowOnly, { labels: [], count: 0 }, undefined, {}).attachments[0].content)[0], 'Meeting draft · asked by an allowed participant');
+});
+
+test('local time takes whole seconds and keeps the draft\'s own offset, so the client can convert it', () => {
+  const draft = decodeMeetingDraft({ ...metadata, 'meeting.suggestedStart': '2028-02-29T23:45:00.123456789+05:30' })!;
+  const when = facts(formatMeetingDraft(draft, { labels: [], count: 0 }).attachments[0].content)[0]!;
+  assert.equal(when.value, '{{DATE(2028-02-29T23:45:00+05:30, SHORT)}} {{TIME(2028-02-29T23:45:00+05:30)}}–{{TIME(2028-03-01T00:15:00+05:30)}}');
+  // The Adaptive Cards date functions accept exactly this spelling.
+  for (const [, time] of when.value.matchAll(/\((\S+?)[,)]/gu)) assert.match(time!, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})$/u);
+  // Free text from the agent cannot start a time of its own.
+  const forged = decodeMeetingDraft({ ...metadata, 'meeting.subject': '{{DATE(2020-01-01T00:00:00Z)}}', 'meeting.preferredWindow': '{{TIME(2020-01-01T00:00:00Z)}}' })!;
+  assert.ok(!JSON.stringify(formatMeetingDraft(forged, { labels: ['{{TIME(2020-01-01T00:00:00Z)}}'], count: 1 })).includes('{{'));
+});
+
+for (const [reason, text] of [['disabled', 'Meeting drafts are turned off here, so there is no meeting link.'], ['channel', 'Meeting links work only in personal and group chats, not channels.'],
+  ['roster', "Couldn't confirm who is in this chat, so there is no meeting link."], ['attendees', "Couldn't match every requested attendee to one person in this chat, so there is no meeting link."],
+  ['link-too-long', 'The full meeting link is too long, so there is no link. No partial attendee list was used.'],
+  ['card-too-large', "The full meeting link doesn't fit in one message, so there is no link. No partial attendee list was used."]] as const) test(`no link (${reason}): one closing line says why, and there is no button`, () => {
+  const card = formatMeetingDraft(decodeMeetingDraft(metadata)!, { labels: ['Ada'], count: 1 }, 'https://teams.microsoft.com/l/meeting/new?subject=x', undefined, reason).attachments[0].content;
+  assert.equal(lines(card).at(-1), `Nothing is scheduled. ${text}`); assert.equal(card.actions, undefined);
+  assert.equal(card.fallbackText, 'Meeting draft. Nothing scheduled. Review the agenda, duration and time suggestions in Teams. No meeting link is available.');
+});
+
+test('maximum escaped structured fields and roster labels fall back visibly without truncating the draft', () => {
+  const draft = max('everyone'); const before = JSON.stringify(draft);
   const message = formatMeetingDraft(draft, { labels: Array(10).fill('\\'.repeat(256)), count: 10 },
-    'https://teams.microsoft.com/' + 'x'.repeat(2000), { requesterDisplayName: '\\'.repeat(256), replyToId: '\\'.repeat(256) });
+    'https://teams.microsoft.com/' + 'x'.repeat(2000), { requesterDisplayName: '\\'.repeat(256), continuation: true, replyToId: '\\'.repeat(256) });
   const card = message.attachments[0].content;
   assert.equal(card.actions, undefined); assert.equal(message.text, undefined); assert.equal(message.attachments.length, 1);
   assert.equal(card.version, '1.4'); assert.ok(Buffer.byteLength(card.fallbackText!) <= 512);
   assert.ok(Buffer.byteLength(JSON.stringify(message)) <= 20480); assert.equal(JSON.stringify(draft), before);
   assert.equal(message.replyToId, '\\'.repeat(256));
-  const texts = card.body!.map(block => (block as { text: string }).text);
-  assert.equal(texts.includes('\\'.repeat(400)), true);
-  assert.equal(texts.includes('Preferred window: ' + '\\'.repeat(512)), true);
-  assert.equal(texts.some(text => text === 'Agenda:\n' + Array.from({ length: 5 }, (_, i) => `${i + 1}. ${'\\'.repeat(512)}`).join('\n')), true);
-  assert.equal(texts.some(text => text === 'Requested attendees: ' + Array(10).fill('\\'.repeat(256)).join(', ')), true);
-  assert.equal(texts.some(text => text.includes('10') && text.includes('omitted')), true);
-  assert.equal(texts.some(text => text.includes('No partial link or recipient list')), true);
+  assert.deepEqual(lines(card), [`Meeting draft · asked by ${'\\'.repeat(512)} · continuing this chat`, '\\'.repeat(400), 'Agenda',
+    Array.from({ length: 5 }, (_, i) => `${i + 1}. ${'\\'.repeat(512)}`).join('\n'),
+    "Nothing is scheduled. The full meeting link doesn't fit in one message, so there is no link. No partial attendee list was used."]);
+  assert.deepEqual(facts(card), [{ title: 'When', value: '{{DATE(2028-02-29T12:00:00Z, SHORT)}} {{TIME(2028-02-29T12:00:00Z)}}–{{TIME(2028-02-29T20:00:00Z)}}' },
+    { title: 'Window', value: '\\'.repeat(512) }, { title: 'Length', value: '480 min' }, { title: 'Who', value: 'Everyone here (10); names left out to fit the message limit' }]);
+  // The largest named draft fits with its link: every requested name stays, and no roster label is repeated beside it.
+  const named = formatMeetingDraft(max('named'), { labels: Array(10).fill('\\'.repeat(256)), count: 10 },
+    'https://teams.microsoft.com/' + 'x'.repeat(2000), { requesterDisplayName: '\\'.repeat(256), continuation: true, replyToId: '\\'.repeat(256) });
+  assert.ok(Buffer.byteLength(JSON.stringify(named)) <= 20480); assert.equal(named.attachments[0].content.actions?.length, 1);
+  assert.equal(facts(named.attachments[0].content).at(-1)!.value, Array(10).fill('\\'.repeat(256)).join(', '));
 });
 
 test('link overflow never emits a partial action; measured dedicated card preserves every field and room presentation', () => {
@@ -85,8 +141,8 @@ test('link overflow never emits a partial action; measured dedicated card preser
   assert.equal(message.text, undefined); assert.equal(message.attachments.length, 1); assert.equal(message.replyToId, 'root');
   const card = message.attachments[0].content; assert.equal(card.version, '1.4'); assert.equal(card.actions, undefined);
   assert.ok(Buffer.byteLength(card.fallbackText!) <= 512); assert.ok(Buffer.byteLength(JSON.stringify(message)) <= 20480);
-  const body = JSON.stringify(card.body); for (const text of ['A \\\\+ B', '30 minutes', 'Next week', '2028-01-01T12:00:00Z', 'Nothing scheduled', "Continuing the room's conversation"]) assert.ok(body.includes(text));
-  assert.ok(body.includes('\\\\[Ada\\\\]')); assert.ok(body.includes('\\\\[Owner\\\\]'));
+  const body = JSON.stringify(card.body); for (const text of ['A \\\\+ B', '30 min', 'Next week', '{{TIME(2028-01-01T12:00:00Z)}}–{{TIME(2028-01-01T12:30:00Z)}}', 'Nothing is scheduled. ', ' · continuing this chat']) assert.ok(body.includes(text), text);
+  assert.ok(body.includes('\\\\[Ada\\\\]')); assert.ok(body.includes('asked by \\\\[Owner\\\\]'));
   assert.ok(body.includes('Review \\\\[design\\\\]')); assert.ok(body.includes('too long'));
   const action = formatMeetingDraft(draft, { labels: ['You'], count: 1 }, meetingLink(draft, ['one@example.test']));
   assert.equal(action.attachments[0].content.actions?.[0]?.type, 'Action.OpenUrl');

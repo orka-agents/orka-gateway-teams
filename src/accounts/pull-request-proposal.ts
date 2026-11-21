@@ -93,19 +93,6 @@ export function proposalOutcome(p: Pick<Proposal, 'owner' | 'repo'>, input: unkn
   } else if (!['branch-moved', 'permission', 'signin-required', 'validation', 'failed', 'uncertain'].includes(String(v.kind)) || Object.keys(v).length !== 1) throw new Error('Invalid outcome');
   return v as unknown as ProposalOutcome;
 }
-export function proposalDecisionText(p: Proposal): string {
-  const o = p.outcome; const repo = `${p.owner}/${p.repo}`;
-  if (o?.kind === 'opened') return `${o.existing ? "There's already a PR for this branch:" : 'Opened'} #${o.number} in ${repo}: ${p.title}. ${o.url}` +
-    (o.headSHA !== p.headSHA ? ` The branch changed while the PR was opening; it now points at ${o.headSHA.slice(0, 7)}, not the ${p.headSHA.slice(0, 7)} you approved.` : '');
-  if (p.state === 'rejected') return "OK, I didn't open it.";
-  if (o?.kind === 'branch-moved') return 'The branch changed after you approved, so nothing was opened. Ask again for a new card.';
-  if (o?.kind === 'permission') return `Your GitHub account can't open pull requests in ${repo}, so nothing was opened.`;
-  if (o?.kind === 'signin-required') return 'Your account link has expired. Sign in, then ask again for a new card.';
-  if (o?.kind === 'validation') return 'GitHub rejected the pull request details. Nothing was opened; ask again for a new card.';
-  if (o?.kind === 'failed') return 'Nothing was opened; ask again for a new card.';
-  if (p.state === 'uncertain') return `I couldn't confirm the PR opened. Check https://github.com/${p.owner}/${p.repo}/tree/${encodeURIComponent(p.head)} before asking again.`;
-  return '';
-}
 export function projectClaim(p: Proposal, claim: ClaimEvidence): Proposal {
   return { ...p, claim, ...(claim.decision === 'revise' ? { revisionAdmission: 'pending' as const } : {}), state: claim.decision === 'approve' ? 'approving' : claim.decision === 'reject' ? 'rejected' : 'revise-requested' };
 }

@@ -97,9 +97,10 @@ no schema, fingerprint version, marker, alias or receipt format changes are need
 
 The wire protocol has **no structured question marker**. To request a question
 heading, the agent must explicitly begin message content with the case-sensitive
-leading prefix `Question: ` (including the space). Such a message is titled
-**Orka question**; other messages are titled **Orka update**. The prefix stays in
-the delivered body. No metadata field, natural-language classification, question
+leading prefix `Question: ` (including the space). Such a card is headed
+**Question**, and its body starts after the prefix with a capital letter; other
+messages have no heading. The fallback text still starts **Orka question** or
+**Orka update**. No metadata field, natural-language classification, question
 mark heuristic or special answer semantics is invented. An arbitrary question
 without that convention cannot be distinguished from an update by the adapter.
 

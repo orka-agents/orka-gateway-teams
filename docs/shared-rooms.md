@@ -134,16 +134,16 @@ Session and queues normal follow-ups; a message does not resume a running Task.
 
 ## Requester and continuation presentation
 
-A shared card says `Asked by <saved label>`, escaping Markdown metacharacters so
-the name cannot become a link or emphasis. Without a name it says
-`Asked by an allowed participant`. Provider/AAD requester IDs are not printed.
+A shared card opens with one small line, `Reply to <saved label>`, escaping
+Markdown metacharacters so the name cannot become a link or emphasis. Without a
+name it says `Reply to an allowed participant`. Provider/AAD requester IDs are not printed.
 The winning per-event route supplies the label, not the latest room participant.
 The optional formatter context is adapter-local; it does not change the V1
 request, text, metadata, journal fingerprints or receipts. The complete activity,
 including labels, continuation and `replyToId`, stays within 20 KiB UTF-8 JSON;
 fallback is at most 512 bytes and truncation preserves grapheme prefixes.
 
-`Continuing the room's conversation` means only that this adapter has previously
+` · continuing this chat` on that line means only that this adapter has previously
 observed a **different `originatingEventId` for the same scoped `sessionRef`**.
 Scope includes app, tenant/account, exact room/context, normalized thread and
 Session namespace/name. It is not an authoritative Session incarnation, turn

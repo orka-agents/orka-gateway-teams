@@ -726,13 +726,13 @@ for (const mode of ['group', 'user']) test(`${mode} policy: native registry wire
   assert.equal((await post(runtime.port, f.auth.token(), stranger)).status, 403);
   const reject = { ...refresh, id: 'reject-proposal', value: { action: action('pr-reject') } };
   assert.equal((await post(runtime.port, f.auth.token(), reject)).status, 200);
-  await eventually(() => sent.some(s => s.includes("I didn't open"))); assert.equal(revisionEvents.length, 0);
+  await eventually(() => sent.some(s => s.includes('Not opened. '))); assert.equal(revisionEvents.length, 0);
   await preview('revision'); const revisionCard = JSON.parse(sent.at(-1)!).attachments[0].content;
   const senderRevision = await post(runtime.port, f.auth.token(), { ...refresh, value: { action: revisionCard.refresh.action } });
   const senderCard = (await senderRevision.json() as any).value;
   const reviseAction = senderCard.actions.find((a: any) => a.title === 'Revise')!.card.actions[0];
   const revise = { ...refresh, id: 'revision-first-invoke', value: { action: { ...reviseAction, data: { ...reviseAction.data, note: 'also add a regression test' } } } };
-  const sending = await post(runtime.port, f.auth.token(), revise); assert.equal(sending.status, 200); assert.match(await sending.text(), /Sending your revision/);
+  const sending = await post(runtime.port, f.auth.token(), revise); assert.equal(sending.status, 200); assert.match(await sending.text(), /Sending your changes…/);
   await eventually(() => revisionEvents.length === 1);
   const event = revisionEvents[0]!; assert.equal(event.contextId, message.conversation.id); assert.equal(event.sender.id, message.from.id);
   assert.equal(event.text, 'Change the proposed pull request for orka/fix: also add a regression test');
@@ -740,7 +740,7 @@ for (const mode of ['group', 'user']) test(`${mode} policy: native registry wire
   const freshRef = grantReference(target.config.scope, target, event.externalEventId, event.replyTarget!);
   assert.equal(event.metadata!.gatewayGrantRef, freshRef); assert.notEqual(freshRef, proposalRef);
   const sentRevision = await post(runtime.port, f.auth.token(), { ...refresh, value: { action: revisionCard.refresh.action } });
-  assert.match(await sentRevision.text(), /asked for changes/);
+  assert.match(await sentRevision.text(), /Changes requested\. Sent to the agent\..*Your note: \\"also add a regression test\\"/);
   assert.equal((await post(runtime.port, f.auth.token(), { ...revise, id: 'new-invoke', value: { action: { ...reviseAction, data: { ...reviseAction.data, note: 'do not replace first note' } } } })).status, 200);
   await runtime.stop(); await runtime.done; runtime = await startRegistryRuntime(config, deps);
   const beforeRetry = revisionEvents.length; assert.equal((await post(runtime.port, f.auth.token(), revise)).status, 200); assert.equal(revisionEvents.length, beforeRetry);
@@ -749,7 +749,7 @@ for (const mode of ['group', 'user']) test(`${mode} policy: native registry wire
   assert.notEqual(replacementAfterRevision.refresh.action.data.proposal, revisionCard.refresh.action.data.proposal);
   // Replacement publishes a new card; a decided older card retains its first note rather than becoming pending again.
   const oldRevision = await post(runtime.port, f.auth.token(), { ...refresh, value: { action: revisionCard.refresh.action } });
-  assert.match(await oldRevision.text(), /asked for changes/); assert.equal(revisionEvents.length, 1);
+  assert.match(await oldRevision.text(), /Changes requested\. Sent to the agent\./); assert.equal(revisionEvents.length, 1);
   await preview('approval'); const next = JSON.parse(sent.at(-1)!).attachments[0].content;
   const current = await post(runtime.port, f.auth.token(), { ...refresh, value: { action: next.refresh.action } });
   const approval = (await current.json() as any).value;

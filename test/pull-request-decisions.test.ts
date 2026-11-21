@@ -35,7 +35,7 @@ test('approved_payload_is_only_post_body and two_replicas_one_post and returned 
   assert.deepEqual(posts[0]!.body, { base: 'main', head: 'orka/fix', title: 'Retry the lease read', body: 'Agent-written description' });
   assert.ok(f.requests.every(r => r.method === 'GET' || r.path === '/repos/example/project/pulls'));
   const { buildPullRequestCard } = await import('../src/teams/pull-request-card.js');
-  assert.match(JSON.stringify(buildPullRequestCard(p, 'sender', true)), /changed while/);
+  assert.match(JSON.stringify(buildPullRequestCard(p, 'sender', true)), /branch moved while opening/);
   assert.match(JSON.stringify(buildPullRequestCard(p, 'sender', true)), /ccccccc/);
 });
 test('moved_head_opens_nothing and existing_pr_is_linked_without_post', async t => {

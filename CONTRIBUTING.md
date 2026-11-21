@@ -584,14 +584,9 @@ the formatter; tests compare the real output against them. This is the complete
         "body": [
           {
             "type": "TextBlock",
-            "text": "Orka reply",
-            "weight": "Bolder",
-            "wrap": true
-          },
-          {
-            "type": "TextBlock",
             "text": "Project summary\n\n- Review open issues\n- Run `npm test`\n\nこんにちは 🧑🏽‍💻",
-            "wrap": true
+            "wrap": true,
+            "spacing": "Small"
           }
         ]
       }
@@ -639,7 +634,7 @@ independently bounded fallback, deterministic output, and frozen inputs. The
 formatter does not copy task/session references or metadata into cards.
 An optional validated adapter-local `DeliveryPresentation` marks a shared card:
 saved requester label is Markdown-escaped, missing name uses `an allowed participant`,
-and `continuation: true` adds exactly `Continuing the room's conversation`.
+and `continuation: true` adds exactly ` · continuing this chat` to that line.
 Only the correlation backend's observation of a different prior origin for the
 same scoped `sessionRef` permits that wording; no sender/context/count inference.
 Channel `replyToId` is constructed and measured inside the formatter, never appended
