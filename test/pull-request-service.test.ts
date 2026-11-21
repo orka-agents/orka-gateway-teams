@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createAccountStore } from '../src/accounts/store.js';
-import { createGitHub } from '../src/accounts/github.js';
+import { createGitHub, REPOSITORY_NOT_ALLOWED } from '../src/accounts/github.js';
 import { createPullRequestService } from '../src/accounts/pull-request-service.js';
 import { createTaskService } from '../src/accounts/task-service.js';
 import { proposalIdentity } from '../src/accounts/pull-request-proposal.js';
@@ -21,7 +21,7 @@ async function revisionStatus(f: Awaited<ReturnType<typeof decisionsFixture>>, s
 }
 const args = { owner: 'example', repo: 'project', base: 'main', head: 'orka/fix', title: 'Retry the lease read', body: 'Agent-written description' };
 const commit = (name = 'Orka Publisher', email = 'publisher@orka.ai') => ({ sha: 'a'.repeat(40), commit: { author: { name, email }, committer: { name: 'Other', email: 'other@example.invalid' } }, author: null });
-async function setup(t: test.TestContext) {
+async function setup(t: test.TestContext, githubRepositories: readonly string[] = ['example/project']) {
   const f = await grantsFixture(t); const remote = await toolsFixture(t); let sent = 0;
   const ghAccounts = createAccountStore(binding, Buffer.alloc(32, 7), f.dependencies, f.authority, f.now, 'github'); t.after(() => ghAccounts.close());
   const ch = await ghAccounts.challenge(f.subject, 'chat-private', 'github', context()); await ghAccounts.claim(ch, context());
@@ -43,9 +43,10 @@ async function setup(t: test.TestContext) {
   await f.store.reserveGrant(grant, context());
   let outcome: 'delivered' | 'uncertain' | 'unavailable' = 'delivered';
   const proposals = createPullRequestService({ accounts: f.store, githubAccounts: ghAccounts, github, scope: { appId: binding.appId, tenantId: binding.tenantId }, now: f.now, log: c => logs.push(c),
+    targets: [{ id: 'tools', githubRepositories }],
     postProposal: async (proposal, ctx) => { assert.equal((await f.store.getProposal(proposal.id, ctx))?.proposal.state, 'pending'); sent++; return outcome; } });
   const service = createTaskService({ accounts: f.store, authority: f.authority, now: f.now,
-    targets: [{ id: 'tools', gatewayUid: 'gateway', identityDigest: f.input.targetDigest, taskPassToken: 'CONTROLLER_PRIVATE' }],
+    targets: [{ id: 'tools', gatewayUid: 'gateway', identityDigest: f.input.targetDigest, taskPassToken: 'CONTROLLER_PRIVATE', githubRepositories }],
     auth: { exchange: async () => { throw new Error('not SSO'); }, refresh: async () => { throw new Error('not renewal'); } },
     github: { accounts: ghAccounts, auth: github }, proposals, privateCredentials: ['DELIVERY_PRIVATE', 'QUOTED_"_PRIVATE'], log: c => logs.push(c) }); t.after(() => service.close());
   const body = { protocolVersion: 'orka.gateway.v1', grantRef: grant.ref, namespaceUID: 'ns', gatewayUID: 'gateway', taskUID: 'task', tools: grant.tools, deadline: new Date(f.now() + 600000).toISOString() };
@@ -242,4 +243,17 @@ test('candidate publication can resume after selector CREATE was proven absent w
 test('saved proposal distinguishes unknown card arrival from proven no-effect', async t => {
   const f = await setup(t); f.outcome('uncertain'); const r = await f.call(); assert.equal(r.status, 200); assert.match(JSON.stringify(r.body), /could not confirm/);
   f.outcome('unavailable'); assert.equal((await f.call(args, 'other')).status, 503);
+});
+for (const list of [[], ['example/other'], ['other/*']]) test(`a proposal for a repository outside ${JSON.stringify(list)} is refused before any GitHub read, saved proposal or card`, async t => {
+  const f = await setup(t, list); await f.issue(); const rows = JSON.stringify([...f.rows.values()]);
+  assert.deepEqual(await f.call(), { status: 200, body: { text: REPOSITORY_NOT_ALLOWED } });
+  assert.equal(f.requests.length, 0); assert.equal(f.sent(), 0); assert.equal(JSON.stringify([...f.rows.values()]), rows);
+  assert.equal(await f.store.getProposal(proposalIdentity(f.grant.ref, 'task', 'operation'), context()), undefined);
+  assert.deepEqual(f.logs, ['task-tool-refused github-propose-pull-request repository']);
+});
+test('a proposal reaches a repository listed by owner wildcard or in another case', async t => {
+  for (const list of [['example/*'], ['example/project']]) {
+    const f = await setup(t, list); const result = await f.call({ ...args, owner: 'Example', repo: 'Project' });
+    assert.equal(result.status, 200); assert.match(JSON.stringify(result.body), /Approval card sent/); assert.equal(f.sent(), 1);
+  }
 });

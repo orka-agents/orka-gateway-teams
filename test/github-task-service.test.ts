@@ -3,7 +3,7 @@ import { request } from 'node:http';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { createAccountStore } from '../src/accounts/store.js';
-import { createGitHub } from '../src/accounts/github.js';
+import { createGitHub, REPOSITORY_NOT_ALLOWED } from '../src/accounts/github.js';
 import { createTaskService } from '../src/accounts/task-service.js';
 import { startTargetOutboundServer } from '../src/outbound/server.js';
 import { binding, context, deferred } from './support/directory-table.js';
@@ -20,9 +20,9 @@ async function setup(t: test.TestContext, linked = true) {
   if (linked) await linkGithub();
   const grant = { ...f.input, tools, githubGeneration: linked ? 2 : 0 }; await f.store.reserveGrant(grant, context());
   const github = createGitHub({ clientId: 'Iv1.synthetic', clientSecret: 'CLIENT_PRIVATE', publicOrigin: 'https://signin.example.invalid' }, { request: remote.request, now: f.now }); t.after(() => github.close());
-  let refresh = async (_token: string) => tokens('GH_ROTATED_PRIVATE', 'GH_ROTATED_REFRESH_PRIVATE');
-  const open = (accounts = f.store, ghAccounts = githubAccounts) => createTaskService({ accounts, authority: f.authority, now: f.now,
-    targets: [{ id: 'tools', gatewayUid: 'gateway', identityDigest: f.input.targetDigest, taskPassToken: 'CONTROLLER_PRIVATE' }],
+  let refresh = async (_token: string) => tokens('GH_ROTATED_PRIVATE', 'GH_ROTATED_REFRESH_PRIVATE'); const logs: string[] = [];
+  const open = (accounts = f.store, ghAccounts = githubAccounts, githubRepositories: readonly string[] | null = ['acme/repo']) => createTaskService({ accounts, authority: f.authority, now: f.now,
+    targets: [{ id: 'tools', gatewayUid: 'gateway', identityDigest: f.input.targetDigest, taskPassToken: 'CONTROLLER_PRIVATE', ...(githubRepositories ? { githubRepositories } : {}) }], log: c => logs.push(c),
     auth: { exchange: async () => { throw new Error('not SSO'); }, refresh: async () => ({ accessToken: 'ACCESS-PRIVATE', expiresAt: f.now() + 100000, refreshToken: 'REFRESH-PRIVATE' }) },
     github: { accounts: ghAccounts, auth: { ...github, refresh: token => refresh(token) } }, workiq: { request: w.request }, privateCredentials: ['DELIVERY_PRIVATE'] });
   const service = open(); t.after(() => service.close());
@@ -39,7 +39,7 @@ async function setup(t: test.TestContext, linked = true) {
     ] }, res => { res.resume(); res.on('end', () => resolve(res.statusCode!)); });
     req.on('error', reject); req.end(Buffer.from(JSON.stringify(args)));
   });
-  return { ...f, ...remote, service, server, githubAccounts, openGithub, openService: open, linkGithub, tokens, body, issue, call, httpCall, w,
+  return { ...f, ...remote, logs, service, server, githubAccounts, openGithub, openService: open, linkGithub, tokens, body, issue, call, httpCall, w,
     unready: () => { ready = false; }, unhealthy: () => { healthy = false; }, refresh: (fn: typeof refresh) => { refresh = fn; } };
 }
 test('one mixed-tool grant preserves Work IQ with unlinked GitHub, and cannot adopt a later link', async t => {
@@ -430,10 +430,82 @@ test('github-read-issue reads as the linked sender, refuses unlinked, unbound an
   assert.equal(read.status, 200); assert.deepEqual(JSON.parse((read.body as { text: string }).text), { number: 71, title: 'Two installs share a reader', state: 'closed',
     labels: ['bug'], url: 'https://github.com/acme/repo/issues/71', body: 'Steps' });
   assert.deepEqual(f.requests.map(r => [r.method, r.path, r.authorization]), [['GET', '/repos/acme/repo/issues/71', 'Bearer GH_ACCESS_PRIVATE']]);
-  // The gateway has no repository list: GitHub's own 404 for a missing issue or a repository the linked account cannot read is a fixed refusal.
+  // In a listed repository, GitHub's own 404 for a missing issue or a repository the linked account cannot read is a fixed refusal.
   f.behavior((_req, res) => { res.statusCode = 404; res.end('{"message":"Not Found"}'); });
-  assert.deepEqual(await f.call('github-read-issue', { ...issue, repo: 'private' }, undefined), { status: 403, body: { error: 'tool-unavailable' } });
+  assert.deepEqual(await f.call('github-read-issue', issue, undefined), { status: 403, body: { error: 'tool-unavailable' } });
   const pass = await f.issue(f.service, { ...f.body, taskUID: 'child', parentTaskUID: 'task', tools: ['github-list-issues'] });
   assert.notEqual((await f.service.handle('/v1/task-tools/github-read-issue', pass, issue, context())).status, 200);
   assert.equal((await f.call('github-read-issue', { ...issue, number: 0 }, undefined)).status, 403); assert.equal(f.requests.length, 2);
+});
+const refusedReply = { status: 200, body: { text: REPOSITORY_NOT_ALLOWED } };
+const toolCalls: [string, Record<string, unknown>][] = [['github-read-file', { path: 'dir/file.txt', ref: 'feature/one' }], ['github-list-issues', {}], ['github-read-issue', { number: 7 }],
+  ['github-create-issue', { title: 'Reviewed issue' }], ['github-create-pull-request', { title: 'Reviewed PR', head: 'feature', base: 'main' }]];
+test('every GitHub tool refuses an unlisted repository with one fixed result, a logged reason and no GitHub or storage work', async t => {
+  const f = await setup(t); await f.issue(); const rows = JSON.stringify([...f.rows.values()]);
+  for (const [tool, extra] of toolCalls) for (const repository of [{ owner: 'acme', repo: 'other' }, { owner: 'other', repo: 'repo' }, { owner: 'acme', repo: 'repo2' }]) {
+    const result = await f.call(tool, { ...repository, ...extra }, 'refused-' + tool);
+    assert.deepEqual(result, refusedReply, `${tool} ${repository.owner}/${repository.repo}`); assert.ok(!JSON.stringify(result).includes('other'));
+  }
+  assert.equal(f.requests.length, 0); assert.equal(JSON.stringify([...f.rows.values()]), rows, 'no write reservation or token change');
+  assert.deepEqual(f.logs, toolCalls.flatMap(([tool]) => Array.from({ length: 3 }, () => `task-tool-refused ${tool} repository`)));
+  assert.ok(!f.logs.join().includes('acme') && !f.logs.join().includes('other'));
+});
+test('every GitHub tool reaches a listed repository under any ASCII case, and an owner wildcard covers each of its repositories', async t => {
+  const f = await setup(t);
+  f.behavior((req, res) => {
+    const path = req.path.toLowerCase();
+    if (path.includes('/contents/')) res.end(JSON.stringify({ type: 'file', encoding: 'base64', content: 'SGVsbG8K', size: 6 }));
+    else if (path.endsWith('/issues/7')) res.end(JSON.stringify({ number: 7, title: 'Bug', state: 'open', labels: [], body: null, html_url: `https://github.com/acme/${path.split('/')[3]}/issues/7` }));
+    else if (req.method === 'GET') res.end('[]');
+    else { res.statusCode = 201; res.end(JSON.stringify({ number: 8, html_url: `https://github.com/acme/${path.split('/')[3]}/${path.endsWith('/pulls') ? 'pull' : 'issues'}/8` })); }
+  });
+  for (const [tool, extra] of toolCalls) assert.equal((await f.call(tool, { owner: 'ACME', repo: 'Repo', ...extra }, 'case-' + tool)).status, 200, tool);
+  assert.equal(f.requests.length, toolCalls.length); assert.ok(f.requests.every(r => r.path.startsWith('/repos/ACME/Repo')), 'the request keeps the name as asked');
+  const wildcard = f.openService(f.store, f.githubAccounts, ['Acme/*'.toLowerCase()]); t.after(() => wildcard.close());
+  for (const [tool, extra] of toolCalls) assert.equal((await f.call(tool, { owner: 'Acme', repo: 'another', ...extra }, 'wildcard-' + tool, wildcard)).status, 200, tool);
+  assert.deepEqual(await f.call('github-list-issues', { owner: 'acme-corp', repo: 'another' }, undefined, wildcard), refusedReply);
+  assert.deepEqual(await f.call('github-list-issues', { owner: 'other', repo: 'another' }, undefined, wildcard), refusedReply);
+  assert.equal(f.requests.length, toolCalls.length * 2);
+});
+for (const [name, list] of [['no list', null], ['an empty list', []], ['a list for another target only', undefined]] as const) test(`a target with ${name} refuses every repository but still serves Work IQ`, async t => {
+  const f = await setup(t);
+  const service = list === undefined ? createTaskService({ accounts: f.store, authority: f.authority, now: f.now, github: { accounts: f.githubAccounts, auth: createGitHub({ clientId: 'Iv1.synthetic', clientSecret: 'CLIENT_PRIVATE', publicOrigin: 'https://signin.example.invalid' }, { request: f.request, now: f.now }) },
+    auth: { exchange: async () => { throw new Error('not SSO'); }, refresh: async () => ({ accessToken: 'ACCESS-PRIVATE', expiresAt: f.now() + 100000, refreshToken: 'REFRESH-PRIVATE' }) }, workiq: { request: f.w.request },
+    targets: [{ id: 'tools', gatewayUid: 'gateway', identityDigest: f.input.targetDigest, taskPassToken: 'CONTROLLER_PRIVATE' },
+      { id: 'elsewhere', gatewayUid: 'gateway-2', identityDigest: 'e'.repeat(64), taskPassToken: 'CONTROLLER_PRIVATE_2', githubRepositories: ['acme/*'] }] }) : f.openService(f.store, f.githubAccounts, list);
+  t.after(() => service.close());
+  for (const [tool, extra] of toolCalls) assert.deepEqual(await f.call(tool, { owner: 'acme', repo: 'repo', ...extra }, 'denied-' + tool, service), refusedReply, tool);
+  assert.equal(f.requests.length, 0);
+  assert.deepEqual(await f.call('workiq', { question: 'Question' }, undefined, service), { status: 200, body: { text: 'Answer' } });
+});
+test('a refused repository is decided before the token is refreshed, and after the pass and arguments are checked', async t => {
+  const f = await setup(t); let refreshed = 0; f.refresh(async () => { refreshed++; return f.tokens('GH_ROTATED_PRIVATE', 'GH_ROTATED_REFRESH_PRIVATE'); });
+  f.advance(100001);
+  assert.deepEqual(await f.call('github-list-issues', { owner: 'acme', repo: 'other' }), refusedReply); assert.equal(refreshed, 0);
+  assert.equal((await f.call('github-list-issues', { owner: 'acme', repo: 'repo' })).status, 200); assert.equal(refreshed, 1);
+  const pass = await f.issue(); assert.deepEqual(await f.service.handle('/v1/task-tools/github-list-issues', pass, { owner: 'acme', repo: 'other' }, context()), refusedReply);
+  assert.equal((await f.service.handle('/v1/task-tools/github-list-issues', pass, { owner: 'acme', repo: 'other' }, context())).status, 403, 'a refusal still spends the pass');
+  assert.equal((await f.call('github-list-issues', { owner: 'acme', repo: 'other/else' })).status, 403, 'invalid names stay argument refusals');
+  assert.equal((await f.call('github-create-issue', { owner: 'acme', repo: 'other' })).status, 400);
+  const child = await f.issue(f.service, { ...f.body, taskUID: 'child', parentTaskUID: 'task', tools: ['workiq'] });
+  assert.deepEqual(await f.service.handle('/v1/task-tools/github-list-issues', child, { owner: 'acme', repo: 'other' }, context()), { status: 403, body: { error: 'signin-required' } },
+    'a task without the tool cannot ask what is listed');
+});
+test('a repository removed from the list also stops the replay of an earlier write there', async t => {
+  const f = await setup(t); const first = await f.call(); assert.equal(first.status, 200); assert.equal(f.requests.length, 1);
+  await f.service.close(); const narrowed = f.openService(f.open(), f.openGithub(), ['acme/elsewhere']); t.after(() => narrowed.close());
+  assert.deepEqual(await f.call('github-create-issue', args, 'operation', narrowed), refusedReply); assert.equal(f.requests.length, 1);
+  await narrowed.close(); const restored = f.openService(f.open(), f.openGithub()); t.after(() => restored.close());
+  assert.deepEqual(await f.call('github-create-issue', args, 'operation', restored), first); assert.equal(f.requests.length, 1);
+});
+test('a pull request from another owner\'s fork into a listed repository needs that owner listed by wildcard', async t => {
+  const f = await setup(t); const pull = { owner: 'acme', repo: 'repo', title: 'Reviewed PR', base: 'main' };
+  assert.deepEqual(await f.call('github-create-pull-request', { ...pull, head: 'outsider:feature' }, 'fork'), refusedReply);
+  assert.equal(f.requests.length, 0); assert.deepEqual(f.logs, ['task-tool-refused github-create-pull-request repository']);
+  assert.equal((await f.call('github-create-pull-request', { ...pull, head: 'ACME:feature' }, 'same-owner')).status, 200); assert.equal(f.requests.length, 1);
+  const widened = f.openService(f.store, f.githubAccounts, ['acme/repo', 'outsider/*']); t.after(() => widened.close());
+  assert.equal((await f.call('github-create-pull-request', { ...pull, head: 'Outsider:feature' }, 'fork-listed', widened)).status, 200);
+  assert.equal(f.requests.at(-1)!.body.head, 'Outsider:feature');
+  const named = f.openService(f.store, f.githubAccounts, ['acme/repo', 'outsider/repo']); t.after(() => named.close());
+  assert.deepEqual(await f.call('github-create-pull-request', { ...pull, head: 'outsider:feature' }, 'fork-named', named), refusedReply, 'a fork may have any name');
 });

@@ -56,6 +56,19 @@ Optional per-target `taskTimeout` (for example `"75m"`, at most `24h`) sets
 cancels a request's Task, and any Tasks it delegated, at that timeout; its default
 is 30 minutes. A chat keeps its current Binding until the front Agent changes, so
 a new value reaches an existing chat at its next Agent change.
+Per-target `githubRepositories` lists the repositories that target's GitHub task
+tools may use, for example `["example/project", "example-org/*"]`. An entry is
+`owner/repository` or `owner/*` for every repository of that owner; names are
+compared without case, as GitHub does. There are no other wildcards and at most
+256 entries. A target without the key, or with an empty list, may use no
+repository. `github-create-pull-request` with a head from another owner's fork
+(`owner:branch`) also needs that owner's `owner/*` entry, because a fork can have any name. See [the repository list](delegated-auth.md#repository-list) for what
+a refused call returns.
+
+**Upgrading:** earlier versions had no list and reached any repository the linked
+account and the GitHub App could. Add `githubRepositories` to each existing target
+that uses the GitHub tools before you upgrade, or those tools refuse every call.
+The list is read at startup; changing it keeps a target's chats and sign-ins.
 Orka URLs must have their canonical trailing slash. Kubernetes URLs are HTTPS
 origins with a trailing slash, without credentials, query, fragment or path prefix.
 The front Agent must be in the Gateway namespace. IDs match

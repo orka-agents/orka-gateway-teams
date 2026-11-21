@@ -10,13 +10,15 @@ export interface RegistryTarget {
   kubernetesBaseUrl: string; kubernetesTokenFile: string; kubernetesCaFile?: string;
   /** Orka Task timeout for this target's new Bindings, as a Go duration such as "75m". Orka's default is 30m. */
   taskTimeout?: string;
+  /** Repositories this target's GitHub task tools may use: lower-case "owner/repo" or "owner/*". Absent or empty allows none. */
+  githubRepositories?: readonly string[];
   config: TableServeConfig; readonly identityDigest?: string; taskPassToken?: string;
 }
 export interface SigninConfig { accountTable: string; keyFile: string; apiUri: string; connectionName: string; publicOrigin?: string }
 export interface GitHubConfig { clientId: string; clientSecretFile: string }
 export interface RegistryConfig { github?: Readonly<GitHubConfig>; sso?: Readonly<SigninConfig>; schemaVersion: 1; directoryTable?: string; groupPolicyFile?: string; targets: readonly RegistryTarget[] }
 const perTarget = ['ORKA_BASE_URL', 'ORKA_GATEWAY_NAMESPACE', 'ORKA_GATEWAY_NAME', 'ORKA_BEARER_TOKEN', 'ORKA_OUTBOUND_BEARER_TOKEN', 'ORKA_CA_FILE', 'TABLE_INGRESS_STORE_ID', 'TABLE_DELIVERY_STORE_ID'];
-const metadataKeys = ['id', 'label', 'gatewayUid', 'frontAgent', 'kubernetesBaseUrl', 'kubernetesTokenFile', 'kubernetesCaFile', 'taskTimeout'];
+const metadataKeys = ['id', 'label', 'gatewayUid', 'frontAgent', 'kubernetesBaseUrl', 'kubernetesTokenFile', 'kubernetesCaFile', 'taskTimeout', 'githubRepositories'];
 
 export function canonicalKubernetesUrl(value: unknown): string {
   if (typeof value !== 'string' || value.length > 4096 || /[\s\\]/u.test(value)) throw new ConfigurationError();
@@ -42,7 +44,17 @@ function targetMetadata(input: Record<string, unknown>, config: TableServeConfig
   return { id, label, gatewayUid: text(input.gatewayUid), frontAgent,
     kubernetesBaseUrl: canonicalKubernetesUrl(input.kubernetesBaseUrl), kubernetesTokenFile: absoluteFile(input.kubernetesTokenFile),
     ...(input.kubernetesCaFile === undefined ? {} : { kubernetesCaFile: absoluteFile(input.kubernetesCaFile) }),
-    ...(input.taskTimeout === undefined ? {} : { taskTimeout: taskTimeout(input.taskTimeout) }) };
+    ...(input.taskTimeout === undefined ? {} : { taskTimeout: taskTimeout(input.taskTimeout) }),
+    ...(input.githubRepositories === undefined ? {} : { githubRepositories: githubRepositories(input.githubRepositories) }) };
+}
+// The same owner and repository characters the GitHub tools accept; GitHub compares both without case.
+function githubRepositories(value: unknown): readonly string[] {
+  if (!Array.isArray(value) || value.length > 256) throw new ConfigurationError();
+  return Object.freeze([...new Set(Array.from(value, entry => {
+    const match = typeof entry === 'string' ? /^[A-Za-z0-9-]{1,100}\/(\*|[A-Za-z0-9_.-]{1,100})$/u.exec(entry) : null;
+    if (!match || ['.', '..'].includes(match[1]!)) throw new ConfigurationError();
+    return (entry as string).toLowerCase();
+  }))]);
 }
 // Orka accepts a Binding timeout up to 24h.
 export function taskTimeout(value: unknown): string {

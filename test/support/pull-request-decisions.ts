@@ -14,7 +14,7 @@ export async function decisionsFixture(t: TestContext) {
   const ch = await gh.challenge(f.subject, 'chat-private', 'github', context()); await gh.claim(ch, context());
   await gh.complete(ch, { accessToken: 'GH_PRIVATE', refreshToken: 'GH_REFRESH_PRIVATE', providerUserId: '123', expiresAt: f.now() + 10000000, refreshExpiresAt: f.now() + 20000000 }, context());
   const github = createGitHub({ clientId: 'client', clientSecret: 'CLIENT_PRIVATE', publicOrigin: 'https://signin.example.invalid' }, { request: remote.request }); t.after(() => github.close());
-  let connected = true; const replies: Proposal[] = [];
+  let connected = true; const replies: Proposal[] = []; const logs: string[] = [];
   const result = (sha = 'a'.repeat(40)) => ({ number: 12, html_url: 'https://github.com/example/project/pull/12', head: { ref: 'orka/fix', sha, repo: { full_name: 'example/project' } }, base: { ref: 'main', repo: { full_name: 'example/project' } } });
   remote.behavior((req, res) => {
     if (req.path === '/user') return void res.end('{"id":123,"login":"sender"}');
@@ -22,8 +22,9 @@ export async function decisionsFixture(t: TestContext) {
     if (req.method === 'GET') return void res.end('[]');
     res.statusCode = 201; res.end(JSON.stringify(result()));
   });
-  const make = (store = f.store, admitRevision?: NonNullable<Parameters<typeof createPullRequestService>[0]['decisions']>['admitRevision']) => {
-    const service = createPullRequestService({ accounts: store, githubAccounts: gh, github, scope: binding, now: f.now,
+  const make = (store = f.store, admitRevision?: NonNullable<Parameters<typeof createPullRequestService>[0]['decisions']>['admitRevision'],
+    targets: readonly { id: string; githubRepositories?: readonly string[] }[] = [{ id: 'tools', githubRepositories: ['example/project'] }]) => {
+    const service = createPullRequestService({ accounts: store, githubAccounts: gh, github, scope: binding, now: f.now, targets, log: c => logs.push(c),
       postProposal: async () => 'delivered', decisions: { authority: f.authority, connected: async () => connected,
         ...(admitRevision ? { admitRevision } : {}), postDecision: async p => { replies.push(structuredClone(p)); } } });
     t.after(() => service.close()); return service;
@@ -33,6 +34,6 @@ export async function decisionsFixture(t: TestContext) {
     subject: { tenantId: p.tenantId, objectId: p.objectId, chatKind: 'personal' as const } });
   const decide = (decision: 'approve' | 'reject' = 'approve', current = p, supplied = ctx()) => service.decide(current, decision, 'invoke', supplied);
   const settled = async () => { await eventually(() => replies.length > 0); return (await f.store.getProposal(p.id, context()))!.proposal; };
-  return { ...f, ...remote, tableRequests: f.requests, gh, github, service, make, p, ctx, decide, settled, replies, result,
+  return { ...f, ...remote, tableRequests: f.requests, gh, github, service, make, p, ctx, decide, settled, replies, logs, result,
     connected: (v: boolean) => { connected = v; }, redigest: (p: Proposal) => { p.payloadDigest = proposalDigest(p); return p; } };
 }

@@ -334,7 +334,7 @@ File reads return only UTF8 text up to32KiB; non-UTF8, directory and larger resp
 are refused. Lists return only number/title/state/fixed GitHub URL. An issue read returns
 number, title, state, up to 20 label names, the fixed GitHub URL and the body. The body is cut
 at 16KiB of JSON text; a cut body adds `bodyTruncated` saying so and pointing at the URL.
-There is no repository list in the gateway: an issue is readable when the sender's linked
+Within the target's [repository list](#repository-list), an issue is readable when the sender's linked
 account and the GitHub App installation can read it, and GitHub's refusals return
 `tool-unavailable`. Writes return
 only number and fixed GitHub URL, wrapped in the existing `{"text":"..."}` result.
@@ -389,6 +389,31 @@ Task output. Reservations/results are encrypted with the existing account key;
 retained operation history has no pruning/reset command. Started external calls
 may finish despite cancellation; an unknown outcome is not permission to resend.
 
+### Repository list
+
+Each target's `githubRepositories` in the [registry file](registry.md) names the
+repositories its GitHub tools may use. The gateway checks the `owner` and `repo`
+of every GitHub tool call against the list of the target the request came through,
+once the call's grant is known to hold that tool and before it refreshes a token, reserves a write, replays an earlier result or calls
+GitHub. A target with no list may use no repository.
+
+A call for a repository outside the list succeeds with a fixed result instead of
+the tool's own, because Orka shows an Agent only the status of a refused call:
+
+```json
+{"text":"This gateway's operator has not allowed its GitHub tools to use that repository. This call read and changed nothing; do not retry."}
+```
+
+The text is the same whether or not the repository exists, and stderr gets
+`teams-ingress: task-tool-refused <tool> repository`.
+
+The list is checked again when the sender approves a proposal card and when the
+gateway later looks for a pull request it could not confirm. If the repository has
+left the list since the card was posted, approval opens nothing and the card says
+to ask again (`teams-ingress: pull-request-approval-refused repository`); an
+unconfirmed pull request stays unconfirmed
+(`teams-ingress: pull-request-recovery-refused repository`).
+
 ### Pull-request proposal and sender decision
 
 `github-propose-pull-request` posts a proposal card; the tool itself never creates a GitHub PR.
@@ -414,6 +439,7 @@ but stderr gets one line naming where it stopped, with no values:
 `teams-ingress: task-tool-refused <tool> <reason>`, where reason is `pass` (spent, expired or unknown), `arguments`,
 `grant`, `signin`, `pin`, `storage`, `authority` (lease, grant or deadline no longer
 current), `busy`, `unavailable`, `output`, `github-<code>`, `account-<code>` or `error`.
+A repository outside the target's list is logged the same way with reason `repository`, although that call returns the fixed result [above](#repository-list).
 A refused proposal logs one more line before that one:
 `teams-ingress: pull-request-proposal-refused <step>`. The step is `grant`, `arguments`,
 `storage`, `replay` (same operation, different arguments), `github-identity`, `output`,
