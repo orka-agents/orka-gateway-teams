@@ -36,7 +36,9 @@ type Category = BindingCheckError['category'] | 'graph-unavailable' | 'signin-re
 interface DelegatedOptions { accounts: AccountStore; auth: ReturnType<typeof createDelegatedAuth>; apiUri: string; connectionName: string; publicOrigin?: string }
 interface Slot { target: RegistryTarget; inbox: Pick<IngressPort, 'admit'>; provisioner: ReturnType<typeof createBindingProvisioner> }
 interface Options { proposals?: Pick<ReturnType<typeof createPullRequestService>, 'decide' | 'refresh'>; safeOutput?(text: string): boolean; github?: { accounts: AccountStore; auth: ReturnType<typeof createGitHub> }; delegated?: DelegatedOptions; config: RegistryConfig; directory: Directory; slots: readonly Slot[]; authority: LeaseAuthority; active(): boolean;
-  authorizer: Pick<ReturnType<typeof createGroupAuthorizer>, 'authorize'>; log(category: Category, targetId?: string, detail?: Readonly<Record<string, string | number>>): void }
+  authorizer: Pick<ReturnType<typeof createGroupAuthorizer>, 'authorize'>; log(category: Category, targetId?: string, detail?: Readonly<Record<string, string | number>>): void;
+  /** Called only for a target with logProposalText: one line holding the text of the card about to be posted. */
+  logProposalText?(line: string): void }
 
 /** Four complete consumers share the directory's four places, including control settlement.
  * No waiting queue, cached Binding authority, replacement target or second sender. */
@@ -180,6 +182,12 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     const safe = signin ? options.safeOutput?.(wire) !== false && (!options.github || options.github.auth.safeOutput(wire)) :
       await safeProposal(p, proposalOutput(p), ctx) && await safeProposal(p, wire, ctx);
     if (Buffer.byteLength(wire) > MAX_OUTGOING_MESSAGE_BYTES || !safe) throw new DirectoryError('unready');
+    // Read by an operator before the sender decides. The line passes the same credential checks as the card it precedes.
+    if (reply.kind === 'pr-approval' && options.logProposalText && options.config.targets.find(t => t.id === p.targetId)?.logProposalText) {
+      const line = `pull-request-proposal-text (${p.targetId}) ${JSON.stringify({ proposal: p.id, repository: `${p.owner}/${p.repo}`, base: p.base, head: p.head, title: p.title, body: p.body })
+        .replace(/[\u2028\u2029]/gu, c => c === '\u2028' ? '\\u2028' : '\\u2029')}`;
+      if (await safeProposal(p, line, ctx)) options.logProposalText(line);
+    }
     return message;
   }
   async function proposalConnection(p: Proposal, subject: ExchangeContext['subject'], ctx: DirectoryContext) {
@@ -587,16 +595,17 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
 
 function record(v: unknown): v is Record<string, unknown> { return v !== null && typeof v === 'object' && !Array.isArray(v); }
 const cardVerbs = ['pr-refresh', 'pr-approve', 'pr-reject', 'pr-revise'];
+const clientPlatforms = ['Web', 'Windows', 'Mac', 'iOS', 'Android', 'Linux'];
 interface CardActionSeen { stage: 'unavailable' | 'busy' | 'activity' | 'action' | 'proposal' | 'connection' | 'decision' | 'output';
   verb?: string; trigger?: string; proposal?: string; targetId?: string; state?: string; extra: string[] }
-/** Where the invoke came from: the service URL's host and the platform name Teams reports for the client, each only in a fixed shape. */
+/** Where the invoke came from: the service URL's host in a fixed shape and the client platform Teams reports, from a fixed list. */
 function cardActionClient(input: unknown): { service?: string; platform?: string } {
   if (!record(input)) return {};
   let service: string | undefined;
   try { service = typeof input.serviceUrl === 'string' && input.serviceUrl.length <= 2048 ? new URL(input.serviceUrl).hostname : undefined; } catch { /* Not a URL. */ }
   const info = Array.isArray(input.entities) ? input.entities.slice(0, 16).find(e => record(e) && e.type === 'clientInfo') as Record<string, unknown> | undefined : undefined;
   return { ...(service === undefined ? {} : { service: /^[a-z0-9.-]{1,253}$/u.test(service) ? service : '?' }),
-    ...(info?.platform === undefined ? {} : { platform: typeof info.platform === 'string' && /^[A-Za-z0-9]{1,16}$/u.test(info.platform) ? info.platform : '?' }) };
+    ...(info?.platform === undefined ? {} : { platform: clientPlatforms.find(name => name.toLowerCase() === String(info.platform).toLowerCase()) ?? 'other' }) };
 }
 function formatControl(reply: ControlReply, delegated?: DelegatedOptions, chatKind?: string): ProviderMessage {
   if (reply.kind === 'signin' || reply.kind === 'github-signin') {

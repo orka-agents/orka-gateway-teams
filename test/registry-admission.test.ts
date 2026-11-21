@@ -35,8 +35,9 @@ import { deferred } from './support/ingress-auth.js';
 const context = (activityId: string = randomUUID()): AdmissionContext => ({ activityId, signal: new AbortController().signal,
   deadline: performance.now() + 10000, commandText: 'help', subject: { tenantId: expectedEvent.accountId, objectId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', chatKind: 'personal' } });
 async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<typeof createRegistryAdmission>[0]['delegated'], chatKind: 'personal' | 'groupChat' = 'personal',
-  proposals?: Parameters<typeof createRegistryAdmission>[0]['proposals']) {
-  const input = registryInput(count); if (count === 32) for (const target of input.targets) target.label = '\\'.repeat(256);
+  proposals?: Parameters<typeof createRegistryAdmission>[0]['proposals'], logProposalText?: readonly (boolean | undefined)[], safeOutput?: (text: string) => boolean) {
+  const input = registryInput(count); const texts: { line: string; cardsBefore: number }[] = [];
+  logProposalText?.forEach((flag, i) => { if (flag !== undefined) (input.targets[i] as Record<string, unknown>).logProposalText = flag; }); if (count === 32) for (const target of input.targets) target.label = '\\'.repeat(256);
   const config = snapshotRegistry(input); const scope = { appId: config.targets[0]!.config.scope.appId, tenantId: expectedEvent.accountId };
   const memory = memoryDirectoryTable(); const directory = await openDirectory(memory.table, context()); t.after(() => directory.close());
   let eligible: PolicyAdmission = { kind: 'eligible', targets: config.targets.map(t => ({ id: t.id, label: t.label })) };
@@ -54,7 +55,8 @@ async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<ty
   const authority = { allowed: () => allowed, revalidate: async () => allowed, lost: new AbortController().signal };
   const logs: string[] = [];
   const makeSink = () => createRegistryAdmission({ config, directory, slots, authority, active: () => allowed,
-    ...(delegated ? { delegated } : {}), ...(proposals ? { proposals } : {}),
+    ...(delegated ? { delegated } : {}), ...(proposals ? { proposals } : {}), ...(safeOutput ? { safeOutput } : {}),
+    logProposalText: line => texts.push({ line, cardsBefore: sent.length }),
     authorizer: { authorize: async (...args) => { authorized++; return policyAuthorizer ? policyAuthorizer.authorize(...args) : eligible; } }, log: (category, target, detail) => logs.push(category + ':' + target + (detail ? ' ' + JSON.stringify(detail) : '')) });
   const sink = makeSink();
   const bindSender = (s: typeof sink) => s.bindControlSender({ send: async (route, message) => {
@@ -73,7 +75,7 @@ async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<ty
       identityDigest: target.identityDigest!, bindingName: bindingName(scope, conversationId, target.identityDigest!), state: 'reserved' };
     return directory.markProvisioned(await directory.reserveConnection(conn, context()), evidence(conn), context(), legacy ? undefined : { uid: 'agent-uid', generation: 1 });
   };
-  return { sink, restart: () => { const s = makeSink(); bindSender(s); return s; }, directory, scope, config, slots, event, route, run, provision, sent, admitted, turns, checks, logs, authorized: () => authorized,
+  return { sink, restart: () => { const s = makeSink(); bindSender(s); return s; }, directory, scope, config, slots, event, route, run, provision, sent, admitted, turns, checks, logs, texts, authorized: () => authorized,
     authorizeWith: (value: typeof policyAuthorizer) => { policyAuthorizer = value; },
     policy: (value: PolicyAdmission) => { eligible = value; }, outcome: (value: ProviderResult) => { outcome = value; },
     fail: (value: boolean, category: BindingCheckError['category'] = 'binding-conflict') => { failCheck = value; failureCategory = category; }, checkGate: (value: Promise<void>) => { checkGate = value; },
@@ -412,6 +414,7 @@ test('a card action logs one line: verb, trigger, proposal, service host, client
   const { f, p, data, act, decided } = await cardLogFixture(t);
   const seen = { target: 'primary', proposal: p.id, service: 'smba.example.invalid', platform: 'iOS', status: 200 };
   assert.deepEqual(await act(), { ...seen, verb: 'pr-refresh', outcome: 'pending' });
+  assert.deepEqual(await act({ entities: [{ type: 'clientInfo', platform: 'ANDROID' }] }), { ...seen, platform: 'Android', verb: 'pr-refresh', outcome: 'pending' });
   // What Teams adds to an automatic refresh, and to a tap on Approve.
   assert.deepEqual(await act({ value: { trigger: 'automatic' } }, { data: { ...data, trigger: 'automatic', isRefresh: true } }),
     { ...seen, verb: 'pr-refresh', trigger: 'automatic', outcome: 'pending', extra: 'data:trigger,isRefresh' });
@@ -450,15 +453,56 @@ test('a refused card action logs the stage it stopped at with status 403', async
 test('card action field names, trigger, platform and service host are logged only in a fixed shape', async t => {
   const { f, p, data, act } = await cardLogFixture(t);
   const many = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`k${i}`, 'PRIVATE_VALUE']));
-  const line = await act({ serviceUrl: 'PRIVATE_NOT_A_URL', entities: [{ type: 'clientInfo', platform: 'PRIVATE PLATFORM' }],
+  const line = await act({ serviceUrl: 'PRIVATE_NOT_A_URL', entities: [{ type: 'clientInfo', platform: 'PRIVATEPLATFORM' }],
     value: { trigger: 'PRIVATE_TRIGGER', 'PRIVATE KEY': 1, ok_name: 'PRIVATE_VALUE' } },
   { data: { ...data, ...many }, ['x'.repeat(33)]: 1, title: 'PRIVATE_TITLE', id: 'PRIVATE_ACTION_ID' });
-  assert.deepEqual(line, { target: 'primary', proposal: p.id, platform: '?', status: 200, verb: 'pr-refresh', trigger: 'unknown', outcome: 'pending',
+  assert.deepEqual(line, { target: 'primary', proposal: p.id, platform: 'other', status: 200, verb: 'pr-refresh', trigger: 'unknown', outcome: 'pending',
     extra: `value:?,ok_name;action:?;data:${Array.from({ length: 16 }, (_, i) => `k${i}`).join(',')}` });
   assert.deepEqual(await act({ serviceUrl: 'https://[::1]/', entities: 'PRIVATE_ENTITIES' }), { target: 'primary', proposal: p.id, service: '?', status: 200, verb: 'pr-refresh', outcome: 'pending' });
   assert.deepEqual(await act({ serviceUrl: 'https://x/' + 'p'.repeat(2048), entities: [{ type: 'clientInfo', platform: 7 }] }),
-    { target: 'primary', proposal: p.id, platform: '?', status: 200, verb: 'pr-refresh', outcome: 'pending' });
-  assert.doesNotMatch(JSON.stringify(f.logs), /PRIVATE/u);
+    { target: 'primary', proposal: p.id, platform: 'other', status: 200, verb: 'pr-refresh', outcome: 'pending' });
+  // A platform is named only from the fixed list, so it cannot carry a conversation id or other chosen text.
+  assert.deepEqual(await act({ entities: [{ type: 'clientInfo', platform: 'Room123' }] }),
+    { target: 'primary', proposal: p.id, service: 'smba.example.invalid', platform: 'other', status: 200, verb: 'pr-refresh', outcome: 'pending' });
+  assert.doesNotMatch(JSON.stringify(f.logs), /PRIVATE|Room123/u);
+});
+async function proposalTextFixture(t: test.TestContext, flags: readonly (boolean | undefined)[], changed: Partial<Proposal> = {}) {
+  const d = delegatedFixture(); await d.delegated.accounts.complete();
+  const f = await fixture(t, 2, d.delegated, 'personal', undefined, flags, text => !text.includes('BOT_SECRET_PRIVATE') && !text.includes('example/project-secret')); await f.provision();
+  const p: Proposal = { ...proposalFixture(), ...f.scope, objectId: d.ch.objectId, conversationId: f.event.contextId, route: f.route,
+    targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest!, createdAt: Date.now(), expiresAt: Date.now() + 3_600_000, ...changed };
+  d.delegated.accounts.getProposal = async () => ({ proposal: p, etag: 'W/"1"' });
+  return { d, f, p };
+}
+test('a target with logProposalText logs the proposal text on one line before its card is posted', async t => {
+  const written = { title: 'Retry "the" lease read', body: 'First line\nSecond line\twith a tab\r\n\u2028and\u2029more' };
+  const { d, f, p } = await proposalTextFixture(t, [true], written);
+  assert.equal(await f.sink.postProposal(p, context()), 'delivered'); assert.equal(f.sent.length, 1);
+  assert.equal(f.texts.length, 1); assert.equal(f.texts[0]!.cardsBefore, 0, 'written before the card is sent');
+  const prefix = 'pull-request-proposal-text (primary) '; assert.ok(f.texts[0]!.line.startsWith(prefix));
+  assert.doesNotMatch(f.texts[0]!.line, /[\r\n\u2028\u2029]/u, 'the text stays on one line for every reader');
+  assert.deepEqual(JSON.parse(f.texts[0]!.line.slice(prefix.length)), { proposal: p.id, repository: 'example/project', base: 'main', head: 'orka/fix', ...written });
+  assert.ok(!JSON.stringify(f.logs).includes('lease read'), 'the routine log holds none of it');
+  // The outcome card that follows a decision is not a proposal waiting to be read.
+  const opened = { ...p, state: 'opened' as const, outcome: { kind: 'opened' as const, number: 12, url: 'https://github.com/example/project/pull/12', headSHA: 'a'.repeat(40) } };
+  d.delegated.accounts.getProposal = async () => ({ proposal: opened, etag: 'W/"2"' });
+  await f.sink.postDecision(opened, context()); assert.equal(f.sent.length, 2); assert.equal(f.texts.length, 1);
+});
+for (const flags of [[], [false], [undefined, true]] as const) test(`targets with logProposalText ${JSON.stringify(flags)} log no text for the first target's proposal`, async t => {
+  const { f, p } = await proposalTextFixture(t, flags);
+  assert.equal(await f.sink.postProposal(p, context()), 'delivered'); assert.equal(f.sent.length, 1); assert.deepEqual(f.texts, []);
+  assert.ok(!JSON.stringify(f.logs).includes(p.title) && !JSON.stringify(f.logs).includes(p.body));
+});
+test('proposal text the card check refuses is not logged, including a credential only the gateway process holds', async t => {
+  // The bot's own secret is checked where the card is built, after the task tool's check.
+  const bot = await proposalTextFixture(t, [true], { body: 'see BOT_SECRET_PRIVATE' });
+  assert.notEqual(await bot.f.sink.postProposal(bot.p, context()), 'delivered'); assert.deepEqual([bot.f.texts, bot.f.sent], [[], []]);
+  const account = await proposalTextFixture(t, [true], { body: 'see ACCOUNT_PRIVATE' });
+  account.d.delegated.accounts.safeOutput = async (_s, _g, text) => !text.includes('ACCOUNT_PRIVATE');
+  assert.notEqual(await account.f.sink.postProposal(account.p, context()), 'delivered'); assert.deepEqual([account.f.texts, account.f.sent], [[], []]);
+  // The line joins owner and repository; a credential that only that joined text matches keeps the line out.
+  const joined = await proposalTextFixture(t, [true], { repo: 'project-secret', title: 'Plain title' });
+  await joined.f.sink.postProposal(joined.p, context()); assert.deepEqual(joined.f.texts, []);
 });
 test('a card action on a gateway without sign-in still logs its refusal', async t => {
   const f = await fixture(t); const result = await f.sink.cardAction!({ type: 'invoke', name: 'adaptiveCard/action', serviceUrl: 'https://smba.example.invalid/',

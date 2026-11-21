@@ -455,7 +455,8 @@ teams-ingress: card-action (primary) verb=pr-approve trigger=manual proposal=<id
 
 - `verb` is `pr-refresh`, `pr-approve`, `pr-reject`, `pr-revise` or `unknown`. `trigger` is Teams' `automatic` or `manual`, when sent.
 - `proposal` is the proposal id from the card and the name in brackets is its target, once the gateway has read the proposal.
-- `service` is the host of the request's service URL. `platform` is the client platform Teams reports (for example `iOS`, `Web`, `Windows`), when sent.
+- `service` is the host of the request's service URL. `platform` is the client platform Teams reports, when sent: `Web`, `Windows`, `Mac`, `iOS`,
+  `Android`, `Linux` or `other`.
 - `status` is the HTTP status returned and `ms` the time taken. `outcome` is the proposal's state on the card returned, or
   `denied-<stage>` for a 403: `unavailable` (no sign-in configured), `busy`, `activity`, `action` (type, verb, data or sender),
   `proposal` (unknown, replaced or another conversation's), `connection` (target or access no longer current), `decision` or `output`.
@@ -466,14 +467,14 @@ or `denied-error` if handling it failed unexpectedly.
 The line never holds a field's value, the sender, the conversation or anything the Agent wrote.
 
 To read a proposal's title and description before the sender decides, set `logProposalText` on its target in the
-[registry file](registry.md). The gateway then logs the text once it has saved the proposal and before it posts the card:
+[registry file](registry.md). The gateway then logs the text just before it posts the card, after the card's own credential checks:
 
 ```text
 teams-ingress: pull-request-proposal-text (primary) {"proposal":"<id>","repository":"example/project","base":"main","head":"orka/fix","title":"…","body":"…"}
 ```
 
-The line is JSON on one line and its `proposal` matches the `card-action` lines for that card. A repeated call for the same
-proposal logs it again. This puts Agent-written text in the log, so leave it off unless someone reads proposals there.
+The line is JSON on one line and its `proposal` matches the `card-action` lines for that card. A card the gateway tries to
+post again logs it again. This puts Agent-written text in the log, so leave it off unless someone reads proposals there.
 
 Proposals are encrypted and expire 60 minutes after durable preparation. Preview
 preparation keeps its 48 KiB document budget, leaving room for later claim/result
