@@ -245,9 +245,9 @@ test('saved proposal distinguishes unknown card arrival from proven no-effect', 
   f.outcome('unavailable'); assert.equal((await f.call(args, 'other')).status, 503);
 });
 for (const list of [[], ['example/other'], ['other/*']]) test(`a proposal for a repository outside ${JSON.stringify(list)} is refused before any GitHub read, saved proposal or card`, async t => {
-  const f = await setup(t, list); const rows = f.rows.size;
+  const f = await setup(t, list); await f.issue(); const rows = JSON.stringify([...f.rows.values()]);
   assert.deepEqual(await f.call(), { status: 200, body: { text: REPOSITORY_NOT_ALLOWED } });
-  assert.equal(f.requests.length, 0); assert.equal(f.sent(), 0); assert.equal(f.rows.size, rows);
+  assert.equal(f.requests.length, 0); assert.equal(f.sent(), 0); assert.equal(JSON.stringify([...f.rows.values()]), rows);
   assert.equal(await f.store.getProposal(proposalIdentity(f.grant.ref, 'task', 'operation'), context()), undefined);
   assert.deepEqual(f.logs, ['task-tool-refused github-propose-pull-request repository']);
 });

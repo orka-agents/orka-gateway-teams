@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createGitHub, githubArguments, repositoryAllowed, REPOSITORY_NOT_ALLOWED } from '../src/accounts/github.js';
+import { createGitHub, githubArguments, headAllowed, repositoryAllowed, REPOSITORY_NOT_ALLOWED } from '../src/accounts/github.js';
 import { context, deferred } from './support/directory-table.js';
 import { toolsFixture } from './support/github-tools.js';
 
@@ -116,4 +116,11 @@ test('a repository is allowed only by its own entry or its owner wildcard, compa
   assert.equal(repositoryAllowed(['ake/*'], 'a\u212Ae', 'repo'), false, 'only ASCII is folded');
   assert.equal(repositoryAllowed(undefined, 'example', 'project'), false); assert.equal(repositoryAllowed([], 'example', 'project'), false);
   assert.doesNotMatch(REPOSITORY_NOT_ALLOWED, /example|acme|project/u);
+});
+test('a fork-qualified pull request head needs its owner wildcard unless it names the base owner', () => {
+  const list = ['example/project', 'acme/*'];
+  for (const head of ['feature', 'feature/one', 'example:feature', 'EXAMPLE:feature', 'acme:feature', 'Acme:a:b']) assert.equal(headAllowed(list, 'example', head), true, head);
+  for (const head of ['other:feature', 'example-fork:feature', ':feature', 'acme-corp:feature', '\u212Aacme:feature', 'other/project:feature'])
+    assert.equal(headAllowed(list, 'example', head), false, head);
+  assert.equal(headAllowed(undefined, 'example', 'other:feature'), false); assert.equal(headAllowed(undefined, 'example', 'feature'), true);
 });

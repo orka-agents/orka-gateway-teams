@@ -37,12 +37,17 @@ export function githubArguments(tool: GitHubTool, input: unknown): Record<string
 }
 
 /** Fixed and value-free: the same text whether or not the repository exists. */
-export const REPOSITORY_NOT_ALLOWED = "This gateway's operator has not allowed its GitHub tools to use that repository. Nothing was read or changed; do not retry.";
+export const REPOSITORY_NOT_ALLOWED = "This gateway's operator has not allowed its GitHub tools to use that repository. This call read and changed nothing; do not retry.";
 /** allowed holds lower-case "owner/repo" and "owner/*" entries. Only ASCII is folded, as GitHub names are ASCII. */
 export function repositoryAllowed(allowed: readonly string[] | undefined, owner: string, repo: string): boolean {
-  const lower = (s: string) => s.replace(/[A-Z]/gu, c => c.toLowerCase());
   return !!allowed && (allowed.includes(`${lower(owner)}/*`) || allowed.includes(`${lower(owner)}/${lower(repo)}`));
 }
+/** GitHub reads an "owner:branch" pull request head from that owner's fork, whatever its name, so another owner needs its wildcard entry. */
+export function headAllowed(allowed: readonly string[] | undefined, owner: string, head: string): boolean {
+  const colon = head.indexOf(':'); if (colon < 0) return true;
+  const source = lower(head.slice(0, colon)); return source === lower(owner) || !!allowed?.includes(`${source}/*`);
+}
+const lower = (s: string) => s.replace(/[A-Z]/gu, c => c.toLowerCase());
 
 const failure = () => new GitHubError();
 const ISSUE_BODY_BYTES = 16384;

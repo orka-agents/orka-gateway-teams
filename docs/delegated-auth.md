@@ -401,7 +401,7 @@ A call for a repository outside the list succeeds with a fixed result instead of
 the tool's own, because Orka shows an Agent only the status of a refused call:
 
 ```json
-{"text":"This gateway's operator has not allowed its GitHub tools to use that repository. Nothing was read or changed; do not retry."}
+{"text":"This gateway's operator has not allowed its GitHub tools to use that repository. This call read and changed nothing; do not retry."}
 ```
 
 The text is the same whether or not the repository exists, and stderr gets

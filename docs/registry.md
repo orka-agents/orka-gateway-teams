@@ -61,7 +61,8 @@ tools may use, for example `["example/project", "example-org/*"]`. An entry is
 `owner/repository` or `owner/*` for every repository of that owner; names are
 compared without case, as GitHub does. There are no other wildcards and at most
 256 entries. A target without the key, or with an empty list, may use no
-repository. See [the repository list](delegated-auth.md#repository-list) for what
+repository. `github-create-pull-request` with a head from another owner's fork
+(`owner:branch`) also needs that owner's `owner/*` entry, because a fork can have any name. See [the repository list](delegated-auth.md#repository-list) for what
 a refused call returns.
 
 **Upgrading:** earlier versions had no list and reached any repository the linked

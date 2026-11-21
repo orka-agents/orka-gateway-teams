@@ -498,3 +498,14 @@ test('a repository removed from the list also stops the replay of an earlier wri
   await narrowed.close(); const restored = f.openService(f.open(), f.openGithub()); t.after(() => restored.close());
   assert.deepEqual(await f.call('github-create-issue', args, 'operation', restored), first); assert.equal(f.requests.length, 1);
 });
+test('a pull request from another owner\'s fork into a listed repository needs that owner listed by wildcard', async t => {
+  const f = await setup(t); const pull = { owner: 'acme', repo: 'repo', title: 'Reviewed PR', base: 'main' };
+  assert.deepEqual(await f.call('github-create-pull-request', { ...pull, head: 'outsider:feature' }, 'fork'), refusedReply);
+  assert.equal(f.requests.length, 0); assert.deepEqual(f.logs, ['task-tool-refused github-create-pull-request repository']);
+  assert.equal((await f.call('github-create-pull-request', { ...pull, head: 'ACME:feature' }, 'same-owner')).status, 200); assert.equal(f.requests.length, 1);
+  const widened = f.openService(f.store, f.githubAccounts, ['acme/repo', 'outsider/*']); t.after(() => widened.close());
+  assert.equal((await f.call('github-create-pull-request', { ...pull, head: 'Outsider:feature' }, 'fork-listed', widened)).status, 200);
+  assert.equal(f.requests.at(-1)!.body.head, 'Outsider:feature');
+  const named = f.openService(f.store, f.githubAccounts, ['acme/repo', 'outsider/repo']); t.after(() => named.close());
+  assert.deepEqual(await f.call('github-create-pull-request', { ...pull, head: 'outsider:feature' }, 'fork-named', named), refusedReply, 'a fork may have any name');
+});

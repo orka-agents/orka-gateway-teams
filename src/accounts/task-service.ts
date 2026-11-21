@@ -7,7 +7,7 @@ import type { TaskGrant } from './grants.js';
 import { grantBinding, grantRef, githubTools, writeTool, operationKey } from './grants.js';
 import type { AccountStore, AccountTokens } from './store.js';
 import { AccountError } from './store.js';
-import { githubArguments, GitHubError, repositoryAllowed, REPOSITORY_NOT_ALLOWED } from './github.js';
+import { githubArguments, GitHubError, headAllowed, repositoryAllowed, REPOSITORY_NOT_ALLOWED } from './github.js';
 import type { createGitHub } from './github.js';
 import type { GitHubTool } from './grants.js';
 import type { createPullRequestService } from './pull-request-service.js';
@@ -110,8 +110,8 @@ export function createTaskService(options: {
       if (!await live() || tool !== 'workiq' && !frozen.githubGeneration) return refused('grant', 'signin-required');
       // Only a grant that holds this tool learns the answer, before any token, reservation, replay or GitHub request.
       // Orka hides a refusal's body from the agent, so this is a result.
-      const named = args as Record<string, string>;
-      if (tool !== 'workiq' && !repositoryAllowed(targets.find(t => t.id === frozen.targetId)?.githubRepositories, named.owner!, named.repo!)) {
+      const named = args as Record<string, string>; const listed = targets.find(t => t.id === frozen.targetId)?.githubRepositories;
+      if (tool !== 'workiq' && !(repositoryAllowed(listed, named.owner!, named.repo!) && (tool !== 'github-create-pull-request' || headAllowed(listed, named.owner!, named.head!)))) {
         logRefusal(tool, 'repository'); return { status: 200, body: { text: REPOSITORY_NOT_ALLOWED } };
       }
       const subject = { objectId: frozen.objectId }; const g = options.github;

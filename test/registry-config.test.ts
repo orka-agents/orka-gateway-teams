@@ -142,7 +142,7 @@ test('a target lists its GitHub repositories in lower case; none by default, and
   assert.equal(Object.isFrozen(target.githubRepositories), true); assert.equal(target.identityDigest, digest);
   assert.deepEqual(snapshotRegistry(set([])).targets[0]!.githubRepositories, []);
   assert.equal(snapshotRegistry(set(['a/b'])).targets[1]!.githubRepositories, undefined, 'each target has its own list');
-  for (const value of ['example/project', {}, [7], [''], ['*'], ['*/*'], ['*/project'], ['example'], ['example/'], ['/project'], ['example/project/extra'],
+  for (const value of ['example/project', {}, [7], Array(1), [''], ['*'], ['*/*'], ['*/project'], ['example'], ['example/'], ['/project'], ['example/project/extra'],
     ['example/pro*'], ['exam*/project'], ['example/**'], ['example/.'], ['example/..'], ['ex ample/project'], [' example/project'], ['example/project\n'],
     ['exa_mple/project'], ['\u212Aample/project'], ['https://github.com/example/project'], ['a'.repeat(101) + '/project'], ['example/' + 'a'.repeat(101)],
     Array.from({ length: 257 }, (_, i) => `example/project-${i}`)])

@@ -48,9 +48,9 @@ function targetMetadata(input: Record<string, unknown>, config: TableServeConfig
     ...(input.githubRepositories === undefined ? {} : { githubRepositories: githubRepositories(input.githubRepositories) }) };
 }
 // The same owner and repository characters the GitHub tools accept; GitHub compares both without case.
-export function githubRepositories(value: unknown): readonly string[] {
+function githubRepositories(value: unknown): readonly string[] {
   if (!Array.isArray(value) || value.length > 256) throw new ConfigurationError();
-  return Object.freeze([...new Set(value.map(entry => {
+  return Object.freeze([...new Set(Array.from(value, entry => {
     const match = typeof entry === 'string' ? /^[A-Za-z0-9-]{1,100}\/(\*|[A-Za-z0-9_.-]{1,100})$/u.exec(entry) : null;
     if (!match || ['.', '..'].includes(match[1]!)) throw new ConfigurationError();
     return (entry as string).toLowerCase();
