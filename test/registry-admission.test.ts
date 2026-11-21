@@ -461,6 +461,9 @@ test('card action field names, trigger, platform and service host are logged onl
   assert.deepEqual(await act({ serviceUrl: 'https://[::1]/', entities: 'PRIVATE_ENTITIES' }), { target: 'primary', proposal: p.id, service: '?', status: 200, verb: 'pr-refresh', outcome: 'pending' });
   assert.deepEqual(await act({ serviceUrl: 'https://x/' + 'p'.repeat(2048), entities: [{ type: 'clientInfo', platform: 7 }] }),
     { target: 'primary', proposal: p.id, platform: 'other', status: 200, verb: 'pr-refresh', outcome: 'pending' });
+  // A platform that is not text, even one that cannot be turned into text, neither fails the action nor loses its line.
+  for (const platform of [{ toString: null }, ['iOS'], null, true]) assert.deepEqual(await act({ entities: [{ type: 'clientInfo', platform }] }),
+    { target: 'primary', proposal: p.id, service: 'smba.example.invalid', platform: 'other', status: 200, verb: 'pr-refresh', outcome: 'pending' });
   // A platform is named only from the fixed list, so it cannot carry a conversation id or other chosen text.
   assert.deepEqual(await act({ entities: [{ type: 'clientInfo', platform: 'Room123' }] }),
     { target: 'primary', proposal: p.id, service: 'smba.example.invalid', platform: 'other', status: 200, verb: 'pr-refresh', outcome: 'pending' });

@@ -232,10 +232,11 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
   async function cardAction(input: unknown, supplied: ExchangeContext): Promise<{ status: number; body: unknown }> {
     const started = performance.now(); const seen: CardActionSeen = { stage: options.delegated ? 'busy' : 'unavailable', extra: [] };
     const result = await handleCardAction(input, supplied, seen);
-    options.log('card-action', seen.targetId, { verb: seen.verb ?? 'unknown', ...(seen.trigger ? { trigger: seen.trigger } : {}),
+    // The action has already been decided; a failure to describe it must not change what the client is told.
+    try { options.log('card-action', seen.targetId, { verb: seen.verb ?? 'unknown', ...(seen.trigger ? { trigger: seen.trigger } : {}),
       ...(seen.proposal ? { proposal: seen.proposal } : {}), ...cardActionClient(input), status: result.status,
       outcome: result.status === 200 && seen.state ? seen.state : `denied-${seen.stage}`, ms: Math.round(performance.now() - started),
-      ...(seen.extra.length ? { extra: seen.extra.join(';') } : {}) });
+      ...(seen.extra.length ? { extra: seen.extra.join(';') } : {}) }); } catch { /* Logged nothing. */ }
     return result;
   }
   async function handleCardAction(input: unknown, supplied: ExchangeContext, seen: CardActionSeen): Promise<{ status: number; body: unknown }> {
@@ -605,7 +606,7 @@ function cardActionClient(input: unknown): { service?: string; platform?: string
   try { service = typeof input.serviceUrl === 'string' && input.serviceUrl.length <= 2048 ? new URL(input.serviceUrl).hostname : undefined; } catch { /* Not a URL. */ }
   const info = Array.isArray(input.entities) ? input.entities.slice(0, 16).find(e => record(e) && e.type === 'clientInfo') as Record<string, unknown> | undefined : undefined;
   return { ...(service === undefined ? {} : { service: /^[a-z0-9.-]{1,253}$/u.test(service) ? service : '?' }),
-    ...(info?.platform === undefined ? {} : { platform: clientPlatforms.find(name => name.toLowerCase() === String(info.platform).toLowerCase()) ?? 'other' }) };
+    ...(info?.platform === undefined ? {} : { platform: typeof info.platform === 'string' && clientPlatforms.find(name => name.toLowerCase() === (info.platform as string).toLowerCase()) || 'other' }) };
 }
 function formatControl(reply: ControlReply, delegated?: DelegatedOptions, chatKind?: string): ProviderMessage {
   if (reply.kind === 'signin' || reply.kind === 'github-signin') {
