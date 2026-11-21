@@ -38,6 +38,9 @@ function states(): { name: string; p: Proposal; viewer?: 'room'; enabled?: false
     { name: 'revise queue full', p: revise('full'), head: 'Sending your changes…', lines: ['Your note: "Cap retries at 5"'], buttons: ['View changes'] },
     { name: 'revise sent', p: revise('delivered'), head: 'Changes requested. Sent to the agent.', lines: ['Your note: "Cap retries at 5"'], buttons: ['View changes'] },
     { name: 'revise sent, room', p: revise('delivered'), viewer: 'room', head: 'Changes requested. Sent to the agent.', lines: ['Note from Example Sender: "Cap retries at 5"'], buttons: ['View changes'] },
+    { name: 'revise sending, room', p: revise('pending'), viewer: 'room', head: 'Sending your changes…', buttons: ['View changes'] },
+    { name: 'revise conflict, room', p: revise('conflict'), viewer: 'room', head: 'Changes not sent. Reply in the chat with what to change.', alert: true, buttons: ['View changes'] },
+    { name: 'revise sign-in, room', p: revise('signin-required'), viewer: 'room', head: 'Changes not sent. Sign in, then send them again.', alert: true, buttons: ['View changes'] },
     { name: 'revise conflict', p: revise('conflict'), head: 'Changes not sent. Reply in the chat with what to change.', alert: true, lines: ['Your note: "Cap retries at 5"'], buttons: ['View changes'] },
     { name: 'revise sign-in', p: revise('signin-required'), head: 'Changes not sent. Sign in, then send them again.', alert: true, lines: ['Your note: "Cap retries at 5"'], buttons: ['View changes'] },
     { name: 'expired', p: { ...p, state: 'expired' }, head: 'Expired. Nothing was opened.', lines: ['Ask the agent again for a new card.'], buttons: ['View changes'] },
@@ -73,6 +76,8 @@ for (const s of states()) test(`card state: ${s.name}`, () => {
   assert.equal(/pr-approve|pr-reject|pr-revise/u.test(wire), pending && s.viewer !== 'room' && s.enabled !== false);
   assert.deepEqual(card.refresh, { action: { type: 'Action.Execute', verb: 'pr-refresh', data: { proposal: p.id, rev: 1, digest: p.payloadDigest } }, userIds: ['29:sender-private'] });
   for (const privateValue of [p.taskUID, p.grantRef, p.targetId, p.replyTarget]) assert.ok(!wire.includes(privateValue));
+  // A note the agent has not been sent yet is the sender's alone.
+  if (p.state === 'revise-requested') assert.equal(wire.includes('Cap retries at 5'), s.viewer !== 'room' || p.revisionAdmission === 'delivered');
   assert.ok(response(card), 'every state passes the closed projection');
   assert.ok(Buffer.byteLength(wire) < 6144);
 });
@@ -207,6 +212,7 @@ test('projection rejects every value the builder does not use', () => {
     ['text over the limit', c => { part.head(c).text = 'x'.repeat(MAX_OUTGOING_MESSAGE_BYTES + 1); }],
     ['other body element', c => { c.body.push({ type: 'Image', url: 'https://example.invalid/x.png' }); }], ['top-level ActionSet', c => { c.body.push(part.set(c)); }],
     ['top-level FactSet', c => { c.body.push({ type: 'FactSet', facts: [] }); }], ['top-level input', c => { c.body.push(part.revise(c).card.body[0]); }],
+    ['second container', c => { c.body.push(structuredClone(part.box(c))); }], ['second container without a button', c => { const again = structuredClone(part.box(c)); again.items.pop(); c.body.push(again); }],
     ['container style', c => { part.box(c).style = 'attention'; }], ['container without style', c => { delete part.box(c).style; }], ['container spacing', c => { part.box(c).spacing = 'None'; }],
     ['empty container', c => { part.box(c).items = []; }], ['container items not a list', c => { part.box(c).items = { 0: part.head(c) }; }], ['fifth container item', c => { part.box(c).items.unshift(part.head(c)); }],
     ['container in container', c => { part.box(c).items[2] = structuredClone(part.box(c)); }], ['columns in container', c => { part.box(c).items[2] = part.row(c); }],

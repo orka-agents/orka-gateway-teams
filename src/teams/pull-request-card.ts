@@ -33,7 +33,9 @@ function status(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolea
   if (o?.kind === 'opened') return { head: `${o.existing ? 'Already open: ' : 'Opened '}#${o.number}`, ...(o.headSHA === p.headSHA ? {} :
     { detail: `The branch moved while opening. The pull request is at ${o.headSHA.slice(0, 7)}, not the approved ${p.headSHA.slice(0, 7)}.` }) };
   if (p.state === 'rejected') return viewer === 'sender' ? { head: 'Not opened. You rejected it.' } : { head: `Not opened. ${who} rejected it.`, fallback: 'Not opened. Rejected.' };
-  if (p.state === 'revise-requested') return { ...revisionStatus(p.revisionAdmission), detail: `${viewer === 'sender' ? 'Your note' : `Note from ${who}`}: "${label(p.claim?.note ?? '', 2400)}"` };
+  // The rest of the chat sees the note only once it has been sent on as a chat turn.
+  if (p.state === 'revise-requested') return { ...revisionStatus(p.revisionAdmission), ...(viewer === 'sender' || p.revisionAdmission === 'delivered' ?
+    { detail: `${viewer === 'sender' ? 'Your note' : `Note from ${who}`}: "${label(p.claim?.note ?? '', 2400)}"` } : {}) };
   if (p.state === 'expired') return { head: 'Expired. Nothing was opened.', detail: again };
   if (p.state === 'superseded') return { head: 'Replaced by a newer card.' };
   if (p.state === 'uncertain') return { head: "Couldn't confirm the pull request opened", alert: true,
@@ -118,8 +120,9 @@ export function cardInvokeResponse(input: unknown): { statusCode: 200; type: 'ap
         const t = object(c.body[0], ['type', 'id', 'isMultiline', 'maxLength', 'placeholder']);
         if (t.type !== 'Input.Text' || t.id !== 'note' || t.isMultiline !== true || t.maxLength !== 2000 || t.placeholder !== 'What should change?') throw new Error();
       }
+      let boxes = 0;
       for (const b of revision ? [] : c.body) { const type = b && typeof b === 'object' && 'type' in b ? b.type : undefined;
-        if (!nested && type === 'Container') container(b); else if (!nested && type === 'ColumnSet') columns(b); else text(b); }
+        if (!nested && type === 'Container' && !boxes++) container(b); else if (!nested && type === 'ColumnSet') columns(b); else text(b); }
       if (c.actions !== undefined) {
         if (nested && !revision || !Array.isArray(c.actions) || c.actions.length > (revision ? 1 : 5)) throw new Error();
         for (const a of c.actions) { const v = object(a, ['type', 'title', ...(a.type === 'Action.ShowCard' ? ['card'] : a.type === 'Action.Execute' ? ['verb', 'data', ...(a.verb === 'pr-approve' ? ['style'] : [])] : ['url'])]); string(v.title);
