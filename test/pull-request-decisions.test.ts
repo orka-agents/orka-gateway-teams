@@ -47,6 +47,12 @@ test('a pull request GitHub opened at an unapproved commit is closed, and the ca
   assert.deepEqual(writes.map(r => [r.method, r.path]), [['POST', '/repos/example/project/pulls'], ['PATCH', '/repos/example/project/pulls/12']]);
   assert.deepEqual(writes[1]!.body, { state: 'closed' });
 });
+test('a closed pull request is still named when the write record cannot be completed', async t => {
+  const f = await decisionsFixture(t); pushedBeforePost(f, res => res.end(JSON.stringify({ ...f.result('c'.repeat(40)), state: 'closed' })));
+  const store = Object.create(f.store, { completeProposalWrite: { value: async () => { throw new Error('out of time'); } } }) as typeof f.store;
+  await f.make(store).decide(f.p, 'approve', 'invoke', f.ctx());
+  assert.deepEqual((await f.settled()).outcome, { kind: 'branch-moved', closed: 12 });
+});
 test('when that pull request cannot be closed, it stays open and the card says it has unapproved changes', async t => {
   for (const close of [(res: import('node:http').ServerResponse) => { res.statusCode = 500; res.end('{}'); },
     (res: import('node:http').ServerResponse) => res.end(JSON.stringify({ number: 12, state: 'open' }))]) {

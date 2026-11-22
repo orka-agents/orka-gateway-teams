@@ -68,17 +68,18 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
           else {
             if (!await options.decisions!.authority.revalidate() || !await generations(p, bound) || !await options.decisions!.connected(p, bound) || !bound.authorizeWrite()) throw new GitHubError('signin-required');
             // No await between the final local fence and the native client's own handoff check.
-            sent = true;
+            sent = true; let moved = false;
             try {
-              const opened = await options.github.openProposedPullRequest(p, token, bound); outcome = opened;
+              const opened = await options.github.openProposedPullRequest(p, token, bound); outcome = opened; moved = opened.headSHA !== p.headSHA;
               // GitHub can't pin a new pull request to a commit, so a push just before the POST opens it at the new one. Close it.
-              if (opened.headSHA !== p.headSHA) try { await options.github.closePullRequest(p, opened.number, token, bound); outcome = { kind: 'branch-moved', closed: opened.number }; }
+              if (moved) try { await options.github.closePullRequest(p, opened.number, token, bound); outcome = { kind: 'branch-moved', closed: opened.number }; }
                 catch { options.log?.('pull-request-close-failed'); /* It stays open, and the card says so. */ }
             } catch (e) {
               if (!(e instanceof GitHubError && e.code === 'validation')) throw e;
               outcome = approved(await options.github.findPullRequest(p, token, bound)) ?? { kind: 'validation' };
             }
-            await options.accounts.completeProposalWrite(p, outcome, bound);
+            // The close may have used the time left for this record. The card must still name the pull request, so settlement saves the outcome.
+            try { await options.accounts.completeProposalWrite(p, outcome, bound); } catch (e) { if (!moved) throw e; }
           }
         }
       }
