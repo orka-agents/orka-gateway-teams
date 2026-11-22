@@ -48,7 +48,8 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
   checkProposal(p: Proposal, ctx: DirectoryContext): Promise<boolean>;
   postDecision(p: Proposal, ctx: DirectoryContext): Promise<void>;
   admitRevision(p: Proposal, ctx: ExchangeContext): Promise<Exclude<RevisionAdmission, 'pending'>>;
-  preflight(targetId: string, claim: Readonly<IngressClaim>, signal: AbortSignal): Promise<boolean>;
+  /** True, or a fixed reason code for the forward-retry line. */
+  preflight(targetId: string, claim: Readonly<IngressClaim>, signal: AbortSignal): Promise<true | string>;
 } {
   const { directory, authority, authorizer } = options;
   const scope = { appId: options.config.targets[0]!.config.scope.appId, tenantId: options.config.targets[0]!.config.scope.tenantId };
@@ -575,19 +576,22 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     postDecision: async (p, ctx) => { await postProposal(p, ctx, true); },
     bindControlSender(value) { if (sender) throw new Error('Control sender already bound'); sender = value; },
     async preflight(targetId, claim, signal) {
-      if (consumers >= 4) return false; consumers++;
+      if (consumers >= 4) return 'busy'; consumers++;
       const ctx: DirectoryContext = { signal, deadline: performance.now() + 2000, authorizeWrite: () => active(ctx) };
       try {
         assertActive(ctx); const slot = slots.get(targetId);
         const connection = await directory.getConnection(claim.event.contextId, ctx); assertActive(ctx);
         if (!slot || !connection || connection.state !== 'provisioned' || !validConnection(connection, slot, claim.event, connection.chatKind)) {
-          log('binding-conflict', targetId); return false;
+          log('binding-conflict', targetId); return !connection ? 'connection-missing' : connection.state !== 'provisioned' ? 'connection-reserved' : 'connection-mismatch';
         }
         // Last step before Orka sees the event: move the chat first if its front Agent changed.
         await check(slot, connection, ctx, false, true); assertActive(ctx); return true;
       } catch (error) {
-        if (transient(error) || error instanceof DirectoryError && error.code === 'unready' && !active(ctx)) return false;
-        throw error;
+        if (!transient(error) && !(error instanceof DirectoryError && error.code === 'unready' && !active(ctx))) throw error;
+        // An expired budget surfaces as whichever read was running, so name the budget first.
+        if (!active(ctx)) return signal.aborted ? 'cancelled' : performance.now() >= ctx.deadline ? 'deadline' : 'not-serving';
+        if (error instanceof BindingCheckError) return error.step ? `${error.category}:${error.step}` : error.category;
+        return `${error instanceof DirectoryError ? 'directory' : error instanceof AccountError ? 'account' : 'table'}-${(error as { code: string }).code}`;
       }
       finally { consumers--; }
     },

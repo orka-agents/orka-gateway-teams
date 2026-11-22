@@ -11,6 +11,8 @@ const digestMarker = 'gateway.orka.ai/teams-target-digest';
 const gatewayMarker = 'gateway.orka.ai/teams-gateway-uid';
 type KubernetesClient = Pick<ReturnType<typeof createKubernetesReader>, 'getGateway' | 'getAgent' | 'listBindings' | 'getBinding' | 'createBinding'>;
 export class BindingCheckError extends Error {
+  /** The step a Binding check stopped at, for logs: `target-paused` alone covers every read. */
+  step?: 'record' | 'gateway' | 'agent' | 'bindings' | 'binding';
   constructor(readonly category: 'target-paused' | 'binding-conflict' | 'credential-expiring') { super(category); this.name = 'BindingCheckError'; }
 }
 const conflict = (): never => { throw new BindingCheckError('binding-conflict'); };
@@ -122,13 +124,14 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
     return { namespace, name: value.bindingName, uid, generation: current, spec: structuredClone(spec) as { [key: string]: CanonicalValue } };
   }
   async function run(input: ConnectionRecord, supplied: KubernetesContext, checkOnly: boolean): Promise<BindingEvidence> {
+    let step: BindingCheckError['step'] = 'record';
     try {
       const context = capture(supplied); active(context); const value = connection(input, checkOnly);
-      await gateway(context, !checkOnly); active(context);
-      const agent = await client.getAgent(context); active(context);
+      step = 'gateway'; await gateway(context, !checkOnly); active(context);
+      step = 'agent'; const agent = await client.getAgent(context); active(context);
       metadata(agent, 'Agent', 'core.orka.ai/v1alpha1', namespace, target.frontAgent.name);
-      await overlap(value, context); active(context);
-      let binding = await client.getBinding(value.bindingName, context); active(context);
+      step = 'bindings'; await overlap(value, context); active(context);
+      step = 'binding'; let binding = await client.getBinding(value.bindingName, context); active(context);
       if (!binding) {
         if (checkOnly || value.state === 'provisioned') conflict();
         active(context);
@@ -148,11 +151,12 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
         await wait(context); binding = await client.getBinding(value.bindingName, context); active(context);
         if (!binding) conflict();
       }
-      await overlap(value, context); await gateway(context, false); active(context);
+      step = 'bindings'; await overlap(value, context); step = 'gateway'; await gateway(context, false); active(context);
       return result;
     } catch (error) {
-      if (error instanceof BindingCheckError) throw error;
-      throw new BindingCheckError(error instanceof Error && error.message === 'credential-expiring' ? 'credential-expiring' : 'target-paused');
+      const failure = error instanceof BindingCheckError ? error :
+        new BindingCheckError(error instanceof Error && error.message === 'credential-expiring' ? 'credential-expiring' : 'target-paused');
+      failure.step ??= step; throw failure;
     }
   }
   async function revision(supplied: KubernetesContext): Promise<AgentRevision> {
@@ -161,8 +165,9 @@ export function createBindingProvisioner(input: RegistryTarget, client: Kubernet
       const meta = metadata(await client.getAgent(context), 'Agent', 'core.orka.ai/v1alpha1', namespace, target.frontAgent.name); active(context);
       return { uid: identity(meta.uid), generation: generation(meta.generation) };
     } catch (error) {
-      if (error instanceof BindingCheckError) throw error;
-      throw new BindingCheckError(error instanceof Error && error.message === 'credential-expiring' ? 'credential-expiring' : 'target-paused');
+      const failure = error instanceof BindingCheckError ? error :
+        new BindingCheckError(error instanceof Error && error.message === 'credential-expiring' ? 'credential-expiring' : 'target-paused');
+      failure.step ??= 'agent'; throw failure;
     }
   }
   return Object.freeze({

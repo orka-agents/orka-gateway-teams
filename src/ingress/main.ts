@@ -22,7 +22,7 @@ import type { ForeignOwnerFenceV2, TableBinding } from '../storage/table/types.j
 import { createTableDeliveryJournalV2, createTableDeliveryJournalV3, TableDeliveryStartupFailure } from '../delivery/table-journal.js';
 import { auditConfig, auditFields } from '../storage/table/audit.js';
 import type { ServeConfig } from './config.js';
-import { logIngress, startProcessMemoryDiagnostics } from './logger.js';
+import { logForwardRetry, logIngress, startProcessMemoryDiagnostics } from './logger.js';
 import { createOrkaClient } from './client.js';
 import { createIngressPort, initializeIngressStore, openIngressStore } from './store.js';
 import type { IngressPort, IngressScope, StoreOptions } from './types.js';
@@ -221,7 +221,7 @@ export async function startIngressRuntime(config: RuntimeServeConfig, dependenci
   const relay = (async () => {
     try {
       while (!abort.signal.aborted) {
-        if (!await relayOne(ownedStore, client, abort.signal, active)) {
+        if (!await relayOne(ownedStore, client, abort.signal, active, undefined, logForwardRetry)) {
           try { await sleep(100, undefined, { signal: abort.signal }); }
           catch { if (!abort.signal.aborted) throw new Error('Relay scheduling failed'); }
         }

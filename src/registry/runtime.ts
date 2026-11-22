@@ -28,6 +28,7 @@ import { createOrkaClient } from '../ingress/client.js';
 import { ConfigurationError, tlsVerificationEnabled } from '../ingress/config.js';
 import type { IngressRuntime, IngressRuntimeDependencies } from '../ingress/main.js';
 import { relayOne } from '../ingress/relay.js';
+import { logForwardRetry } from '../ingress/logger.js';
 import { LeaseRuntimeFailure, readCaBundle } from '../ingress/runtime-shared.js';
 import type { Receiver } from '../ingress/server.js';
 import { prepareReceiver } from '../ingress/server.js';
@@ -191,7 +192,8 @@ export async function startRegistryRuntime(input: RegistryConfig, dependencies: 
   const relays = slots.map((s, i) => (async () => {
     try {
       while (!abort.signal.aborted) {
-        if (!await relayOne(s.inbox, clients[i]!, abort.signal, active, (claim) => admission!.preflight(s.target.id, claim, abort.signal))) {
+        if (!await relayOne(s.inbox, clients[i]!, abort.signal, active, (claim) => admission!.preflight(s.target.id, claim, abort.signal),
+          retry => logForwardRetry(retry, s.target.id))) {
           try { await sleep(100, undefined, { signal: abort.signal }); }
           catch { if (!abort.signal.aborted) throw new Error('Relay scheduling failed'); }
         }

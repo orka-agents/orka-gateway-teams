@@ -125,6 +125,20 @@ test('readiness loss during final synchronous owner check still prevents Orka ha
   assert.equal(f.posts(), 0);
 });
 
+test('a forward stopped before the POST reports the check, the grant or the inbox as its stage', async (t) => {
+  const f = await fixture(t, 86400000); const seen: unknown[] = []; const report = (retry: object) => { seen.push({ ...retry }); };
+  let time = 1000; const later = (ms: number) => { time += ms; f.now(time); };
+  assert.equal(await relayOne(f.port, f.client, undefined, undefined, async () => 'target-paused:gateway', report), true); later(1000);
+  assert.equal(await relayOne(f.port, f.client, undefined, undefined, async () => false, report), true); later(2000);
+  const grantless = { ...f.client, prepare: async () => { throw Object.assign(new Error('Account storage: busy'), { code: 'busy' }); } };
+  assert.equal(await relayOne(f.port, grantless, undefined, undefined, async () => true, report), true); later(4000);
+  const refusing: IngressPort = { ...f.port, claimForForwarding: async () => { const grant = await f.port.claimForForwarding(); assert.ok(grant); return { ...grant, revalidate: async () => false }; } };
+  assert.equal(await relayOne(refusing, f.client, undefined, undefined, undefined, report), false);
+  assert.deepEqual(seen, [{ stage: 'check', reason: 'target-paused:gateway', attempt: 1, delayMs: 1000 }, { stage: 'check', reason: 'refused', attempt: 2, delayMs: 2000 },
+    { stage: 'grant', reason: 'busy', attempt: 3, delayMs: 4000 }, { stage: 'inbox', reason: 'not-eligible', attempt: 4 }]);
+  assert.equal(f.posts(), 0);
+});
+
 test('SQLite grant is one-use and foreign store adaptation cannot supply unconditional permission', async (t) => {
   const f = await fixture(t); const grant = await f.port.claimForForwarding(); assert.ok(grant);
   assert.equal(await grant.revalidate(), true); assert.equal(grant.take(), true);

@@ -16,6 +16,12 @@ export function logIngress(event: IngressLogEvent, reason?: IngressLogReason, st
   process.stderr.write(`teams-ingress: ${event}${store ? ` (${store})` : ''}${reason ? `: ${reason}` : ''}\n`);
 }
 
+/** One line per forward attempt put back: fixed words and numbers only, never an event, a person or what they wrote. */
+export function logForwardRetry(retry: Readonly<import('./types.js').ForwardRetry>, targetId?: string): void {
+  process.stderr.write(`teams-ingress: forward-retry${targetId ? ` (${targetId})` : ''} stage=${retry.stage} reason=${retry.reason} attempt=${retry.attempt}${
+    retry.delayMs === undefined ? '' : ` retryMs=${retry.delayMs}`}\n`);
+}
+
 /** CLI-only diagnostics: project numeric fields, never arbitrary SDK or process data. */
 export function startProcessMemoryDiagnostics(): () => void {
   const timer = setInterval(() => {

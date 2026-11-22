@@ -172,6 +172,29 @@ caller does not set a target pause. Fresh successful target checks clear the pau
 `target-paused`, `graph-unavailable`, `credential-expiring` and `binding-conflict`,
 coalesced by configured target rather than logging requests or private identities.
 
+### Why a message was not forwarded
+
+Each forward attempt that is put back writes one line, every time, so a message
+that never reaches Orka is never silent:
+
+```text
+teams-ingress: forward-retry (primary) stage=post reason=CERT_HAS_EXPIRED attempt=3 retryMs=4000
+```
+
+The line holds fixed words and numbers only: no event, chat, person or text.
+`attempt` counts this event's attempts and `retryMs` is the delay before the next
+one. `stage` is the step the attempt stopped at:
+
+| Stage | Step | Reasons |
+|---|---|---|
+| `check` | Binding and session check before the handoff | `target-paused`, `binding-conflict` or `credential-expiring`, followed by `:` and the read that failed (`record`, `gateway`, `agent`, `bindings`, `binding`); a bare `target-paused` inside the one-second pause; `deadline` (the two-second budget ran out); `connection-missing`, `connection-reserved`, `connection-mismatch`; `busy`; `cancelled`; `not-serving`; `directory-…`, `account-…` or `table-…` with the storage code |
+| `grant` | Reading the sender's sign-in grant | the account storage code, such as `busy` or `unavailable` |
+| `inbox` | The inbox's last check before the POST | `not-eligible`, `cancelled`; the inbox sets the delay itself, so there is no `retryMs` |
+| `post` | The HTTPS POST to Orka | `http-<status>`; `timeout`; Node's own code for a connection or certificate failure, such as `ECONNREFUSED`, `CERT_HAS_EXPIRED` or `DEPTH_ZERO_SELF_SIGNED_CERT`; `invalid-receipt`; `response-too-large`; `response-failed`; `lease`; `cancelled` |
+
+A certificate code means Orka's certificate or the CA in `orkaCaFile` failed the
+check: no request reached Orka, so its logs show nothing.
+
 ## Callback paths
 
 Every target uses `/targets/<id>/v1/deliveries`,

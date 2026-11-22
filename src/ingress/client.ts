@@ -1,6 +1,7 @@
 import { request } from 'node:https';
 import { MAX_ADAPTER_RESPONSE_BYTES } from '../protocol/types.js';
 import { decode, encode, integer, invalid, validateEvent, validateReceipt, validateScope } from './codec.js';
+import { reasonCode } from './types.js';
 import type { IngressScope, OrkaClient, OrkaPostPreparation, OrkaPostResult } from './types.js';
 import type { EventEnvelope } from '../protocol/types.js';
 import { grantRef } from '../accounts/grants.js';
@@ -17,7 +18,7 @@ export function createOrkaClient(inputScope: Readonly<IngressScope>, options: { 
     let event: EventEnvelope;
     try { event = validateEvent(input); } catch { return { kind: 'blocked', reason: 'invalid-event' }; }
     let ref: string | undefined;
-    try { ref = await options.delegatedGrant!(event, signal); } catch { return { kind: 'retry' }; }
+    try { ref = await options.delegatedGrant!(event, signal); } catch (error) { return { kind: 'retry', reason: reasonCode(error) }; }
     // Missing historical grants are permanent invalid events, not endlessly retried preflights.
     try { return { kind: 'ready', gatewayGrantRef: grantRef(ref) }; }
     catch { return { kind: 'blocked', reason: 'invalid-event' }; }
@@ -34,7 +35,7 @@ export function createOrkaClient(inputScope: Readonly<IngressScope>, options: { 
         try { body = encode({ ...event, eventType: 'delegatedText', metadata: { ...event.metadata, gatewayGrantRef: grantRef(prepared.gatewayGrantRef) } }); }
         catch { return { kind: 'blocked', reason: 'invalid-event' }; }
       } else body = encode(event);
-      if (signal?.aborted) return { kind: 'retry' };
+      if (signal?.aborted) return { kind: 'retry', reason: 'cancelled' };
       return new Promise<OrkaPostResult>((resolve) => {
         let settled = false;
         let req: ReturnType<typeof request> | undefined;
@@ -47,13 +48,14 @@ export function createOrkaClient(inputScope: Readonly<IngressScope>, options: { 
             req.once('close', () => resolve(result)); req.destroy();
           } else resolve(result);
         };
-        const abort = () => finish({ kind: 'retry' });
+        const retry = (reason: string) => finish({ kind: 'retry', reason });
+        const abort = () => retry('cancelled');
         // Absolute deadline, starting before DNS/TLS/request creation. Socket
         // inactivity timeouts alone allow an indefinitely slow-dripping peer.
-        const timer = setTimeout(abort, timeoutMs);
+        const timer = setTimeout(() => retry('timeout'), timeoutMs);
         signal?.addEventListener('abort', abort, { once: true });
         try {
-          if (options.authority && !options.authority.allowed()) { abort(); return; }
+          if (options.authority && !options.authority.allowed()) { retry('lease'); return; }
           req = request(url, { method: 'POST', agent: false, ...(ca === undefined ? {} : { ca }), rejectUnauthorized: true,
             maxHeaderSize: 16 * 1024,
             headers: { authorization: `Bearer ${bearer}`, 'content-type': 'application/json', 'content-length': body.length, accept: 'application/json' },
@@ -65,27 +67,28 @@ export function createOrkaClient(inputScope: Readonly<IngressScope>, options: { 
               else if (status >= 300 && status < 400) finish({ kind: 'blocked', reason: 'redirect' });
               else {
                 const delay = [429, 503].includes(status) ? retryAfter(response.headers['retry-after']) : undefined;
-                finish(delay === undefined ? { kind: 'retry' } : { kind: 'retry', retryAfterMs: delay });
+                finish({ kind: 'retry', reason: `http-${status}`, ...(delay === undefined ? {} : { retryAfterMs: delay }) });
               }
               response.destroy(); return;
             }
             const chunks: Buffer[] = []; let size = 0;
             response.on('data', (chunk: Buffer) => {
               size += chunk.length;
-              if (size > MAX_ADAPTER_RESPONSE_BYTES) { finish({ kind: 'retry' }); response.destroy(); }
+              if (size > MAX_ADAPTER_RESPONSE_BYTES) { retry('response-too-large'); response.destroy(); }
               else chunks.push(chunk);
             });
-            response.on('error', abort); response.on('aborted', abort);
+            response.on('error', () => retry('response-failed')); response.on('aborted', () => retry('response-failed'));
             response.on('end', () => {
               try { finish({ kind: 'receipt', receipt: validateReceipt(decode(Buffer.concat(chunks))) }); }
-              catch { finish({ kind: 'retry' }); }
+              catch { retry('invalid-receipt'); }
             });
-            response.on('close', () => { if (!response.complete) abort(); });
+            response.on('close', () => { if (!response.complete) retry('response-failed'); });
           });
-          req.on('error', abort);
+          // For a refused connection or a failed TLS check this is Node's own code, such as CERT_HAS_EXPIRED.
+          req.on('error', error => retry(reasonCode(error, 'network')));
           req.end(body);
           if (signal?.aborted) abort();
-        } catch { abort(); }
+        } catch { retry('network'); }
       });
     },
   };

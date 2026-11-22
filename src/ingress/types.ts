@@ -49,7 +49,15 @@ export interface IngressPort {
   close(): void | Promise<void>;
 }
 export interface StoreOptions { policy?: IngressPolicy; now?: () => number }
-export type OrkaPostResult = { kind: 'receipt'; receipt: IngressReceipt } | { kind: 'retry'; retryAfterMs?: number } | { kind: 'blocked'; reason: 'conflict' | 'invalid-event' | 'redirect' };
+/** `reason` is a fixed code for logs (an HTTP status, a Node error code or a word below), never a value. */
+export type OrkaPostResult = { kind: 'receipt'; receipt: IngressReceipt } | { kind: 'retry'; retryAfterMs?: number; reason?: string } | { kind: 'blocked'; reason: 'conflict' | 'invalid-event' | 'redirect' };
+/** One forward attempt that was put back: the step it stopped at and why. `delayMs` is absent when the inbox sets the delay itself. */
+export interface ForwardRetry { stage: 'check' | 'grant' | 'inbox' | 'post'; reason: string; attempt: number; delayMs?: number }
+/** A code from an error for logs: its own `code` when that is a plain token, otherwise the fallback. */
+export function reasonCode(error: unknown, fallback = 'error'): string {
+  const code = error instanceof Error ? (error as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && /^[A-Za-z0-9_-]{1,48}$/u.test(code) ? code : fallback;
+}
 export type OrkaPostPreparation = { kind: 'ready'; gatewayGrantRef: string } | Exclude<OrkaPostResult, { kind: 'receipt' }>;
 export interface OrkaClient {
   /** Resolve asynchronous delegated authority before the inbox's final forwarding check. */

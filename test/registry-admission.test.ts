@@ -162,7 +162,7 @@ test('four whole operations retain directory capacity through settlement; fifth 
   while (f.sent.length < 4) await new Promise(resolve => setImmediate(resolve));
   assert.equal((await f.run()).kind, 'full');
   const claim: IngressClaim = { externalEventId: f.event.externalEventId, attemptId: randomUUID(), attempt: 1, event: f.event };
-  assert.equal(await f.sink.preflight('target-5', claim, context().signal), false);
+  assert.equal(await f.sink.preflight('target-5', claim, context().signal), 'busy');
   gate.resolve(); await Promise.all(pending);
 });
 
@@ -210,15 +210,15 @@ test('recovery joiners retain their own cancellation and two-second preflight de
   let preflightDone = false;
   const preflight = f.sink.preflight('primary', { externalEventId: f.event.externalEventId, attemptId: randomUUID(), attempt: 1, event: f.event }, context().signal).then(r => { preflightDone = true; return r; });
   await new Promise(resolve => setTimeout(resolve, 2200)); const deadlineRespected = preflightDone;
-  gate.resolve(); await recovery; assert.equal((await joined).kind, 'full'); assert.equal(await preflight, false);
+  gate.resolve(); await recovery; assert.equal((await joined).kind, 'full'); assert.equal(await preflight, 'deadline');
   assert.equal(released, true, 'cancelled joiner must release before the recoverer completes');
   assert.equal(deadlineRespected, true, 'two-second preflight must not inherit the admission recovery budget');
 });
 
 test('missing or wrong-target relay evidence is retry-only without connection creation or membership lookup', async t => {
   const f = await fixture(t); const claim: IngressClaim = { externalEventId: f.event.externalEventId, attemptId: randomUUID(), attempt: 1, event: f.event };
-  assert.equal(await f.sink.preflight('primary', claim, context().signal), false); assert.equal(f.authorized(), 0);
-  await f.provision('tools'); assert.equal(await f.sink.preflight('primary', claim, context().signal), false);
+  assert.equal(await f.sink.preflight('primary', claim, context().signal), 'connection-missing'); assert.equal(f.authorized(), 0);
+  await f.provision('tools'); assert.equal(await f.sink.preflight('primary', claim, context().signal), 'connection-mismatch');
   assert.equal(await f.sink.preflight('tools', claim, context().signal), true); assert.equal(f.admitted.length, 0);
 });
 
@@ -840,8 +840,10 @@ test('a failed move leaves the chat on its current Binding and retries on the ne
   const f = await fixture(t); const pinned = await f.provision();
   const claim = (): IngressClaim => ({ externalEventId: f.event.externalEventId, attemptId: randomUUID(), attempt: 1, event: f.event });
   f.agent({ uid: 'agent-uid', generation: 2 }); const reconcile = f.slots[0]!.provisioner.reconcile;
-  f.slots[0]!.provisioner.reconcile = async () => { throw new BindingCheckError('target-paused'); };
-  assert.equal(await f.sink.preflight('primary', claim(), context().signal), false);
+  f.slots[0]!.provisioner.reconcile = async () => { throw Object.assign(new BindingCheckError('target-paused'), { step: 'binding' as const }); };
+  assert.equal(await f.sink.preflight('primary', claim(), context().signal), 'target-paused:binding');
+  // Inside the one-second pause no read is made, so there is no step to name.
+  assert.equal(await f.sink.preflight('primary', claim(), context().signal), 'target-paused');
   assert.deepEqual(await f.directory.getConnection(f.event.contextId, context()), pinned);
   f.slots[0]!.provisioner.reconcile = reconcile; await new Promise(resolve => setTimeout(resolve, 1010));
   assert.equal(await f.sink.preflight('primary', claim(), context().signal), true);
@@ -851,4 +853,14 @@ test('a failed move leaves the chat on its current Binding and retries on the ne
 test('connecting a chat records the Agent revision its first session will pin', async t => {
   const f = await fixture(t); f.agent({ uid: 'agent-uid', generation: 4 }); await f.run('use primary');
   assert.deepEqual((await f.directory.getConnection(f.event.contextId, context()))!.agent, { uid: 'agent-uid', generation: 4 });
+});
+
+test('a refused preflight names the storage that failed and a cancelled one says so', async t => {
+  const f = await fixture(t); await f.provision();
+  const claim: IngressClaim = { externalEventId: f.event.externalEventId, attemptId: randomUUID(), attempt: 1, event: f.event };
+  const getConnection = f.directory.getConnection; f.directory.getConnection = async () => { throw new DirectoryError('unavailable'); };
+  assert.equal(await f.sink.preflight('primary', claim, context().signal), 'directory-unavailable');
+  f.directory.getConnection = getConnection;
+  assert.equal(await f.sink.preflight('primary', claim, AbortSignal.abort()), 'cancelled');
+  assert.equal(await f.sink.preflight('primary', claim, context().signal), true);
 });

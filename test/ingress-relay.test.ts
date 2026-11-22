@@ -7,7 +7,7 @@ import test from 'node:test';
 import { createOrkaClient } from '../src/ingress/client.js';
 import { relayOne } from '../src/ingress/relay.js';
 import { initializeIngressStore, openIngressStore } from '../src/ingress/store.js';
-import type { ReplyRoute } from '../src/ingress/types.js';
+import type { ForwardRetry, ReplyRoute } from '../src/ingress/types.js';
 import { expectedEvent } from './fixtures/incoming.js';
 import { httpsFixture } from './support/ingress-https.js';
 
@@ -147,4 +147,33 @@ test('a throwing client leaves original event retryable, never a fabricated succ
   const { store, advance } = fixture(t, scope.orkaBaseUrl); store.admit(expectedEvent, route);
   assert.equal(await relayOne(store, { async post() { throw new Error('synthetic transport failure'); } }), true);
   advance(1000); const claim = store.claim(); assert.ok(claim); assert.equal(claim.attempt, 2); assert.deepEqual(claim.event, expectedEvent);
+});
+
+// A forward that never reaches Orka used to be put back with no line at all (an expired certificate stayed hidden for two sittings).
+test('every forward put back reports its stage, a fixed reason code, the attempt and the delay', async (t) => {
+  let status = 503; let body = '';
+  const orka = await httpsFixture(t, (request, response) => { request.resume(); request.on('end', () => { response.writeHead(status); response.end(body); }); });
+  const other = await httpsFixture(t, (_request, response) => { response.writeHead(202); response.end(JSON.stringify(receipt)); });
+  const { store, target, advance } = fixture(t, orka.baseUrl); store.admit(expectedEvent, route);
+  const seen: ForwardRetry[] = []; const token = randomBytes(32).toString('hex');
+  const relay = async (client: Parameters<typeof relayOne>[1]) => { assert.equal(await relayOne(store, client, undefined, undefined, undefined, retry => { seen.push({ ...retry }); }), true); advance(60000); };
+  const trusted = createOrkaClient(target, { bearerToken: token, ca: orka.ca });
+  await relay(trusted);
+  status = 202; body = 'not a receipt'; await relay(trusted);
+  // The server's certificate fails the client's check: no request reaches Orka, and Node's own code names why.
+  await relay(createOrkaClient(target, { bearerToken: token, ca: other.ca }));
+  orka.server.closeAllConnections(); await new Promise<void>(resolve => orka.server.close(() => resolve()));
+  await relay(trusted);
+  await relay({ async post() { throw new Error('synthetic failure with a private value'); } });
+  await relay({ async post() { return { kind: 'retry' }; } });
+  assert.deepEqual(seen, [
+    { stage: 'post', reason: 'http-503', attempt: 1, delayMs: 1000 }, { stage: 'post', reason: 'invalid-receipt', attempt: 2, delayMs: 2000 },
+    { stage: 'post', reason: 'DEPTH_ZERO_SELF_SIGNED_CERT', attempt: 3, delayMs: 4000 }, { stage: 'post', reason: 'ECONNREFUSED', attempt: 4, delayMs: 8000 },
+    { stage: 'post', reason: 'error', attempt: 5, delayMs: 16000 }, { stage: 'post', reason: 'unknown', attempt: 6, delayMs: 32000 }]);
+});
+
+test('a report that throws changes nothing: the event is still put back once', async (t) => {
+  const { store, advance } = fixture(t, scope.orkaBaseUrl); store.admit(expectedEvent, route);
+  assert.equal(await relayOne(store, { async post() { return { kind: 'retry', reason: 'http-500' }; } }, undefined, undefined, undefined, () => { throw new Error('log failed'); }), true);
+  assert.equal(store.claim(), undefined); advance(1000); assert.equal(store.claim()?.attempt, 2);
 });
