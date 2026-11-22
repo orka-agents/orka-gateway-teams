@@ -189,7 +189,7 @@ one. `stage` is the step the attempt stopped at:
 |---|---|---|
 | `check` | Binding and session check before the handoff | `target-paused`, `binding-conflict` or `credential-expiring`, followed by `:` and the read that failed (`record`, `gateway`, `agent`, `bindings`, `binding`); a bare `target-paused` inside the one-second pause; `deadline` (the two-second budget ran out); `connection-missing`, `connection-reserved`, `connection-mismatch`; `busy`; `cancelled`; `not-serving`; `directory-…`, `account-…` or `table-…` with the storage code |
 | `grant` | Reading the sender's sign-in grant | the account storage code, such as `busy` or `unavailable` |
-| `inbox` | The inbox's last check before the POST | `not-eligible`, `cancelled`; the inbox sets the delay itself, so there is no `retryMs` |
+| `inbox` | The inbox's last check before the POST | `not-eligible`, `cancelled`; the inbox withdraws the attempt itself, so there is no `retryMs`. It tries again later, or blocks the event for good when its replay window has passed |
 | `post` | The HTTPS POST to Orka | `http-<status>`; `timeout`; Node's own code for a connection or certificate failure, such as `ECONNREFUSED`, `CERT_HAS_EXPIRED` or `DEPTH_ZERO_SELF_SIGNED_CERT`, from a fixed list (`network` for any other); `invalid-receipt`; `response-too-large`; `response-failed`; `lease`; `cancelled` |
 
 A certificate code means Orka's certificate or the CA in `orkaCaFile` failed the

@@ -51,7 +51,7 @@ export interface IngressPort {
 export interface StoreOptions { policy?: IngressPolicy; now?: () => number }
 /** `reason` is a fixed code for logs (an HTTP status, a Node error code or a word below), never a value. */
 export type OrkaPostResult = { kind: 'receipt'; receipt: IngressReceipt } | { kind: 'retry'; retryAfterMs?: number; reason?: string } | { kind: 'blocked'; reason: 'conflict' | 'invalid-event' | 'redirect' };
-/** One forward attempt that was put back: the step it stopped at and why. `delayMs` is absent when the inbox sets the delay itself. */
+/** One forward attempt that did not reach Orka: the step it stopped at and why. `delayMs` is absent when the inbox withdrew the attempt itself. */
 export interface ForwardRetry { stage: 'check' | 'grant' | 'inbox' | 'post'; reason: string; attempt: number; delayMs?: number }
 // Storage codes of this gateway, then Node's connection and certificate codes.
 const reasonCodes = new Set(['busy', 'unavailable', 'unready', 'conflict', 'corrupt', 'closed', 'invalid-input', 'operation-conflict', 'not-submitted',

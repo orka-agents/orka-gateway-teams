@@ -28,7 +28,8 @@ export async function relayOne(store: IngressStore | IngressPort, client: OrkaCl
       if (refused === undefined && (!preparation || preparation.kind === 'ready')) {
         // Reconciliation may have outlived cancellation, expiry or quarantine.
         // No await is allowed between the owner's final take and client handoff.
-        // The inbox puts a refused attempt back itself, so there is no settlement to report below.
+        // The inbox withdraws a refused attempt itself: put back, or blocked when the event's replay window
+        // has passed. No settlement follows below, so this is the only line that attempt gets.
         const taken = active() && await grant.revalidate() && active() && grant.take();
         if (!taken || !active()) { tell({ stage: 'inbox', reason: active() ? 'not-eligible' : 'cancelled', attempt: claim.attempt }); return false; }
       }
