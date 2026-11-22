@@ -73,7 +73,7 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
       ctx.authorizeWrite?.() === false || !tlsVerificationEnabled()) throw failure();
   };
   function json(userToken: string | undefined, fields: Record<string, string>, ctx: DirectoryContext,
-    api?: { path: string; body?: Record<string, string> }): Promise<unknown> {
+    api?: { path: string; body?: Record<string, string>; method?: 'PATCH' }): Promise<unknown> {
     // REST issue/PR objects carry unreturned metadata; keep OAuth's smaller credential-response bound.
     const maxResponseBytes = api ? 1024 * 1024 : 65536;
     const body = api?.body ? Buffer.from(JSON.stringify(api.body)) : userToken ? undefined : Buffer.from(new URLSearchParams({ client_id: config.clientId, client_secret: config.clientSecret, ...fields }).toString());
@@ -91,7 +91,7 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
       try {
         active(ctx);
         req = request(new URL(api ? `https://api.github.com${api.path}` : userToken ? 'https://api.github.com/user' : 'https://github.com/login/oauth/access_token'), {
-          method: body ? 'POST' : 'GET', agent: false, rejectUnauthorized: true, maxHeaderSize: 16384,
+          method: api?.method ?? (body ? 'POST' : 'GET'), agent: false, rejectUnauthorized: true, maxHeaderSize: 16384,
           headers: { Accept: 'application/json', 'Accept-Encoding': 'identity', Connection: 'close',
             ...(userToken ? { Authorization: `Bearer ${userToken}`, 'User-Agent': 'orka-gateway-teams', 'X-GitHub-Api-Version': '2026-03-10' } : {}),
             ...(body ? { 'Content-Type': api ? 'application/json' : 'application/x-www-form-urlencoded', 'Content-Length': body.length } : {}) } }, res => {
@@ -108,7 +108,7 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
               if (api?.body && res.statusCode === 422) throw new GitHubError('validation');
               if (api && res.statusCode === 403 && object(value) && value.message === 'Resource not accessible by integration' &&
                 res.headers['retry-after'] === undefined && res.headers['x-ratelimit-remaining'] !== '0') throw new GitHubError('permission');
-              if (res.statusCode !== (api?.body ? 201 : 200) || (!object(value) && !Array.isArray(value)) || object(value) && 'error' in value) throw failure(); result = value;
+              if (res.statusCode !== (api?.body && !api.method ? 201 : 200) || (!object(value) && !Array.isArray(value)) || object(value) && 'error' in value) throw failure(); result = value;
             } catch (e) { failed = true; if (e instanceof GitHubError) reason = e; }
             req?.destroy();
           });
@@ -180,6 +180,11 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
     openProposedPullRequest(p: Proposal, token: string, ctx: DirectoryContext): Promise<ProposalResult> {
       return apiWork(token, ctx, async () => { const v = await json(token, {}, ctx, { path: `${root(p)}/pulls`,
         body: { base: p.base, head: p.head, title: p.title, body: p.body } }); active(ctx); return pullResult(p, v); });
+    },
+    /** Closes a pull request this gateway has just opened. It resolves only when GitHub reports it closed. */
+    closePullRequest(p: Proposal, number: number, token: string, ctx: DirectoryContext): Promise<void> {
+      return apiWork(token, ctx, async () => { const v = await json(token, {}, ctx, { path: `${root(p)}/pulls/${number}`, method: 'PATCH', body: { state: 'closed' } }); active(ctx);
+        if (pullResult(p, v).number !== number || !object(v) || v.state !== 'closed') throw failure(); });
     },
     safeOutput: (text: string) => !text.includes(config.clientSecret),
     readProposalFacts(args: Record<string, string>, token: string, ctx: DirectoryContext): Promise<ProposalFacts> {

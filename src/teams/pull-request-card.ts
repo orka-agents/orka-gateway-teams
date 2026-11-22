@@ -19,7 +19,7 @@ const caption = (text: string): ITextBlock => line(text, { isSubtle: true, size:
 const part = (s: string) => encodeURIComponent(s).replace(/[!'()*~]/gu, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 const LINK_EXPIRED = 'Your account link expired. Sign in, then ask the agent again for a new card.';
 
-interface Status { head: string; fallback?: string; alert?: true; detail?: string; open?: true }
+interface Status { head: string; fallback?: string; alert?: true; detail?: string; note?: string; open?: true }
 function revisionStatus(admission: RevisionAdmission | undefined): Status {
   return admission === 'delivered' ? { head: 'Changes requested. Sent to the agent.' } :
     admission === 'signin-required' ? { head: 'Changes not sent. Sign in, then send them again.', alert: true } :
@@ -30,8 +30,11 @@ function status(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolea
   if (p.state === 'pending') return { open: true, ...(decisionsEnabled ? {} : { detail: "Approval isn't turned on for this chat yet." }),
     ...(viewer === 'room' ? { head: `Waiting for ${who} to approve`, fallback: 'Waiting for approval' } : { head: decisionsEnabled ? 'Open this pull request?' : 'Pull request waiting' }) };
   if (p.state === 'approving') return { head: 'Approved. Opening the pull request…' };
-  if (o?.kind === 'opened') return { head: `${o.existing ? 'Already open: ' : 'Opened '}#${o.number}`, ...(o.headSHA === p.headSHA ? {} :
-    { detail: `The branch moved while opening. The pull request is at ${o.headSHA.slice(0, 7)}, not the approved ${p.headSHA.slice(0, 7)}.` }) };
+  if (o?.kind === 'opened' && o.headSHA === p.headSHA) return { head: `${o.existing ? 'Already open: ' : 'Opened '}#${o.number}` };
+  // Reached only when the gateway couldn't close it, or found it, open or closed, after losing track of its own request.
+  if (o?.kind === 'opened') return { head: o.existing ? `#${o.number} has changes you didn't approve` : `Opened #${o.number} with changes you didn't approve`, alert: true,
+    detail: 'The branch changed after you approved. Review the pull request before it merges.',
+    note: `Approved ${p.headSHA.slice(0, 7)} · pull request is at ${o.headSHA.slice(0, 7)}` };
   if (p.state === 'rejected') return viewer === 'sender' ? { head: 'Not opened. You rejected it.' } : { head: `Not opened. ${who} rejected it.`, fallback: 'Not opened. Rejected.' };
   // The rest of the chat sees the note only once it has been sent on as a chat turn.
   if (p.state === 'revise-requested') return { ...revisionStatus(p.revisionAdmission), ...(viewer === 'sender' || p.revisionAdmission === 'delivered' ?
@@ -40,15 +43,22 @@ function status(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolea
   if (p.state === 'superseded') return { head: 'Replaced by a newer card.' };
   if (p.state === 'uncertain') return { head: "Couldn't confirm the pull request opened", alert: true,
     detail: `Check [the branch](https://github.com/${part(p.owner)}/${part(p.repo)}/tree/${part(p.head)}) on GitHub before asking again.` };
-  const reason = o?.kind === 'branch-moved' ? `The branch changed after approval. ${again}` :
+  // The sender's own card in a one-to-one chat carries an "Ask again" button in place of the instruction.
+  const reason = o?.kind === 'branch-moved' ? `The branch changed after you approved.${o.closed ? ` GitHub opened #${o.closed} at the new commit, so it was closed.` : ''}${askAgain(p, viewer) ? '' : ' Ask Orka again.'}` :
     o?.kind === 'permission' ? `This GitHub account can't open pull requests in ${label(p.owner, 100)}/${label(p.repo, 100)}.` :
       o?.kind === 'signin-required' ? LINK_EXPIRED :
         o?.kind === 'validation' ? `GitHub rejected the pull request details. ${again}` : o?.kind === 'failed' ? again : undefined;
   return reason ? { head: 'Not opened', alert: true, detail: reason } : { head: 'This request is no longer pending.' };
 }
+/** The chat message "Ask again" sends as the sender, or nothing where a button can't send one: a group chat only hears messages that mention the bot. */
+function askAgain(p: Proposal, viewer: 'room' | 'sender'): string | undefined {
+  if (viewer !== 'sender' || p.outcome?.kind !== 'branch-moved' || p.route.conversation.conversationType !== 'personal') return undefined;
+  return `Send a new approval card for the pull request${/^[A-Za-z0-9._\/-]{1,100}$/u.test(p.head) ? ` from ${p.head}` : ''}. The branch changed after I approved.`;
+}
+const ASK_AGAIN = /^Send a new approval card for the pull request(?: from [A-Za-z0-9._\/-]{1,100})?\. The branch changed after I approved\.$/u;
 /** Only the server-verified sender receives decision actions; invokes still recheck authority. */
 export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolean): IAdaptiveCard {
-  const s = status(p, viewer, decisionsEnabled); const data = { proposal: p.id, rev: p.revision, digest: p.payloadDigest };
+  const s = status(p, viewer, decisionsEnabled); const again = askAgain(p, viewer); const data = { proposal: p.id, rev: p.revision, digest: p.payloadDigest };
   const compare = `https://github.com/${part(p.owner)}/${part(p.repo)}/compare/${p.baseSHA}...${p.headSHA}`;
   const preview = p.body ? boundedLabel(p.body, 280) : { text: 'No description.', truncated: false }; const expanded = boundedLabel(p.body, 1800);
   const files = [...p.files].sort((a, b) => b.additions + b.deletions - a.additions - a.deletions).slice(0, 5);
@@ -56,7 +66,7 @@ export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', dec
   const expires = `Expires at {{TIME(${new Date(p.expiresAt).toISOString().slice(0, 19)}Z)}}`;
   const body: CardElement[] = [caption(`Pull request · ${label(p.owner, 100)}/${label(p.repo, 100)}`),
     line(s.head, { weight: 'Bolder', size: 'Medium', spacing: 'Small', ...(s.alert ? { color: 'Attention' } : {}) }),
-    ...(s.detail ? [line(s.detail, { spacing: 'Small' })] : []),
+    ...(s.detail ? [line(s.detail, { spacing: 'Small' })] : []), ...(s.note ? [line(s.note, { isSubtle: true, size: 'Small', spacing: 'Small' })] : []),
     ...(s.open ? [line(`${expires} · ${viewer === 'sender' ? `opens as @${label(p.githubLogin, 39)}` : `asked by ${label(p.displayName, 80)}`}`, { isSubtle: true, size: 'Small', spacing: 'Small' })] : []),
     // Everything the agent wrote sits in this one tinted box, under its caption.
     { type: 'Container', style: 'emphasis', spacing: 'Medium', items: [caption('Written by the agent'), line(label(p.title, 180), { weight: 'Bolder', spacing: 'Small' }),
@@ -79,6 +89,7 @@ export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', dec
         body: [{ type: 'Input.Text' as const, id: 'note', isMultiline: true, maxLength: 2000, placeholder: 'What should change?' }],
         actions: [{ type: 'Action.Execute' as const, title: 'Send', verb: 'pr-revise', data }] } },
       { type: 'Action.Execute' as const, title: 'Reject', verb: 'pr-reject', data }] : []),
+      ...(again ? [{ type: 'Action.Submit' as const, title: 'Ask again', data: { msteams: { type: 'imBack' as const, value: again } } }] : []),
       ...(p.outcome?.kind === 'opened' ? [{ type: 'Action.OpenUrl' as const, title: 'Open pull request', url: p.outcome.url }] :
         s.open || p.state === 'superseded' ? [] : [{ type: 'Action.OpenUrl' as const, title: 'View changes', url: compare }])] };
 }
@@ -125,8 +136,12 @@ export function cardInvokeResponse(input: unknown): { statusCode: 200; type: 'ap
         if (!nested && type === 'Container' && !boxes++) container(b); else if (!nested && type === 'ColumnSet') columns(b); else text(b); }
       if (c.actions !== undefined) {
         if (nested && !revision || !Array.isArray(c.actions) || c.actions.length > (revision ? 1 : 5)) throw new Error();
-        for (const a of c.actions) { const v = object(a, ['type', 'title', ...(a.type === 'Action.ShowCard' ? ['card'] : a.type === 'Action.Execute' ? ['verb', 'data', ...(a.verb === 'pr-approve' ? ['style'] : [])] : ['url'])]); string(v.title);
-          if (v.type === 'Action.Execute') {
+        for (const a of c.actions) { const v = object(a, ['type', 'title', ...(a.type === 'Action.ShowCard' ? ['card'] : a.type === 'Action.Execute' ? ['verb', 'data', ...(a.verb === 'pr-approve' ? ['style'] : [])] : a.type === 'Action.Submit' ? ['data'] : ['url'])]); string(v.title);
+          if (v.type === 'Action.Submit') {
+            // "Ask again" may only post a chat message as the person who pressed it.
+            const m = object(object(v.data, ['msteams']).msteams, ['type', 'value']);
+            if (nested || v.title !== 'Ask again' || m.type !== 'imBack' || typeof m.value !== 'string' || !ASK_AGAIN.test(m.value)) throw new Error();
+          } else if (v.type === 'Action.Execute') {
             const d = object(v.data, ['proposal', 'rev', 'digest']); only(v.style, 'positive');
             if (!(revision ? v.verb === 'pr-revise' && v.title === 'Send' : ['pr-approve', 'pr-reject'].includes(String(v.verb))) || d.rev !== 1 || !/^[a-f0-9]{64}$/u.test(String(d.proposal)) || !/^[a-f0-9]{64}$/u.test(String(d.digest))) throw new Error();
           } else if (!nested && v.type === 'Action.ShowCard' && v.title === 'Revise') validate(v.card, true, true);

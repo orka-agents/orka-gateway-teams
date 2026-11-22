@@ -8,11 +8,11 @@ import type { TaskGrant } from './grants.js';
 import type { createGitHub } from './github.js';
 import { githubArguments, GitHubError, repositoryAllowed } from './github.js';
 import { proposalIdentity, proposalDigest, proposalArgs, proposalOutput, projectClaim, claimEvidence } from './pull-request-proposal.js';
-import type { Proposal, ProposalOutcome, RevisionAdmission } from './pull-request-proposal.js';
+import type { Proposal, ProposalOutcome, ProposalResult, RevisionAdmission } from './pull-request-proposal.js';
 import { canonicalJSON } from '../directory/codec.js';
 
 export function createPullRequestService(options: { accounts: AccountStore; githubAccounts: AccountStore;
-  github: Pick<ReturnType<typeof createGitHub>, 'readProposalFacts' | 'readUserId' | 'readHead' | 'findPullRequest' | 'openProposedPullRequest' | 'refresh'>; scope: DirectoryScope; now?: () => number;
+  github: Pick<ReturnType<typeof createGitHub>, 'readProposalFacts' | 'readUserId' | 'readHead' | 'findPullRequest' | 'openProposedPullRequest' | 'closePullRequest' | 'refresh'>; scope: DirectoryScope; now?: () => number;
   /** Each target's allowed repositories; a proposal for an unlisted target or repository makes no GitHub request. */
   targets: readonly { id: string; githubRepositories?: readonly string[] }[];
   /** Fixed categories only: the step a proposal stopped at, never values. */
@@ -45,6 +45,8 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
     const guards: ReturnType<AccountStore['watch']>[] = []; let reserving = false; let sent = false; let token: string | undefined;
     const bound = { ...ctx, authorizeWrite: () => active(ctx) && guards.every(g => g.active()) };
     let outcome: ProposalOutcome;
+    // Approval covers the approved commit only. A pull request someone else has open at another commit is left alone.
+    const approved = (found: ProposalResult | undefined): ProposalOutcome | undefined => found && found.headSHA !== p.headSHA ? { kind: 'branch-moved' } : found;
     try {
       if (p.claim?.decision === 'reject') { await finish(p, undefined, bound); return; }
       // The list may have changed since the card was posted.
@@ -57,7 +59,7 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
       if (!await options.accounts.pin(subject, p.generation, bound) || await options.github.readUserId(token, bound) !== p.githubId) throw new GitHubError('signin-required');
       if (await options.github.readHead(p, token, bound) !== p.headSHA) outcome = { kind: 'branch-moved' };
       else {
-        const existing = await options.github.findPullRequest(p, token, bound);
+        const existing = approved(await options.github.findPullRequest(p, token, bound));
         if (existing) outcome = existing;
         else {
           reserving = true; const reservation = await options.accounts.reserveProposalWrite(p, bound);
@@ -66,13 +68,18 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
           else {
             if (!await options.decisions!.authority.revalidate() || !await generations(p, bound) || !await options.decisions!.connected(p, bound) || !bound.authorizeWrite()) throw new GitHubError('signin-required');
             // No await between the final local fence and the native client's own handoff check.
-            sent = true;
-            try { outcome = await options.github.openProposedPullRequest(p, token, bound); }
-            catch (e) {
+            sent = true; let moved = false;
+            try {
+              const opened = await options.github.openProposedPullRequest(p, token, bound); outcome = opened; moved = opened.headSHA !== p.headSHA;
+              // GitHub can't pin a new pull request to a commit, so a push just before the POST opens it at the new one. Close it.
+              if (moved) try { await options.github.closePullRequest(p, opened.number, token, bound); outcome = { kind: 'branch-moved', closed: opened.number }; }
+                catch { options.log?.('pull-request-close-failed'); /* It stays open, and the card says so. */ }
+            } catch (e) {
               if (!(e instanceof GitHubError && e.code === 'validation')) throw e;
-              outcome = await options.github.findPullRequest(p, token, bound) ?? { kind: 'validation' };
+              outcome = approved(await options.github.findPullRequest(p, token, bound)) ?? { kind: 'validation' };
             }
-            await options.accounts.completeProposalWrite(p, outcome, bound);
+            // The close may have used the time left for this record. The card must still name the pull request, so settlement saves the outcome.
+            try { await options.accounts.completeProposalWrite(p, outcome, bound); } catch (e) { if (!moved) throw e; }
           }
         }
       }
