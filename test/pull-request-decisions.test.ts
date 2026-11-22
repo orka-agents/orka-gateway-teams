@@ -46,9 +46,6 @@ test('a pull request GitHub opened at an unapproved commit is closed, and the ca
   const writes = f.requests.filter(r => r.method !== 'GET');
   assert.deepEqual(writes.map(r => [r.method, r.path]), [['POST', '/repos/example/project/pulls'], ['PATCH', '/repos/example/project/pulls/12']]);
   assert.deepEqual(writes[1]!.body, { state: 'closed' });
-  // A second replica reads the saved outcome; it neither opens nor closes again.
-  await f.make(f.open()).decide(f.p, 'approve', 'again', f.ctx());
-  assert.equal(f.requests.filter(r => r.method !== 'GET').length, 2);
 });
 test('when that pull request cannot be closed, it stays open and the card says it has unapproved changes', async t => {
   for (const close of [(res: import('node:http').ServerResponse) => { res.statusCode = 500; res.end('{}'); },

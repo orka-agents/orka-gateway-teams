@@ -31,8 +31,8 @@ function status(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolea
     ...(viewer === 'room' ? { head: `Waiting for ${who} to approve`, fallback: 'Waiting for approval' } : { head: decisionsEnabled ? 'Open this pull request?' : 'Pull request waiting' }) };
   if (p.state === 'approving') return { head: 'Approved. Opening the pull request…' };
   if (o?.kind === 'opened' && o.headSHA === p.headSHA) return { head: `${o.existing ? 'Already open: ' : 'Opened '}#${o.number}` };
-  // Reached only when the gateway couldn't close it, or found it after losing track of its own request.
-  if (o?.kind === 'opened') return { head: `${o.existing ? 'Open: ' : 'Opened '}#${o.number} with changes you didn't approve`, alert: true,
+  // Reached only when the gateway couldn't close it, or found it, open or closed, after losing track of its own request.
+  if (o?.kind === 'opened') return { head: o.existing ? `#${o.number} has changes you didn't approve` : `Opened #${o.number} with changes you didn't approve`, alert: true,
     detail: 'The branch changed after you approved. Review the pull request before it merges.',
     note: `Approved ${p.headSHA.slice(0, 7)} · pull request is at ${o.headSHA.slice(0, 7)}` };
   if (p.state === 'rejected') return viewer === 'sender' ? { head: 'Not opened. You rejected it.' } : { head: `Not opened. ${who} rejected it.`, fallback: 'Not opened. Rejected.' };
@@ -55,6 +55,7 @@ function askAgain(p: Proposal, viewer: 'room' | 'sender'): string | undefined {
   if (viewer !== 'sender' || p.outcome?.kind !== 'branch-moved' || p.route.conversation.conversationType !== 'personal') return undefined;
   return `Send a new approval card for the pull request${/^[A-Za-z0-9._\/-]{1,100}$/u.test(p.head) ? ` from ${p.head}` : ''}. The branch changed after I approved.`;
 }
+const ASK_AGAIN = /^Send a new approval card for the pull request(?: from [A-Za-z0-9._\/-]{1,100})?\. The branch changed after I approved\.$/u;
 /** Only the server-verified sender receives decision actions; invokes still recheck authority. */
 export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolean): IAdaptiveCard {
   const s = status(p, viewer, decisionsEnabled); const again = askAgain(p, viewer); const data = { proposal: p.id, rev: p.revision, digest: p.payloadDigest };
@@ -139,7 +140,7 @@ export function cardInvokeResponse(input: unknown): { statusCode: 200; type: 'ap
           if (v.type === 'Action.Submit') {
             // "Ask again" may only post a chat message as the person who pressed it.
             const m = object(object(v.data, ['msteams']).msteams, ['type', 'value']);
-            if (nested || v.title !== 'Ask again' || m.type !== 'imBack' || typeof m.value !== 'string' || !m.value || m.value.length > 300) throw new Error();
+            if (nested || v.title !== 'Ask again' || m.type !== 'imBack' || typeof m.value !== 'string' || !ASK_AGAIN.test(m.value)) throw new Error();
           } else if (v.type === 'Action.Execute') {
             const d = object(v.data, ['proposal', 'rev', 'digest']); only(v.style, 'positive');
             if (!(revision ? v.verb === 'pr-revise' && v.title === 'Send' : ['pr-approve', 'pr-reject'].includes(String(v.verb))) || d.rev !== 1 || !/^[a-f0-9]{64}$/u.test(String(d.proposal)) || !/^[a-f0-9]{64}$/u.test(String(d.digest))) throw new Error();

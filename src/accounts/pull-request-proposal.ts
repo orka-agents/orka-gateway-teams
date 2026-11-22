@@ -90,7 +90,7 @@ export function proposalOutcome(p: Pick<Proposal, 'owner' | 'repo'>, input: unkn
   const v = object(input, ['kind', 'number', 'url', 'headSHA', 'existing', 'closed']);
   if (v.kind === 'opened') {
     integer(v.number, 1, Number.MAX_SAFE_INTEGER);
-    if (v.closed !== undefined || v.url !== `https://github.com/${p.owner}/${p.repo}/pull/${v.number}` || typeof v.headSHA !== 'string' || !/^[a-f0-9]{40}$/u.test(v.headSHA) || v.existing !== undefined && v.existing !== true) throw new Error('Invalid result');
+    if ('closed' in v || v.url !== `https://github.com/${p.owner}/${p.repo}/pull/${v.number}` || typeof v.headSHA !== 'string' || !/^[a-f0-9]{40}$/u.test(v.headSHA) || v.existing !== undefined && v.existing !== true) throw new Error('Invalid result');
   } else if (v.kind === 'branch-moved' && v.closed !== undefined) { integer(v.closed, 1, Number.MAX_SAFE_INTEGER); if (Object.keys(v).length !== 2) throw new Error('Invalid outcome');
   } else if (!['branch-moved', 'permission', 'signin-required', 'validation', 'failed', 'uncertain'].includes(String(v.kind)) || Object.keys(v).length !== 1) throw new Error('Invalid outcome');
   return v as unknown as ProposalOutcome;

@@ -543,8 +543,7 @@ with the reason "The branch changed after you approved."; the last also names
 the closed PR. In a one-to-one chat the sender's card has an "Ask again" button,
 which posts a chat message as the sender asking for a new card. If the close
 fails (`teams-ingress: pull-request-close-failed`), or the PR is found only
-during recovery, it stays open and the card says it has changes the sender
-didn't approve.
+during recovery, the card says it has changes the sender didn't approve.
 Reject opens nothing and sends no turn to Orka. Neither decision deletes a branch
 or merges a PR. The result appears in the conversation and on refresh, not in
 Orka's completed Task history. Agent tool configuration remains operator work.
