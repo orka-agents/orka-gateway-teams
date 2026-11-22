@@ -143,6 +143,9 @@ test('unique full display-name matches only, guest UPN preserved, addresses reda
   // Nobody is invited, but the card can say who matched and who did not. It carries names only, never an address.
   assert.deepEqual(resolveMeetingAttendees({ ...draft, attendees: 'named', names: [' grace ', ' Missing ', 'Ada'] }, route, members),
     { kind: 'unavailable', audience: { count: 1, notFound: ['Missing', 'Ada'], labels: ['Grace'] } });
+  // Two named people who share one address are one recipient and still two names on the card.
+  const shared = resolveMeetingAttendees({ ...draft, attendees: 'named', names: ['Grace', 'Twin'] }, route, [...members, { id: 'twin', name: 'Twin', userPrincipalName: members[2]!.userPrincipalName! }]);
+  assert.deepEqual(shared.kind === 'attendees' && [shared.upns.length, shared.audience], [1, { count: 1, labels: ['Grace', 'Twin'] }]);
   for (const userPrincipalName of ['', 'one@example.test,outsider@example.test', 'one @example.test', 'one@@example.test',
     'one@example.test\n', '\ud800@example.test', 'x'.repeat(1025) + '@example.test']) {
     assert.equal(resolveMeetingAttendees(draft, route, [...members, { id: 'invalid', name: 'Invalid', userPrincipalName }]).kind, 'unavailable');
@@ -154,4 +157,6 @@ test('unique full display-name matches only, guest UPN preserved, addresses reda
   const you = resolveMeetingAttendees(draft, personal, members.slice(0, 2)); assert.equal(you.kind, 'attendees');
   if (you.kind === 'attendees') assert.deepEqual(you.audience, { labels: ['You'], count: 1, personal: true });
   assert.equal(resolveMeetingAttendees(draft, personal, members).kind, 'unavailable');
+  assert.deepEqual(resolveMeetingAttendees({ ...draft, attendees: 'named', names: [members[1]!.name!, 'Missing'] }, personal, members.slice(0, 2)),
+    { kind: 'unavailable', audience: { count: 1, notFound: ['Missing'], labels: ['You'] } });
 });

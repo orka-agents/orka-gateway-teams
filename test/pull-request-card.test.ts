@@ -57,6 +57,8 @@ function states(): { name: string; p: Proposal; viewer?: 'room'; enabled?: false
     // The first button looks for a pull request from this branch, which is what prevents a second one.
     { name: 'uncertain', p: { ...p, state: 'uncertain', outcome: { kind: 'uncertain' } }, head: "Couldn't confirm the pull request opened", alert: true,
       lines: ["It may have opened. Look for it on GitHub before asking again, so you don't get two."], buttons: ['Check on GitHub', 'View changes'] },
+    { name: 'uncertain, room', p: { ...p, state: 'uncertain', outcome: { kind: 'uncertain' } }, viewer: 'room', head: "Couldn't confirm the pull request opened", alert: true,
+      lines: ['It may have opened. Look for it on GitHub before asking again.'], buttons: ['Check on GitHub', 'View changes'] },
     { name: 'no longer pending', p: { ...p, state: 'failed' }, head: 'This request is no longer pending.', buttons: ['View changes'] },
   ];
 }

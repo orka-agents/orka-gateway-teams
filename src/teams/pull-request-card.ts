@@ -59,7 +59,7 @@ function status(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolea
   if (p.state === 'expired') return { head: 'Expired', detail: `Nothing was opened. ${AGAIN}` };
   if (p.state === 'superseded') return { head: 'Replaced by a newer card.' };
   if (p.state === 'uncertain') return { head: "Couldn't confirm the pull request opened", alert: true,
-    detail: "It may have opened. Look for it on GitHub before asking again, so you don't get two." };
+    detail: `It may have opened. Look for it on GitHub before asking again${viewer === 'sender' ? ", so you don't get two" : ''}.` };
   const reason = o?.kind === 'branch-moved' ? `The branch changed after approval. ${AGAIN}` :
     o?.kind === 'permission' ? `@${label(p.githubLogin, 39)} can't open pull requests in ${label(p.owner, 100)}/${label(p.repo, 100)}. Get access to the repository or link a different GitHub account, then ask again.` :
       o?.kind === 'signin-required' ? LINK_EXPIRED :

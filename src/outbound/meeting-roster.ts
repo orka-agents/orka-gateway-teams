@@ -46,7 +46,8 @@ export function resolveMeetingAttendees(draft: MeetingDraft, route: Readonly<Rep
   // The personal roster must prove exactly one current user, not select a user
   // by address spelling or assume the bot is the current user.
   if (!people.length || (route.conversation.conversationType === 'personal' && people.length !== 1)) return unavailable;
-  let selected = people;
+  let selected = people; const personal = route.conversation.conversationType === 'personal';
+  const names = (list: readonly MeetingMember[]) => personal ? ['You'] : list.slice(0, 10).map(member => safeMeetingLabel(member.name ?? 'a participant'));
   if (draft.attendees === 'named') {
     selected = []; const notFound: string[] = [];
     for (const requested of draft.names!) {
@@ -54,8 +55,7 @@ export function resolveMeetingAttendees(draft: MeetingDraft, route: Readonly<Rep
       if (matches.length === 1) selected.push(matches[0]!); else notFound.push(requested.trim());
     }
     // The card says which names matched and which did not; nobody is invited.
-    if (notFound.length) return { ...unavailable, audience: { count: selected.length, notFound,
-      labels: route.conversation.conversationType === 'personal' ? [] : selected.map(member => safeMeetingLabel(member.name ?? 'a participant')) } };
+    if (notFound.length) return { ...unavailable, audience: { count: selected.length, notFound, labels: selected.length ? names(selected) : [] } };
   }
   const unique = new Map<string, MeetingMember>();
   for (const member of selected) {
@@ -68,8 +68,8 @@ export function resolveMeetingAttendees(draft: MeetingDraft, route: Readonly<Rep
   }
   const deduped = [...unique.values()];
   return { kind: 'attendees', upns: deduped.map(member => member.userPrincipalName!), audience: {
-    count: deduped.length, ...(route.conversation.conversationType === 'personal' ? { personal: true as const, labels: ['You'] } :
-      { labels: deduped.slice(0, 10).map(member => safeMeetingLabel(member.name ?? 'a participant')) }),
+    // Each named person is shown, including two who share one address.
+    count: deduped.length, ...(personal ? { personal: true as const } : {}), labels: names(draft.attendees === 'named' ? selected : deduped),
   } };
 }
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }
