@@ -91,9 +91,8 @@ Binding limitation ([Orka #736](https://github.com/orka-agents/orka/issues/736))
 ## Using the chat
 
 Once the operator has enabled request/reply, open the installed app's personal chat
-and send a text request for the configured Agent. Successful replies appear as an
-**Orka reply** card; a delivered error appears as **Orka could not complete the
-request**. Send another message in the same chat to continue, using the Session
+and send a text request for the configured Agent. Successful replies appear as a card with the reply text; a delivered error is
+headed **Couldn't complete the request**. Send another message in the same chat to continue, using the Session
 policy configured in Orka. The installation challenge is not part of normal use.
 
 If a reply is missing, have the operator check the Gateway, Task, and provider

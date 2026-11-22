@@ -24,12 +24,13 @@ for (const [delivery, expected] of [
     assert.equal(card.type, 'AdaptiveCard');
     assert.equal(card.version, '1.4');
     assert.ok(card.fallbackText?.trim());
-    assert.equal(card.body?.length, 2);
-    const heading = card.body?.[0];
-    const answer = card.body?.[1];
-    assert.ok(heading?.type === 'TextBlock');
+    // A reply needs no heading under the bot's name; only a failure gets one, in the alert colour.
+    assert.equal(card.body?.length, delivery.kind === 'final' ? 1 : 2);
+    const heading = delivery.kind === 'final' ? undefined : card.body?.[0];
+    const answer = card.body?.at(-1);
+    assert.deepEqual(heading, delivery.kind === 'final' ? undefined
+      : { type: 'TextBlock', text: "Couldn't complete the request", weight: 'Bolder', wrap: true, spacing: 'Small', color: 'Attention' });
     assert.ok(answer?.type === 'TextBlock');
-    assert.equal(heading.wrap, true);
     assert.equal(answer.wrap, true);
     assert.equal(answer.text, delivery.text);
   });
@@ -40,7 +41,8 @@ function cardOf(message: OutgoingTeamsMessage): IAdaptiveCard {
 }
 
 function answerOf(card: IAdaptiveCard) {
-  const answer = card.body?.[1];
+  // The answer follows the failure heading when there is one, and precedes any shortening notice.
+  const answer = card.body?.find(block => block.type === 'TextBlock' && block.weight !== 'Bolder');
   assert.ok(answer?.type === 'TextBlock');
   assert.equal(answer.wrap, true);
   return answer;
@@ -56,8 +58,8 @@ function messageBytes(message: OutgoingTeamsMessage) {
 }
 
 function assertShortened(card: IAdaptiveCard) {
-  assert.equal(card.body?.length, 3);
-  const notice = card.body?.[2];
+  const notice = card.body?.at(-1);
+  assert.notEqual(notice, answerOf(card));
   assert.ok(notice?.type === 'TextBlock');
   assert.equal(notice.wrap, true);
   assert.equal(notice.isSubtle, true);
@@ -75,7 +77,7 @@ for (const [kind, expectedText] of [
       const card = cardOf(formatText(text, kind));
       assert.equal(answerOf(card).text, expectedText);
       assert.ok(card.fallbackText?.includes(expectedText));
-      assert.equal(card.body?.length, 2);
+      assert.equal(card.body?.length, kind === 'final' ? 1 : 2);
     }
   });
 }
@@ -89,7 +91,7 @@ for (const [name, text] of [
     const message = formatText(text);
     const card = cardOf(message);
     assert.equal(answerOf(card).text, text);
-    assert.equal(card.body?.length, 2);
+    assert.equal(card.body?.length, 1);
     assert.ok(messageBytes(message) <= MAX_OUTGOING_MESSAGE_BYTES);
     assert.deepEqual(JSON.parse(JSON.stringify(message)), message);
   });
@@ -99,7 +101,7 @@ test('fallback is independently bounded and honestly abbreviated while a larger 
   for (const text of ['a'.repeat(3_000), '🧑🏽‍💻 e\u0301 界 '.repeat(150), 'a' + '\u0301'.repeat(1_024)]) {
     const card = cardOf(formatText(text));
     assert.equal(answerOf(card).text, text);
-    assert.equal(card.body?.length, 2);
+    assert.equal(card.body?.length, 1);
     assert.ok(card.fallbackText);
     assert.ok(card.fallbackText.trim());
     assert.ok(Buffer.byteLength(card.fallbackText, 'utf8') <= 512, 'fallback is at most 512 UTF-8 bytes');
@@ -129,7 +131,7 @@ for (const kind of ['final', 'error'] as const) {
     const exact = formatText(text, kind);
     assert.equal(messageBytes(exact), MAX_OUTGOING_MESSAGE_BYTES);
     assert.ok(answerOf(cardOf(exact)).text === text, 'exact-boundary answer is unchanged');
-    assert.equal(cardOf(exact).body?.length, 2);
+    assert.equal(cardOf(exact).body?.length, kind === 'final' ? 1 : 2);
     const over = formatText(text + 'a', kind);
     assert.ok(messageBytes(over) <= MAX_OUTGOING_MESSAGE_BYTES, 'one-byte-over answer fits after shortening');
     assertShortened(cardOf(over));
@@ -171,7 +173,7 @@ test('a clustered fallback near its limit cannot cause a false body-shortening n
   const message = formatText(text);
   const card = cardOf(message);
   assert.ok(messageBytes(message) <= MAX_OUTGOING_MESSAGE_BYTES);
-  if (card.body?.length === 3) {
+  if (card.body?.length === 2) {
     assert.ok(answerOf(card).text.length < text.length, 'a body-shortening notice requires actual body shortening');
   } else {
     assert.ok(answerOf(card).text === text, 'unchanged body needs no notice');

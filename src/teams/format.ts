@@ -34,14 +34,15 @@ export const formatDelivery: FormatDelivery = (delivery, presentation) => {
   const emptyText = delivery.kind === 'final'
     ? 'Orka finished without a text reply.'
     : 'This request could not be completed.';
-  const text = delivery.text.trim() ? delivery.text : emptyText;
-  const labels = presentation === undefined ? [] : [
-    `Asked by ${presentation.requesterDisplayName ? escapeMarkdown(presentation.requesterDisplayName) : 'an allowed participant'}`,
-    ...(presentation.continuation ? ["Continuing the room's conversation"] : []),
-  ];
-  const fallbackTitle = [title, ...labels].join(' — ');
+  // A question's prefix becomes the heading; other replies need none under the bot's name.
+  const question = title === 'Orka question' ? delivery.text.slice('Question: '.length) : '';
+  const text = question.trim() ? question.charAt(0).toUpperCase() + question.slice(1) : delivery.text.trim() ? delivery.text : emptyText;
+  const heading = delivery.kind !== 'message' && delivery.kind !== 'final' ? "Couldn't complete the request" : question.trim() ? 'Question' : undefined;
+  const label = presentation === undefined ? undefined :
+    `Reply to ${presentation.requesterDisplayName ? escapeMarkdown(presentation.requesterDisplayName) : 'an allowed participant'}${presentation.continuation ? ' · continuing this chat' : ''}`;
+  const fallbackTitle = [title, ...(label === undefined ? [] : [label])].join(' — ');
   const create = (body: string, fallback: string, shortened: boolean) =>
-    createMessage(title, body, fallback, shortened, labels, presentation?.replyToId);
+    createMessage(heading, body, fallback, shortened, label, presentation?.replyToId);
   const full = create(text, formatFallback(fallbackTitle, text, false), false);
   if (messageBytes(full) <= MAX_OUTGOING_MESSAGE_BYTES) return full;
 
@@ -91,17 +92,19 @@ function messageBytes(message: OutgoingTeamsMessage): number {
   return Buffer.byteLength(JSON.stringify(message), 'utf8');
 }
 
-function createMessage(title: string, text: string, fallbackText: string, shortened: boolean, labels: readonly string[], replyToId?: string): OutgoingTeamsMessage {
+function createMessage(heading: string | undefined, text: string, fallbackText: string, shortened: boolean, label: string | undefined, replyToId?: string): OutgoingTeamsMessage {
   const body: ITextBlock[] = [
-    { type: 'TextBlock', text: title, weight: 'Bolder', wrap: true },
-    ...labels.map((label): ITextBlock => ({ type: 'TextBlock', text: label, wrap: true, isSubtle: true })),
-    { type: 'TextBlock', text, wrap: true },
+    ...(label === undefined ? [] : [{ type: 'TextBlock' as const, text: label, wrap: true, isSubtle: true, size: 'Small' as const, spacing: 'None' as const }]),
+    ...(heading === undefined ? [] : [{ type: 'TextBlock' as const, text: heading, weight: 'Bolder' as const, wrap: true, spacing: 'Small' as const,
+      ...(heading === 'Question' ? {} : { color: 'Attention' as const }) }]),
+    { type: 'TextBlock', text, wrap: true, spacing: 'Small' },
   ];
   if (shortened) body.push({
     type: 'TextBlock',
     text: 'Reply shortened to fit the message limit.',
     wrap: true,
     isSubtle: true,
+    size: 'Small',
   });
   // Check the card separately: the SDK's general Attachment.content is any.
   const card: IAdaptiveCard = { type: 'AdaptiveCard', version: '1.4', fallbackText, body };

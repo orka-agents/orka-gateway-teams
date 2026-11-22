@@ -48,7 +48,7 @@ test('native roster to measured action, same durable receipt replay zero GET/POS
   assert.equal(requestGood, true); assert.equal(gets, 1); assert.equal(posts, 1);
   const serialized = JSON.stringify(card); assert.equal(serialized.includes('private-roster%40example.test'), true);
   assert.equal(serialized.includes('private-email'), false); assert.equal(serialized.includes('Action.OpenUrl'), true);
-  assert.equal(serialized.includes(input.text), false); assert.equal(serialized.includes('Asked by'), true);
+  assert.equal(serialized.includes(input.text), false); assert.equal(serialized.includes('Meeting draft · asked by'), true);
   assert.deepEqual(await f.dispatcher.deliver({ ...input, deliveryId: 'alias' }), success);
   assert.deepEqual(await f.dispatcher.deliver({ ...input, metadata: { ...metadata, 'meeting.subject': 'Changed' } }), { status: 'nonRetryableError', message: 'Delivery cannot be completed safely.' });
   assert.equal(gets, 1); assert.equal(posts, 1);
@@ -105,7 +105,7 @@ for (const state of ['disabled', 'channel', 'roster', 'missing', 'ambiguous', 'o
   assert.deepEqual(await f.dispatcher.deliver(request), success); assert.deepEqual(await f.dispatcher.deliver({ ...request, deliveryId: 'noaction-alias' }), success);
   assert.equal(posts, 1); assert.equal(gets, state === 'disabled' || state === 'channel' ? 0 : 1);
   assert.equal(serialized.includes('Action.OpenUrl'), false); assert.equal(serialized.includes('Open in Teams'), false);
-  assert.equal(serialized.includes('Nothing scheduled'), true); assert.equal(serialized.includes('Suggested duration: 30 minutes'), true);
+  assert.equal(serialized.includes('Nothing is scheduled. '), true); assert.equal(serialized.includes('{"title":"Length","value":"30 min"}'), true);
   assert.equal(serialized.includes('Design'), true); assert.equal(root, state === 'channel' ? 'root' : undefined);
 });
 

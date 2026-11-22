@@ -57,20 +57,20 @@ for (const backend of ['sqlite', 'table'] as const) {
     const dispatcher = f.create({ getRoute: key => ({ ...route, requester: key === 'route-second' ? { id: 'synthetic-aad-bob', displayName: 'Bob' } :
       key === 'route-third' ? { id: 'synthetic-aad-charlie', displayName: 'Charlie' } : { ...route.requester! } }) });
     assert.deepEqual(await dispatcher.deliver(first), success);
-    assert.ok(text(f.messages[0]!).includes('Asked by \\\\[Alice\\\\]\\\\*'));
+    assert.ok(text(f.messages[0]!).includes('Reply to \\\\[Alice\\\\]\\\\*'));
     assert.ok(!text(f.messages[0]!).includes('synthetic-aad')); assert.equal(f.messages[0]!.replyToId, 'root');
-    assert.ok(!text(f.messages[0]!).includes('Continuing'));
+    assert.ok(!text(f.messages[0]!).includes('continuing this chat'));
     const results = await Promise.all([dispatcher.deliver({ ...another('second'), replyTarget: 'route-second' }), dispatcher.deliver({ ...another('third'), replyTarget: 'route-third' })]);
     for (const result of results) assert.deepEqual(result, success);
-    for (const message of f.messages.slice(1)) assert.ok(text(message).includes("Continuing the room's conversation"));
-    assert.ok(f.messages.slice(1).some(message => text(message).includes('Asked by Bob')));
-    assert.ok(f.messages.slice(1).some(message => text(message).includes('Asked by Charlie')));
+    for (const message of f.messages.slice(1)) assert.ok(text(message).includes('continuing this chat'));
+    assert.ok(f.messages.slice(1).some(message => text(message).includes('Reply to Bob')));
+    assert.ok(f.messages.slice(1).some(message => text(message).includes('Reply to Charlie')));
     assert.deepEqual(await dispatcher.deliver(another('first-again', 'origin-first')), success);
-    assert.ok(!text(f.messages.at(-1)!).includes('Continuing'));
+    assert.ok(!text(f.messages.at(-1)!).includes('continuing this chat'));
     await f.restart(); const replay = f.create({ getRoute: () => { throw new Error('receipt must precede route'); }, correlation: { observeSession() { throw new Error('receipt must precede observation'); } } });
     assert.deepEqual(await replay.deliver({ ...first, deliveryId: 'restart-alias' }), success); assert.equal(replay.healthy, true);
     const next = f.create(); assert.deepEqual(await next.deliver(another('after-restart')), success);
-    assert.ok(text(f.messages.at(-1)!).includes("Continuing the room's conversation"));
+    assert.ok(text(f.messages.at(-1)!).includes('continuing this chat'));
   });
 
   test(`${backend}: exact room and thread identities cannot borrow another Session's continuation`, async (t) => {
@@ -79,7 +79,7 @@ for (const backend of ['sqlite', 'table'] as const) {
     assert.deepEqual(await f.create({ getRoute: () => baseRoute }).deliver({ ...first, contextId: baseRoute.conversation.id }), success);
     const otherThread: ReplyRoute = { ...baseRoute, threadId: 'different-root' };
     assert.deepEqual(await f.create({ getRoute: () => otherThread }).deliver({ ...another('other-thread'), contextId: baseRoute.conversation.id, threadId: 'different-root' }), success);
-    assert.ok(!text(f.messages[1]!).includes('Continuing'));
+    assert.ok(!text(f.messages[1]!).includes('continuing this chat'));
     const otherRoom: ReplyRoute = { ...route, conversation: { ...route.conversation, id: '19:another-room;messageid=root' } };
     assert.equal((await f.create({ getRoute: () => otherRoom }).deliver({ ...another('other-room'), contextId: otherRoom.conversation.id })).status, 'retryableError');
     assert.equal(f.messages.length, 2);
@@ -89,21 +89,21 @@ for (const backend of ['sqlite', 'table'] as const) {
     const f = await fixture(t, backend); const d = f.create();
     assert.deepEqual(await d.deliver(first), success);
     assert.deepEqual(await d.deliver({ ...another('namespace'), sessionRef: { namespace: 'different', name: first.sessionRef!.name } }), success);
-    assert.ok(!text(f.messages[1]!).includes('Continuing'));
+    assert.ok(!text(f.messages[1]!).includes('continuing this chat'));
     const newSession = { ...another('full'), sessionRef: { namespace: 'different', name: 'third' } };
     assert.equal((await d.deliver(newSession)).status, 'retryableError'); assert.equal(f.messages.length, 2); assert.equal(d.healthy, true);
     assert.deepEqual(await d.deliver({ ...first, deliveryId: 'alias-at-cap' }), success);
     assert.deepEqual(await d.deliver(another('existing-at-cap')), success); assert.equal(f.messages.length, 3);
-    assert.ok(text(f.messages[2]!).includes('Continuing'));
+    assert.ok(text(f.messages[2]!).includes('continuing this chat'));
   });
 }
 
 test('missing evidence and sessionRef never invent continuation; group/personal reject threads and channel requires exact saved root', async (t) => {
   const f = await fixture(t, 'sqlite');
   const absent = f.create({ correlation: undefined }); assert.deepEqual(await absent.deliver(first), success);
-  assert.ok(!text(f.messages[0]!).includes('Continuing'));
+  assert.ok(!text(f.messages[0]!).includes('continuing this chat'));
   const { sessionRef: _session, ...noSession } = another('no-session'); assert.deepEqual(await f.create().deliver(noSession), success);
-  assert.ok(!text(f.messages[1]!).includes('Continuing'));
+  assert.ok(!text(f.messages[1]!).includes('continuing this chat'));
   for (const threadId of ['', 'different']) assert.equal((await f.create().deliver({ ...another(`bad-${threadId}`), threadId })).status, 'nonRetryableError');
   const group: ReplyRoute = { ...route, conversation: { ...route.conversation, conversationType: 'groupChat' }, threadId: undefined } as unknown as ReplyRoute;
   delete group.threadId;
@@ -111,7 +111,7 @@ test('missing evidence and sessionRef never invent continuation; group/personal 
   const { threadId: _thread, ...groupRequest } = another('group-ok');
   assert.deepEqual(await f.create({ getRoute: () => group }).deliver(groupRequest), success);
   assert.equal(f.messages.at(-1)!.replyToId, undefined);
-  assert.ok(!text(f.messages.at(-1)!).includes('Continuing'));
+  assert.ok(!text(f.messages.at(-1)!).includes('continuing this chat'));
 });
 
 test('closed real correlation poisons dispatcher with no provider effect; stop drains pending observations', async (t) => {
@@ -123,5 +123,5 @@ test('closed real correlation poisons dispatcher with no provider effect; stop d
   let stopped = false; const stopping = waiting.stop().then(() => { stopped = true; }); await Promise.resolve(); assert.equal(stopped, false);
   release.resolve(); assert.equal((await pending).status, 'retryableError'); await stopping; assert.equal(f.messages.length, 0);
   // A cancelled local observation still establishes immutable first-origin evidence by design.
-  assert.deepEqual(await f.create().deliver(another('later')), success); assert.ok(text(f.messages[0]!).includes('Continuing'));
+  assert.deepEqual(await f.create().deliver(another('later')), success); assert.ok(text(f.messages[0]!).includes('continuing this chat'));
 });

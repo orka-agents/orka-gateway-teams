@@ -1,4 +1,4 @@
-import type { IAdaptiveCard, ITextBlock } from '@microsoft/teams.cards';
+import type { CardElement, IAdaptiveCard, ITextBlock } from '@microsoft/teams.cards';
 import { MAX_OUTGOING_MESSAGE_BYTES } from './format.js';
 import type { OutgoingTeamsMessage, DeliveryPresentation } from './format.js';
 import { meetingEnd } from './meeting-draft.js';
@@ -6,12 +6,12 @@ import type { MeetingDraft } from './meeting-draft.js';
 
 export type MeetingUnavailable = 'disabled' | 'channel' | 'roster' | 'attendees' | 'link-too-long' | 'card-too-large';
 const explanations: Record<MeetingUnavailable, string> = {
-  disabled: 'Meeting drafts are disabled here. No meeting link is available.',
-  channel: 'Meeting links are supported only in personal and group chats, not channels.',
-  roster: 'The complete current chat membership could not be verified. No meeting link is available.',
-  attendees: 'Every requested attendee must uniquely match a current chat member with a usable UPN. No meeting link is available.',
-  'link-too-long': 'The complete meeting link is too long for the local safety limit. No partial link or recipient list was used.',
-  'card-too-large': 'The complete meeting action exceeds the local message limit. No partial link or recipient list was used.',
+  disabled: 'Meeting drafts are turned off here, so there is no meeting link.',
+  channel: 'Meeting links work only in personal and group chats, not channels.',
+  roster: "Couldn't confirm who is in this chat, so there is no meeting link.",
+  attendees: "Couldn't match every requested attendee to one person in this chat, so there is no meeting link.",
+  'link-too-long': 'The full meeting link is too long, so there is no link. No partial attendee list was used.',
+  'card-too-large': "The full meeting link doesn't fit in one message, so there is no link. No partial attendee list was used.",
 };
 export interface MeetingAudience { labels: readonly string[]; count: number }
 
@@ -26,33 +26,31 @@ export function meetingLink(draft: MeetingDraft, upns: readonly string[]): strin
 /** A dedicated, fully measured card; the ordinary text formatter must not trim drafts. */
 export function formatMeetingDraft(draft: MeetingDraft, audience: MeetingAudience, url?: string,
   presentation?: Readonly<DeliveryPresentation>, reason?: MeetingUnavailable): OutgoingTeamsMessage {
-  const block = (text: string, subtle = false): ITextBlock => ({ type: 'TextBlock', text, wrap: true, ...(subtle ? { isSubtle: true } : {}) });
-  const body: ITextBlock[] = [{ ...block('Meeting draft'), weight: 'Bolder' }];
-  if (presentation) {
-    body.push(block(`Asked by ${presentation.requesterDisplayName ? escapeMarkdown(safeMeetingLabel(presentation.requesterDisplayName)) : 'an allowed participant'}`, true));
-    if (presentation.continuation) body.push(block("Continuing the room's conversation", true));
-  }
-  body.push(block(escapeMarkdown(draft.subject)), block(`Suggested duration: ${draft.durationMinutes} minutes`));
-  if (draft.preferredWindow !== undefined) body.push(block(`Preferred window: ${escapeMarkdown(draft.preferredWindow)}`));
-  if (draft.suggestedStart !== undefined) body.push(block(`Suggested start: ${draft.suggestedStart}\nSuggested end: ${meetingEnd(draft.suggestedStart, draft.durationMinutes)}`));
-  body.push(block('Agenda:\n' + draft.agenda.map((item, i) => `${i + 1}. ${escapeMarkdown(item)}`).join('\n')));
+  const line = (text: string, style: Partial<ITextBlock> = {}): ITextBlock => ({ type: 'TextBlock', text, wrap: true, ...style });
+  const note: Partial<ITextBlock> = { isSubtle: true, size: 'Small' };
+  const asked = presentation === undefined ? '' :
+    ` · asked by ${presentation.requesterDisplayName ? escapeMarkdown(safeMeetingLabel(presentation.requesterDisplayName)) : 'an allowed participant'}${presentation.continuation ? ' · continuing this chat' : ''}`;
+  // The viewer's Teams client turns DATE and TIME into its own local time; they take whole seconds.
+  const local = (time: string) => time.replace(/\.\d+/u, '');
+  const when = draft.suggestedStart === undefined ? [] : [{ title: 'When',
+    value: `{{DATE(${local(draft.suggestedStart)}, SHORT)}} {{TIME(${local(draft.suggestedStart)})}}–{{TIME(${local(meetingEnd(draft.suggestedStart, draft.durationMinutes))})}}` }];
+  const window = draft.preferredWindow === undefined ? [] : [{ title: when.length ? 'Window' : 'When', value: escapeMarkdown(draft.preferredWindow) }];
   // Display-name lists are presentation only; count communicates the complete
   // snapshot. Never shorten the action's recipient list to make it fit.
   const labels = audience.labels.slice(0, 10).map(label => escapeMarkdown(safeMeetingLabel(label)));
-  const requested = draft.attendees === 'named' ? `Requested attendees: ${draft.names!.map(escapeMarkdown).join(', ')}` : 'Requested attendees: everyone in this chat';
-  body.push(block(requested));
   const create = (link: string | undefined, unavailable: MeetingUnavailable | undefined, showLabels = true): OutgoingTeamsMessage => {
-    const audienceText = showLabels
-      ? `Attendees (${audience.count}): ${labels.join(', ')}${audience.count > labels.length ? `; ${audience.count - labels.length} more participants` : ''}`
-      : `Attendees (${audience.count}): display names omitted to fit the message limit.`;
+    const everyone = `Everyone here${audience.count ? ` (${audience.count})` : ''}` + (!audience.count ? '' : !showLabels ? '; names left out to fit the message limit' :
+      `: ${labels.join(', ')}${audience.count > labels.length ? `; ${audience.count - labels.length} more` : ''}`);
+    const body: CardElement[] = [line(`Meeting draft${asked}`, { ...note, spacing: 'None' }), line(escapeMarkdown(draft.subject), { weight: 'Bolder', size: 'Medium', spacing: 'Small' }),
+      { type: 'FactSet', spacing: 'Small', facts: [...when, ...window, { title: 'Length', value: `${draft.durationMinutes} min` },
+        { title: 'Who', value: draft.attendees === 'named' ? draft.names!.map(escapeMarkdown).join(', ') : everyone }] },
+      line('Agenda', { weight: 'Bolder', size: 'Small', spacing: 'Medium' }),
+      line(draft.agenda.map((item, i) => `${i + 1}. ${escapeMarkdown(item)}`).join('\n'), { spacing: 'Small' }),
+      line(link === undefined ? `Nothing is scheduled. ${unavailable ? explanations[unavailable] : 'This draft has no meeting link.'}`
+        : 'Nothing is scheduled until you open it in Teams and send it.', { ...note, spacing: 'Medium' })];
     const card: IAdaptiveCard = { type: 'AdaptiveCard', version: '1.4',
       // Fixed bounded fallback, independent of user/roster labels and URL.
-      fallbackText: 'Meeting draft. Nothing scheduled. Review the agenda, duration and time suggestions in Teams.' + (unavailable ? ' No meeting link is available.' : ''),
-      body: [...body, ...(audience.count ? [block(audienceText)] : []),
-        block(link === undefined
-          ? 'Nothing scheduled. This draft has no meeting link. Duration and window are suggestions.'
-          : 'Nothing scheduled. Open in Teams to choose and confirm the final time and attendees. Duration and window are suggestions.', true),
-        ...(unavailable ? [block(explanations[unavailable], true)] : [])],
+      fallbackText: 'Meeting draft. Nothing scheduled. Review the agenda, duration and time suggestions in Teams.' + (unavailable ? ' No meeting link is available.' : ''), body,
       ...(link === undefined ? {} : { actions: [{ type: 'Action.OpenUrl', title: 'Open in Teams', url: link }] }) };
     return { type: 'message', ...(presentation?.replyToId === undefined ? {} : { replyToId: presentation.replyToId }),
       attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: card }] };

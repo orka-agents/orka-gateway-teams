@@ -84,7 +84,7 @@ for (const flag of [undefined, false, true]) test(`SQLite selected runtime inter
     const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const bytes = Buffer.concat(chunks); assert.ok(bytes.length <= 20480); sends++;
     const card = JSON.parse(bytes.toString()).attachments[0].content;
-    assert.equal(card.body[0].text, sends === 1 ? 'Orka update' : 'Orka reply');
+    assert.match(card.fallbackText, sends === 1 ? /^Orka update: / : /^Orka reply: /);
     res.writeHead(201); res.end('{"id":"interim-runtime-receipt"}');
   });
   const f = storage(t, upstream.baseUrl, upstream.ca); if (flag !== undefined) f.config.outbound!.interimDelivery = flag;
@@ -158,7 +158,7 @@ test('real registered SDK input -> inbox -> HTTPS Orka -> V1 reply -> SDK HTTPS 
       assert.equal(req.url, '/v3/conversations/19%3Afixture-personal/activities');
       const body = Buffer.concat(chunks); bytes = body.length; const message = JSON.parse(body.toString());
       assert.deepEqual(Object.keys(message).sort(), ['attachments', 'type']); assert.equal(message.attachments.length, 1);
-      assert.equal(message.attachments[0].content.body[0].text, 'Orka reply'); accepted.resolve();
+      assert.match(message.attachments[0].content.fallbackText, /^Orka reply: /); accepted.resolve();
       void release.promise.then(() => { res.writeHead(201); res.end(JSON.stringify({ id: 'provider-full-receipt' })); });
     });
   });
@@ -329,8 +329,8 @@ for (const conversationType of ['groupChat', 'channel'] as const) test(`register
     const body = { ...finalDelivery, contextId, ...(conversationType === 'channel' ? { threadId: 'root' } : {}), replyTarget: events[n - 1]!.replyTarget!,
       originatingEventId: `origin-${n}`, idempotencyId: `shared-op-${n}`, deliveryId: `shared-delivery-${n}`, text: 'x'.repeat(65000) };
     const response = await deliver(runtime, f.config, body); assert.equal((await response.json() as { status: string }).status, 'delivered');
-    const card = JSON.stringify(messages[n - 1]); assert.ok(card.includes(n === 1 ? 'Asked by \\\\[Alice\\\\]\\\\*' : 'Asked by Bob'));
-    assert.equal(card.includes("Continuing the room's conversation"), n === 2); assert.ok(!card.includes('synthetic-aad'));
+    const card = JSON.stringify(messages[n - 1]); assert.ok(card.includes(n === 1 ? 'Reply to \\\\[Alice\\\\]\\\\*' : 'Reply to Bob · continuing this chat'));
+    assert.equal(card.includes('continuing this chat'), n === 2); assert.ok(!card.includes('synthetic-aad'));
     await runtime.stop(); runtime = f.own(await startIngressRuntime(f.config, dependencies));
     assert.equal((await (await deliver(runtime, f.config, { ...body, deliveryId: `restart-alias-${n}` })).json() as { status: string }).status, 'delivered');
     assert.equal(messages.length, n);
@@ -347,7 +347,7 @@ test('missing configured sidecar operates without continuation wording and never
     body = bytes.toString(); return { status: 201, data: Buffer.from('{"id":"missing-sidecar-receipt"}') };
   } }));
   assert.equal((await (await deliver(runtime, f.config)).json() as { status: string }).status, 'delivered');
-  assert.ok(body.includes('Asked by Alice')); assert.ok(!body.includes('Continuing')); await runtime.stop();
+  assert.ok(body.includes('Reply to Alice')); assert.ok(!body.includes('continuing')); await runtime.stop();
   assert.equal(existsSync(correlationDbPath), false); assert.equal(existsSync(`${correlationDbPath}.owner.sqlite`), false);
   initializeSessionCorrelation(correlationDbPath, journalScope); const owner = openSessionCorrelation(correlationDbPath, journalScope);
   let opens = 0; const deps = { openIngressStore: () => { opens++; throw new Error('must not open'); } };

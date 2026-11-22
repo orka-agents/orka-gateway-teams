@@ -375,7 +375,7 @@ test('uncertain_card_send_never_resends_after_restart and refresh scopes identit
   const teamsRefresh = { ...input, value: { trigger: 'automatic', action: { ...input.value.action, data: { ...input.value.action.data, trigger: 'automatic', isRefresh: true } } } };
   assert.equal((await restarted.cardAction!(teamsRefresh, context())).status, 200);
   assert.equal((await restarted.cardAction!(tenantOnly, context())).status, 200);
-  const sender = await restarted.cardAction!(input, context()); assert.equal(sender.status, 200); assert.match(JSON.stringify(sender.body), /Approval actions are not enabled yet/);
+  const sender = await restarted.cardAction!(input, context()); assert.equal(sender.status, 200); assert.match(JSON.stringify(sender.body), /Approval isn't turned on for this chat yet/);
   const other = await restarted.cardAction!({ ...input, from: { id: '29:other', aadObjectId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' } },
     { ...context(), subject: { ...context().subject, objectId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', chatKind: 'groupChat' } });
   assert.equal(other.status, 200); assert.match(JSON.stringify(other.body), /Waiting for/); assert.ok(!JSON.stringify(other.body).includes('pr-approve'));
@@ -552,7 +552,8 @@ test('claimed revision retains fixed status after sign-in changes generation wit
     p.revisionAdmission = status;
     const result = await f.sink.cardAction!(input, { ...context(), delegatedTenant: true, controlRecipient: { id: p.senderMRI } });
     assert.equal(result.status, 200); const wire = JSON.stringify(result.body);
-    assert.match(wire, status === 'delivered' ? /Your revision was sent/ : status === 'signin-required' ? /Sign in, then send your revision again/ : status === 'conflict' ? /not sent/ : /Sending your revision/);
+    assert.match(wire, status === 'delivered' ? /Changes requested\. Sent to the agent\./ : status === 'signin-required' ? /Changes not sent\. Sign in, then send them again\./ : status === 'conflict' ? /Changes not sent\. Reply in the chat/ : /Sending your changes…/);
+    assert.match(wire, /Details are hidden because you signed in again\./);
     for (const privateValue of [p.title, p.body, p.head, p.displayName, p.githubLogin, 'PRIVATE_NOTE']) assert.ok(!wire.includes(privateValue));
     assert.ok(!wire.includes('pr-approve')); assert.ok(!wire.includes('pr-revise'));
   }

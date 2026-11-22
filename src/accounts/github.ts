@@ -213,7 +213,9 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
           const a = count(file.additions); const d = count(file.deletions); additions = count(additions + a); deletions = count(deletions + d);
           return { path: file.filename, additions: a, deletions: d };
         });
-        return { headSHA, baseSHA, githubId: String(user.id), githubLogin: user.login, commits: total, files: files.slice(0, 10),
+        return { headSHA, baseSHA, githubId: String(user.id), githubLogin: user.login, commits: total,
+          // The card previews the largest changes, so keep those when the list is cut to ten.
+          files: [...files].sort((a, b) => b.additions + b.deletions - a.additions - a.deletions).slice(0, 10),
           fileCount: files.length, additions, deletions, filesComplete: files.length < 300 };
       })().catch((e: unknown) => { throw new GitHubError(e instanceof GitHubError ? e.code : 'unavailable', step); });
       work.add(pending); void pending.then(() => work.delete(pending), () => work.delete(pending)); return pending;

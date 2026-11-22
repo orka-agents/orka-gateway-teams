@@ -35,7 +35,7 @@ async function setup(t: test.TestContext, githubRepositories: readonly string[] 
     if (heldPage && req.path.endsWith('page=2')) return;
     res.end(oversized ? 'x'.repeat(1024 * 1024 + 1) : JSON.stringify({ total_commits: total, base_commit: { sha: 'b'.repeat(40) },
       commits: Array.from({ length: req.path.endsWith('page=1') ? Math.min(total, 100) : total - 100 }, (_, i) => req.path.endsWith('page=2') && i === 0 ? author : commit()),
-      files: req.path.endsWith('page=1') ? Array.from({ length: longFiles ? 10 : complete ? 1 : 300 }, (_, i) => ({ filename: longFiles ? 'f'.repeat(3990) + `${i}.ts` : `src/file-${i}.ts`, additions: 3, deletions: 1, patch: 'PRIVATE PATCH' })) : undefined }));
+      files: req.path.endsWith('page=1') ? Array.from({ length: longFiles ? 10 : complete ? 1 : 300 }, (_, i) => ({ filename: longFiles ? 'f'.repeat(3990) + `${i}.ts` : `src/file-${i}.ts`, additions: 3, deletions: i === 250 ? 101 : 1, patch: 'PRIVATE PATCH' })) : undefined }));
   });
   const p = proposalFixture(); const { conversationId, replyTarget, route, senderMRI, objectId, displayName, activityId } = p;
   const grant = { ...f.input, githubGeneration: 2, tools: ['workiq', 'github-propose-pull-request'],
@@ -216,6 +216,8 @@ test('300 returned files explicitly mark incomplete counts without storing patch
   const f = await setup(t); f.incomplete(); assert.equal((await f.call()).status, 200);
   const p = (await f.store.getProposal(proposalIdentity(f.grant.ref, 'task', 'operation'), context()))!.proposal;
   assert.equal(p.filesComplete, false); assert.equal(p.fileCount, 300); assert.equal(p.additions, 900); assert.equal(p.files.length, 10);
+  // The ten kept for the card are the largest changes, in GitHub's order when equal.
+  assert.deepEqual(p.files.slice(0, 3), [{ path: 'src/file-250.ts', additions: 3, deletions: 101 }, { path: 'src/file-0.ts', additions: 3, deletions: 1 }, { path: 'src/file-1.ts', additions: 3, deletions: 1 }]);
 });
 test('large descriptions and filename previews respect the complete encrypted document budget', async t => {
   const f = await setup(t); f.longFiles();

@@ -98,32 +98,34 @@ for (const [text, title] of [
   ['question: Which option?', 'Orka update'], [' Question: Which option?', 'Orka update'],
 ] as const) test(`message heading uses explicit convention only (${title}) and preserves body`, () => {
   const input = Object.freeze({ ...message, text }); const card = formatDelivery(input).attachments[0].content;
-  const heading = card.body?.[0]; const body = card.body?.[1];
-  assert.ok(heading?.type === 'TextBlock' && heading.text === title);
-  assert.ok(body?.type === 'TextBlock' && body.text === text);
+  // Only the exact prefix becomes a heading, and the body then starts after it. Any other update is its text alone.
+  const question = title === 'Orka question';
+  assert.deepEqual(card.body, [...(question ? [{ type: 'TextBlock', text: 'Question', weight: 'Bolder', wrap: true, spacing: 'Small' }] : []),
+    { type: 'TextBlock', text: question ? 'Which option?' : text, wrap: true, spacing: 'Small' }]);
   assert.ok(card.fallbackText?.startsWith(title + ': '));
 });
 
 test('message cards budget escaping, attribution and root with grapheme-safe body/fallback shortening', () => {
   const unit = '🧑🏽‍💻e\u0301' + '"\\\n'.repeat(6);
-  const text = 'Question: ' + unit.repeat(440); assert.ok(Buffer.byteLength(text) <= 16384);
+  let text = 'Question: ' + unit.repeat(440); assert.ok(Buffer.byteLength(text) <= 16384);
   const input = Object.freeze({ ...message, text });
   const presentation = Object.freeze({ requesterDisplayName: '['.repeat(256), continuation: true, replyToId: 'r'.repeat(256) });
   const output = formatDelivery(input, presentation); const card = output.attachments[0].content;
   assert.ok(Buffer.byteLength(JSON.stringify(output)) <= 20480); assert.equal(output.replyToId, presentation.replyToId);
   assert.ok(card.fallbackText && Buffer.byteLength(card.fallbackText) <= 512);
-  const heading = card.body?.[0]; assert.ok(heading?.type === 'TextBlock' && heading.text === 'Orka question');
-  assert.equal(card.body?.length, 5);
-  const body = card.body?.[3]; assert.ok(body?.type === 'TextBlock'); assert.ok(body.text.length < text.length && text.startsWith(body.text));
+  const [label, heading, body] = card.body ?? []; assert.ok(heading?.type === 'TextBlock' && heading.text === 'Question');
+  assert.ok(label?.type === 'TextBlock' && label.text === `Reply to ${'\\['.repeat(256)} · continuing this chat` && label.isSubtle);
+  assert.equal(card.body?.length, 4); text = text.slice('Question: '.length);
+  assert.ok(body?.type === 'TextBlock'); assert.ok(body.text.length < text.length && text.startsWith(body.text));
   const ends = [...new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(text)].map(s => s.index + s.segment.length);
   assert.ok(body.text.length === 0 || ends.includes(body.text.length));
   assert.ok(JSON.stringify(formatDelivery(input, presentation)) === JSON.stringify(output));
   // A wire-bounded body with many escapes exceeds the complete card budget.
   const escaped = formatDelivery({ ...message, text: '\n'.repeat(16383) + 'a' }, presentation).attachments[0].content;
-  assert.equal(escaped.body?.length, 5); assert.ok(escaped.fallbackText?.includes('(shortened)'));
+  assert.equal(escaped.body?.length, 3); assert.ok(escaped.fallbackText?.includes('(shortened)'));
   assert.ok(Buffer.byteLength(JSON.stringify(formatDelivery({ ...message, text: '\n'.repeat(16383) + 'a' }, presentation))) <= 20480);
   const giantText = 'a' + '\u0301'.repeat(8000);
   const giant = formatDelivery({ ...message, text: giantText }).attachments[0].content;
-  assert.ok(giant.body?.[1]?.type === 'TextBlock' && giant.body[1].text === giantText);
+  assert.ok(giant.body?.[0]?.type === 'TextBlock' && giant.body[0].text === giantText);
   assert.equal(giant.fallbackText, 'Orka update: … (shortened)');
 });

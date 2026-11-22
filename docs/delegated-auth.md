@@ -427,12 +427,16 @@ automatically, and a historical grant cannot gain the tool or a missing origin.
 Only same-repository head/base refs are accepted. The gateway reads `/user`, pins
 the head SHA, and verifies every compared git author is
 `Orka Publisher <publisher@orka.ai>`, including later commit pages. This author
-identity can be spoofed; it is not cryptographic proof of publisher provenance. The card shows
-verified counts, up to ten file previews, agent-labelled title/description and a
-compare link pinned to both verified SHAs. Large filenames may reduce the retained
-preview count to fit the encrypted document budget; the card shows “+N more”. At the 300-file API boundary, returned file/line totals
-are explicitly incomplete. Long labels/descriptions are visibly truncated to
-preserve the existing 20 KiB message budget; full diffs and patches are not stored.
+identity can be spoofed; it is not cryptographic proof of publisher provenance. The card opens
+with the question or the outcome. The agent's title and description sit in one tinted box
+captioned “Written by the agent”. Below it are the verified counts, a “View changes” link
+pinned to both verified SHAs, and the five files with the most changed lines, then “and N more”.
+Up to ten file previews are stored; large filenames may reduce that count to fit the encrypted
+document budget. At the 300-file API boundary the card says GitHub returned only part of the
+file list. Long labels and descriptions end in “…” to preserve the existing 20 KiB message budget;
+“Show more” opens up to 1,800 bytes of the description. Full diffs and patches are not stored.
+The expiry is shown in the viewer's local time. A decided card keeps only the outcome, the
+agent's title and one link.
 
 A refused task-tool call still answers only `tool-unavailable` (or `signin-required`),
 but stderr gets one line naming where it stopped, with no values:
@@ -498,7 +502,7 @@ need separate operator-approved qualification; synthetic tests do not prove them
 **Revise** accepts a nonblank note of at most 2,000 Unicode characters. The first
 winning note, invoke identity and new reply target are saved encrypted before
 normal conversation admission. Until the inbox accepts that exact turn, the card
-says “Sending your revision…”; full/busy admission remains pending, not sent.
+says “Sending your changes…”; full/busy admission remains pending, not sent.
 A sign-in control reply is not inbox delivery: sign in, then send the revision
 again by authenticated sender refresh/redelivery. Neither sign-in completion nor
 startup automatically resumes it. Retries reuse the saved event, sender profile,

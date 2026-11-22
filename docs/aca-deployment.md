@@ -552,8 +552,8 @@ conversation check, ask it to remember a made-up word for this conversation, the
 ask for that word in a second message. This checks conversation context, not a
 durable-memory feature. Use requests appropriate for the configured Agent.
 
-Expect one **Orka reply** card for each successful Task, or an **Orka could not
-complete the request** card for a failed Task. No streaming output is expected.
+Expect one reply card for each successful Task, or a card headed **Couldn't
+complete the request** for a failed Task. No streaming output is expected.
 Do not send the setup challenge again; normal messages are new requests.
 
 The operator should confirm the real Task succeeded and both Tasks'

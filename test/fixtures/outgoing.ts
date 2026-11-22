@@ -43,8 +43,7 @@ const finalCard = {
   version: '1.4',
   fallbackText: 'Orka reply: Project summary - Review open issues - Run `npm test` こんにちは 🧑🏽‍💻',
   body: [
-    { type: 'TextBlock', text: 'Orka reply', weight: 'Bolder', wrap: true },
-    { type: 'TextBlock', text: 'Project summary\n\n- Review open issues\n- Run `npm test`\n\nこんにちは 🧑🏽‍💻', wrap: true },
+    { type: 'TextBlock', text: 'Project summary\n\n- Review open issues\n- Run `npm test`\n\nこんにちは 🧑🏽‍💻', wrap: true, spacing: 'Small' },
   ],
 } satisfies IAdaptiveCard;
 
@@ -53,8 +52,8 @@ const errorCard = {
   version: '1.4',
   fallbackText: 'Orka could not complete the request: This request could not be completed.',
   body: [
-    { type: 'TextBlock', text: 'Orka could not complete the request', weight: 'Bolder', wrap: true },
-    { type: 'TextBlock', text: 'This request could not be completed.', wrap: true },
+    { type: 'TextBlock', text: "Couldn't complete the request", weight: 'Bolder', wrap: true, spacing: 'Small', color: 'Attention' },
+    { type: 'TextBlock', text: 'This request could not be completed.', wrap: true, spacing: 'Small' },
   ],
 } satisfies IAdaptiveCard;
 
