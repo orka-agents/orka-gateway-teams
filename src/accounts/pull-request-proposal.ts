@@ -13,7 +13,8 @@ export interface ClaimEvidence { decision: 'approve' | 'reject' | 'revise'; tena
   decidedAt: number; note?: string; revisionReplyTarget?: string }
 export type RevisionAdmission = 'pending' | 'delivered' | 'full' | 'signin-required' | 'conflict';
 export type ProposalResult = { kind: 'opened'; number: number; url: string; headSHA: string; existing?: true };
-export type ProposalOutcome = ProposalResult | { kind: 'branch-moved' | 'permission' | 'signin-required' | 'validation' | 'failed' | 'uncertain' };
+/** `closed` is the pull request GitHub opened at a commit that wasn't approved, which the gateway then closed. */
+export type ProposalOutcome = ProposalResult | { kind: 'branch-moved'; closed?: number } | { kind: 'permission' | 'signin-required' | 'validation' | 'failed' | 'uncertain' };
 export interface Proposal extends ProposalOrigin, ProposalFacts {
   id: string; revision: 1; state: 'pending' | 'approving' | 'opened' | 'rejected' | 'revise-requested' | 'superseded' | 'expired' | 'branch-moved' | 'failed' | 'uncertain';
   appId: string; tenantId: string; generation: number; githubGeneration: number; targetId: string; targetDigest: string; grantRef: string; taskUID: string;
@@ -86,10 +87,11 @@ export function decodeProposal(input: unknown): Proposal {
   return p;
 }
 export function proposalOutcome(p: Pick<Proposal, 'owner' | 'repo'>, input: unknown): ProposalOutcome {
-  const v = object(input, ['kind', 'number', 'url', 'headSHA', 'existing']);
+  const v = object(input, ['kind', 'number', 'url', 'headSHA', 'existing', 'closed']);
   if (v.kind === 'opened') {
     integer(v.number, 1, Number.MAX_SAFE_INTEGER);
-    if (v.url !== `https://github.com/${p.owner}/${p.repo}/pull/${v.number}` || typeof v.headSHA !== 'string' || !/^[a-f0-9]{40}$/u.test(v.headSHA) || v.existing !== undefined && v.existing !== true) throw new Error('Invalid result');
+    if (v.closed !== undefined || v.url !== `https://github.com/${p.owner}/${p.repo}/pull/${v.number}` || typeof v.headSHA !== 'string' || !/^[a-f0-9]{40}$/u.test(v.headSHA) || v.existing !== undefined && v.existing !== true) throw new Error('Invalid result');
+  } else if (v.kind === 'branch-moved' && v.closed !== undefined) { integer(v.closed, 1, Number.MAX_SAFE_INTEGER); if (Object.keys(v).length !== 2) throw new Error('Invalid outcome');
   } else if (!['branch-moved', 'permission', 'signin-required', 'validation', 'failed', 'uncertain'].includes(String(v.kind)) || Object.keys(v).length !== 1) throw new Error('Invalid outcome');
   return v as unknown as ProposalOutcome;
 }

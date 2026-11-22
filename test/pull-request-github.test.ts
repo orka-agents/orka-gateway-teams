@@ -18,6 +18,16 @@ test('GitHub complete 422 is definite validation and permission vs rate limit is
   }
   assert.equal(f.requests.length, 3); assert.ok(f.requests.every(r => r.method === 'POST'));
 });
+test('closePullRequest sends one PATCH and succeeds only when GitHub reports that pull request closed', async t => {
+  const f = await setup(t);
+  f.behavior((_req, res) => res.end(JSON.stringify({ ...f.result(), state: 'closed' })));
+  await f.github.closePullRequest(f.p, 12, 'TOKEN_PRIVATE', context());
+  assert.deepEqual(f.requests.map(r => [r.method, r.path, r.body]), [['PATCH', '/repos/example/project/pulls/12', { state: 'closed' }]]);
+  for (const answer of [{ ...f.result(), state: 'open' }, { ...f.result(), number: 13, html_url: 'https://github.com/example/project/pull/13', state: 'closed' }, { state: 'closed' }]) {
+    f.behavior((_req, res) => res.end(JSON.stringify(answer)));
+    await assert.rejects(f.github.closePullRequest(f.p, 12, 'TOKEN_PRIVATE', context()));
+  }
+});
 test('findPullRequest validates repository refs URLs and uniqueness across pages', async t => {
   const f = await setup(t); let page = 0;
   f.behavior((_req, res) => { page++; const unrelated = { ...f.result(), head: { ...f.result().head, ref: 'other' } }; res.end(JSON.stringify(page === 1 ? Array.from({ length: 100 }, () => unrelated) : [f.result()])); });
