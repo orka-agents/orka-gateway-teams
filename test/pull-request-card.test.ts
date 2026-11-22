@@ -152,6 +152,8 @@ test('long paths lose whole folders from the left, so each file stays on one pho
   assert.equal(shown('a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p.ts'), '…/d/e/f/g/h/i/j/k/l/m/n/o/p.ts');
   // A name longer than the line keeps its end, where the extension is.
   assert.equal(shown(`src/${'n'.repeat(40)}.snapshot.json`), `…${'n'.repeat(15)}.snapshot.json`);
+  // Thirty characters that each need escaping still fit, so the end of the name is never cut off.
+  assert.equal(shown(`src/${'&'.repeat(40)}.ts`).replace(/&amp;/gu, '&'), `…${'&'.repeat(26)}.ts`);
   for (const path of ['字'.repeat(60), `${'d/'.repeat(40)}f.ts`, 'x'.repeat(31)]) assert.ok(Array.from(shown(path)).length <= 30, path);
 });
 

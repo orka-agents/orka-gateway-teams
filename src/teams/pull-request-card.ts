@@ -105,7 +105,7 @@ export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', dec
     ...(s.open ? [line(`${label(p.head, 180)} → ${label(p.base, 180)}`, { fontType: 'Monospace', size: 'Small', spacing: 'Medium' }),
       line(`**${p.fileCount}${p.filesComplete ? '' : '+'} ${p.fileCount === 1 && p.filesComplete ? 'file' : 'files'}** · +${p.additions} −${p.deletions} · ${p.commits} ${p.commits === 1 ? 'commit' : 'commits'}`, { spacing: 'Small' }),
       ...files.map((f, i): CardElement => ({ type: 'ColumnSet', spacing: i ? 'None' : 'Small', columns: [
-        { type: 'Column', width: 'stretch', items: [line(label(shortPath(f.path), 100), { fontType: 'Monospace', size: 'Small' })] },
+        { type: 'Column', width: 'stretch', items: [line(label(shortPath(f.path), 160), { fontType: 'Monospace', size: 'Small' })] },
         { type: 'Column', width: 'auto', items: [line(`+${f.additions} −${f.deletions}`, { isSubtle: true, size: 'Small' })] }] })),
       ...(p.fileCount > files.length ? [caption(`and ${p.filesComplete ? '' : 'at least '}${p.fileCount - files.length} more`)] : []),
       ...(decide && !p.filesComplete ? [] : [line(`[View changes on GitHub](${compare})`, { spacing: 'Small' })]),

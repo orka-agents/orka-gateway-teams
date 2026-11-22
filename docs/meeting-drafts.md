@@ -138,7 +138,7 @@ claim, preserving the saved reply root. Unsupported scope, permanent GET failure
 or invalid selected UPNs, and URL/card overflow likewise show a no-action card.
 No partial recipient list/link is substituted. For named people that card lists the members
 who matched and each requested name that matched no single member as not found; when the
-roster itself could not be read it lists no names. With a suggested start the card shows one
+roster could not be read, or gave nothing to match the names against, it lists no names. With a suggested start the card shows one
 **When** row and no separate window or length. If auxiliary roster display names
 make the card overflow, their entire preview is explicitly omitted with the full
 count preserved; every structured draft field remains visible. Meeting-flag

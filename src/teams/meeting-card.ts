@@ -50,8 +50,8 @@ export function formatMeetingDraft(draft: MeetingDraft, audience: MeetingAudienc
         ...(notFound.length ? [`not found: ${notFound.join(', ')}`] : [])].join('; ');
     const who = audience.personal ? 'Just you. Add people in Teams.' : draft.attendees === 'named' ? named() : everyone;
     const body: CardElement[] = [line(`Meeting draft${asked}`, { ...note, spacing: 'None' }), line(escapeMarkdown(draft.subject), { weight: 'Bolder', size: 'Medium', spacing: 'Small' }),
-      // Names nobody could confirm are left out.
-      { type: 'FactSet', spacing: 'Small', facts: [...when, ...(unavailable === 'roster' ? [] : [{ title: 'Who', value: who }])] },
+      // Names nobody could confirm are left out: the member list wasn't read, or it gave nothing to match them against.
+      { type: 'FactSet', spacing: 'Small', facts: [...when, ...(unavailable === 'roster' || unavailable === 'attendees' && draft.attendees === 'named' && !labels.length && !notFound.length ? [] : [{ title: 'Who', value: who }])] },
       line('Agenda', { weight: 'Bolder', size: 'Small', spacing: 'Medium' }),
       line(draft.agenda.map((item, i) => `${i + 1}. ${escapeMarkdown(item)}`).join('\n'), { spacing: 'Small' }),
       line(link === undefined ? `Nothing is scheduled. ${unavailable ? explanations[unavailable] : 'This draft has no meeting link.'}`

@@ -99,6 +99,8 @@ test('who: named people show as the members they matched, a name that matched no
   assert.equal(who({ labels: [], count: 0, notFound: ['[ada] l', 'Grace'] }, undefined, undefined, 'attendees'), 'not found: \\[ada\\] l, Grace');
   // Before any member list is read, the request's own names are all there is.
   assert.equal(who({ labels: [], count: 0 }, undefined, undefined, 'disabled'), '\\[ada\\] l, Grace');
+  // The member list was read but gave no result for these names (only the bot is in it, say): they are not shown as people who matched.
+  assert.equal(who({ labels: [], count: 0 }, undefined, undefined, 'attendees'), undefined);
   // The member list could not be read: no names, and one thing to do.
   const unconfirmed = formatMeetingDraft(named, { labels: [], count: 0 }, undefined, undefined, 'roster').attachments[0].content;
   assert.deepEqual(facts(unconfirmed), [{ title: 'Length', value: '30 min' }]); assert.ok(!JSON.stringify(unconfirmed).includes('Grace'));
