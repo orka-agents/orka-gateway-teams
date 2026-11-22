@@ -22,6 +22,7 @@ import { DirectoryError, MAX_BINDING_EPOCH } from '../directory/types.js';
 import type { ConnectionRecord, ControlRecord, ControlReply, DirectoryContext } from '../directory/types.js';
 import type { AdmissionContext, AdmissionSink } from '../ingress/server.js';
 import type { AdmissionResult, IngressClaim, IngressPort, ReplyRoute } from '../ingress/types.js';
+import { reasonCode } from '../ingress/types.js';
 import type { ProviderSender } from '../outbound/types.js';
 import { NO_ACCESS_TEXT } from '../policy/admission.js';
 import type { createGroupAuthorizer } from '../policy/admission.js';
@@ -591,7 +592,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
         // An expired budget surfaces as whichever read was running, so name the budget first.
         if (!active(ctx)) return signal.aborted ? 'cancelled' : performance.now() >= ctx.deadline ? 'deadline' : 'not-serving';
         if (error instanceof BindingCheckError) return error.step ? `${error.category}:${error.step}` : error.category;
-        return `${error instanceof DirectoryError ? 'directory' : error instanceof AccountError ? 'account' : 'table'}-${(error as { code: string }).code}`;
+        return `${error instanceof DirectoryError ? 'directory' : error instanceof AccountError ? 'account' : 'table'}-${reasonCode(error)}`;
       }
       finally { consumers--; }
     },

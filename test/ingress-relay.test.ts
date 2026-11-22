@@ -164,7 +164,7 @@ test('every forward put back reports its stage, a fixed reason code, the attempt
   await relay(createOrkaClient(target, { bearerToken: token, ca: other.ca }));
   orka.server.closeAllConnections(); await new Promise<void>(resolve => orka.server.close(() => resolve()));
   await relay(trusted);
-  await relay({ async post() { throw new Error('synthetic failure with a private value'); } });
+  await relay({ async post() { throw Object.assign(new Error('synthetic failure'), { code: 'private_chat_123' }); } });
   await relay({ async post() { return { kind: 'retry' }; } });
   assert.deepEqual(seen, [
     { stage: 'post', reason: 'http-503', attempt: 1, delayMs: 1000 }, { stage: 'post', reason: 'invalid-receipt', attempt: 2, delayMs: 2000 },
