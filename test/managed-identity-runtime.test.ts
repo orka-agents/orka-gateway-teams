@@ -181,12 +181,6 @@ for (const variant of ['claims', 'JSON', 'OAuth']) test(`MI full receiver reject
 for (const variant of ['failure', 'cancel', 'deadline', 'shutdown']) test(`MI ${variant} drains outstanding IMDS and subsequent exchange without late send`, async (t) => {
   const f = storage(t); f.init(); const owned = f.reopen(); let sends = 0; let exchanges = 0;
   const reached = deferred<void>(); const gate = deferred<void>();
-  // The deadline must pass while IMDS is outstanding. Hold the clock until IMDS is reached:
-  // a slow start would otherwise use up the deadline first and IMDS would never be called.
-  if (variant === 'deadline') {
-    const now = performance.now.bind(performance); const held = now(); let outstanding = false;
-    t.mock.method(performance, 'now', () => outstanding ? now() : held); void reached.promise.then(() => { outstanding = true; });
-  }
   const imds = await imdsFixture(t, async (_req, res) => {
     reached.resolve(); await gate.promise;
     res.end(JSON.stringify({ access_token: variant === 'failure' ? 'a.b.c' : assertion() }));
@@ -194,6 +188,12 @@ for (const variant of ['failure', 'cancel', 'deadline', 'shutdown']) test(`MI ${
   const receiver = await startReceiver(miConfig, owned.store, { managedIdentity: { imdsRequest: imds.imdsRequest,
     entraNetwork: entraNetwork(async () => { exchanges++; return { status: 200, headers: {}, body: { access_token: assertion(), token_type: 'Bearer', expires_in: 3600 } }; }) },
     providerPost: async () => { sends++; throw new Error('No late send'); } }, { journal: owned.journal, getRoute: (key) => owned.store.getRoute(key) });
+  // Hold the clock from the delivery's start until IMDS is reached: a slow start would
+  // otherwise use up the 100 ms first, IMDS would never be called and the wait below would hang.
+  if (variant === 'deadline') {
+    const now = performance.now.bind(performance); const held = now(); let outstanding = false;
+    t.mock.method(performance, 'now', () => outstanding ? now() : held); void reached.promise.then(() => { outstanding = true; });
+  }
   const abort = new AbortController();
   const pending = receiver.outbound!.deliver(finalDelivery, { signal: abort.signal,
     ...(variant === 'deadline' ? { deadline: performance.now() + 100 } : {}) });
