@@ -49,7 +49,21 @@ export interface IngressPort {
   close(): void | Promise<void>;
 }
 export interface StoreOptions { policy?: IngressPolicy; now?: () => number }
-export type OrkaPostResult = { kind: 'receipt'; receipt: IngressReceipt } | { kind: 'retry'; retryAfterMs?: number } | { kind: 'blocked'; reason: 'conflict' | 'invalid-event' | 'redirect' };
+/** `reason` is a fixed code for logs (an HTTP status, a Node error code or a word below), never a value. */
+export type OrkaPostResult = { kind: 'receipt'; receipt: IngressReceipt } | { kind: 'retry'; retryAfterMs?: number; reason?: string } | { kind: 'blocked'; reason: 'conflict' | 'invalid-event' | 'redirect' };
+/** One forward attempt that did not reach Orka: the step it stopped at and why. `delayMs` is absent when the inbox withdrew the attempt itself. */
+export interface ForwardRetry { stage: 'check' | 'grant' | 'inbox' | 'post'; reason: string; attempt: number; delayMs?: number }
+// Storage codes of this gateway, then Node's connection and certificate codes.
+const reasonCodes = new Set(['busy', 'unavailable', 'unready', 'conflict', 'corrupt', 'closed', 'invalid-input', 'operation-conflict', 'not-submitted',
+  'ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EAI_AGAIN', 'ETIMEDOUT', 'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE', 'EPROTO',
+  'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'CERT_REVOKED', 'CERT_UNTRUSTED', 'CERT_SIGNATURE_FAILURE', 'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE', 'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'ERR_TLS_CERT_ALTNAME_INVALID', 'ERR_SSL_WRONG_VERSION_NUMBER', 'ERR_SOCKET_CONNECTION_TIMEOUT']);
+/** A code from an error for logs: its own `code` only when it is on the fixed list, otherwise the fallback. */
+export function reasonCode(error: unknown, fallback = 'error'): string {
+  const code = error instanceof Error ? (error as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && reasonCodes.has(code) ? code : fallback;
+}
 export type OrkaPostPreparation = { kind: 'ready'; gatewayGrantRef: string } | Exclude<OrkaPostResult, { kind: 'receipt' }>;
 export interface OrkaClient {
   /** Resolve asynchronous delegated authority before the inbox's final forwarding check. */

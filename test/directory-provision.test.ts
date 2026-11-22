@@ -15,9 +15,9 @@ function fixture(chatKind: 'personal' | 'groupChat' = 'personal') {
   const gateway: any = { apiVersion: 'gateway.orka.ai/v1alpha1', kind: 'Gateway', metadata: { namespace: 'default', name: 'teams', uid: 'gateway-uid', generation: 1 }, status: { ready: true, observedGeneration: 1 } };
   const agent: any = { apiVersion: 'core.orka.ai/v1alpha1', kind: 'Agent', metadata: { namespace: 'default', name: 'front', uid: 'agent-uid', generation: 1 } };
   let binding: any; let overlaps: any[] = []; let creates = 0; let reads = 0; let readyAfter = 0; let allowed = true;
-  let onCreate: (() => void) | undefined; let lost = false;
+  let onCreate: (() => void) | undefined; let lost = false; let agentFails = false;
   const client = {
-    async getGateway() { return structuredClone(gateway); }, async getAgent() { return structuredClone(agent); },
+    async getGateway() { return structuredClone(gateway); }, async getAgent() { if (agentFails) throw new Error('Kubernetes read failed'); return structuredClone(agent); },
     async listBindings() { return structuredClone(overlaps); },
     async getBinding(name: string) { assert.equal(name, connection.bindingName); reads++; if (binding && reads >= readyAfter) binding.status = { ready: true, observedGeneration: 1 }; return structuredClone(binding); },
     async createBinding(value: Record<string, unknown>) {
@@ -28,7 +28,7 @@ function fixture(chatKind: 'personal' | 'groupChat' = 'personal') {
   const provisioner = createBindingProvisioner(target, client);
   return { target, connection, spec, gateway, agent, provisioner, creates: () => creates, reads: () => reads,
     context: (ms = 2000) => ({ signal: new AbortController().signal, deadline: performance.now() + ms, allowed: () => allowed }),
-    revoke() { allowed = false; }, afterCreate(fn: () => void) { onCreate = fn; }, loseAck() { lost = true; }, readyAfter(n: number) { readyAfter = n; },
+    revoke() { allowed = false; }, failAgent() { agentFails = true; }, afterCreate(fn: () => void) { onCreate = fn; }, loseAck() { lost = true; }, readyAfter(n: number) { readyAfter = n; },
     overlap(value: any[]) { overlaps = value; }, binding: () => binding, setBinding(value: any) { binding = value; readyAfter = Infinity; } };
 }
 for (const kind of ['personal', 'groupChat'] as const) test(`new ${kind} Binding is read back with current readiness and exact spec`, async () => {
@@ -163,3 +163,17 @@ test('a target task timeout goes on the next epoch\'s Binding; earlier epochs wi
   bindings.get(name(1)).spec.priority = 9;
   await assert.rejects(provisioner.reconcile({ ...base, bindingName: name(1), epoch: 1, state: 'reserved' }, context), { category: 'binding-conflict' });
 });
+
+// `target-paused` covers every read; the step says which one stopped a forward.
+for (const [fault, step] of [['gateway', 'gateway'], ['agent', 'agent'], ['list', 'bindings'], ['not-ready', 'binding'], ['record', 'record']] as const)
+  test(`a failed Binding check names the ${step} step`, async () => {
+    const f = fixture(); const binding = await f.provisioner.reconcile(f.connection, f.context());
+    const saved: ConnectionRecord = { ...f.connection, state: 'provisioned', binding };
+    if (fault === 'gateway') f.gateway.status.ready = false;
+    if (fault === 'agent') f.failAgent();
+    if (fault === 'list') f.overlap([{ kind: 'unreadable' }]);
+    if (fault === 'not-ready') { f.binding().status = {}; f.readyAfter(Infinity); }
+    const category = fault === 'list' || fault === 'record' ? 'binding-conflict' : 'target-paused';
+    await assert.rejects(f.provisioner.check(fault === 'record' ? { ...saved, targetId: 'other' } : saved, f.context()), { category, step });
+    if (fault === 'agent') await assert.rejects(f.provisioner.revision(f.context()), { category: 'target-paused', step: 'agent' });
+  });

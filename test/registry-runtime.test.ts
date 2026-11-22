@@ -444,6 +444,26 @@ test('changed retained Binding prevents relay and uses native no-effect backoff 
   await eventually(() => received.includes('primary')); assert.equal(received.includes('tools'), false);
 });
 
+test('a forward that fails Orka\'s certificate check or its Binding check logs one line per retry', async t => {
+  const f = await fixture(t); await seed(f); const lines: string[] = [];
+  for (const binding of f.bindings.get('tools')!.values()) binding.status.ready = false;
+  // The primary target trusts a different certificate than the one its Orka presents, as after an expiry or a reissue.
+  const upstream = await httpsFixture(t, (_req, res) => { res.writeHead(202); res.end(); }); const stranger = await httpsFixture(t, (_req, res) => { res.end(); });
+  const native = https.request;
+  t.mock.method(https, 'request', (url: URL, options: https.RequestOptions, callback: any) =>
+    url.hostname === 'orka.example.invalid' ? native(new URL(url.pathname, upstream.baseUrl), { ...options, ca: stranger.ca, servername: 'localhost' }, callback) : native(url, options, callback));
+  syncBuiltinESMExports();
+  const write = process.stderr.write.bind(process.stderr);
+  t.mock.method(process.stderr, 'write', (chunk: any, ...rest: any[]) => { if (String(chunk).startsWith('teams-ingress: forward-retry')) lines.push(String(chunk)); return (write as any)(chunk, ...rest); });
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const runtime = await startRegistryRuntime(f.config, f.deps); t.after(() => runtime.stop().catch(() => {}));
+  await eventually(() => lines.filter(line => line.includes('(primary)')).length >= 2 && lines.some(line => line.includes('(tools)')));
+  assert.equal(lines.filter(line => line.includes('(primary)'))[0], 'teams-ingress: forward-retry (primary) stage=post reason=DEPTH_ZERO_SELF_SIGNED_CERT attempt=1 retryMs=1000\n');
+  assert.equal(lines.filter(line => line.includes('(primary)'))[1], 'teams-ingress: forward-retry (primary) stage=post reason=DEPTH_ZERO_SELF_SIGNED_CERT attempt=2 retryMs=2000\n');
+  assert.equal(lines.find(line => line.includes('(tools)')), 'teams-ingress: forward-retry (tools) stage=check reason=target-paused:binding attempt=1 retryMs=1000\n');
+  const text = JSON.stringify(lines); for (const value of [expectedEvent.contextId, expectedEvent.externalEventId, expectedEvent.sender.id, expectedEvent.text]) assert.equal(text.includes(value), false);
+});
+
 test('all-target shutdown retains every lease until held shared bot-token work actually drains', async t => {
   const f = await fixture(t); await seed(f); const token = deferred(); let waiting = false; let posts = 0;
   const runtime = await startRegistryRuntime(f.config, { ...f.deps, botToken: async () => { waiting = true; await token.promise; return 'synthetic-only'; },

@@ -64,16 +64,16 @@ test('only a valid 202 is durable proof; conflicts, invalid events and redirects
   ] as const;
   for (const [code, reason] of cases) {
     status = code; const before = hits;
-    assert.deepEqual(await client.post(expectedEvent), reason ? { kind: 'blocked', reason } : { kind: 'retry' });
+    assert.deepEqual(await client.post(expectedEvent), reason ? { kind: 'blocked', reason } : { kind: 'retry', reason: `http-${code}` });
     assert.equal(hits, before + 1);
   }
   status = 202;
   for (const [contradictory, state] of [['accepted', 'Rejected'], ['accepted', 'Completed'], ['rejected', 'Queued'], ['deadLettered', 'Accepted']]) {
     body = JSON.stringify({ ...receipt, status: contradictory, state });
-    assert.deepEqual(await client.post(expectedEvent), { kind: 'retry' });
+    assert.deepEqual(await client.post(expectedEvent), { kind: 'retry', reason: 'invalid-receipt' });
   }
   for (const invalid of ['{}', 'null', '[]', '{', JSON.stringify({ ...receipt, status: 'ok' }), JSON.stringify({ ...receipt, eventId: '' }), JSON.stringify({ ...receipt, state: 'unknown' }), Buffer.from([0xff])]) {
-    body = invalid; assert.deepEqual(await client.post(expectedEvent), { kind: 'retry' });
+    body = invalid; assert.deepEqual(await client.post(expectedEvent), { kind: 'retry', reason: 'invalid-receipt' });
   }
 });
 
@@ -81,22 +81,23 @@ test('429/503 Retry-After delta/date honors long hints and saturates rather than
   let hint = '120'; let status = 429;
   const { ca, baseUrl } = await httpsFixture(t, (_request, response) => { response.writeHead(status, { 'retry-after': hint }); response.end(); });
   const client = createOrkaClient({ ...scope, orkaBaseUrl: baseUrl }, { bearerToken: randomBytes(32).toString('hex'), ca });
-  assert.deepEqual(await client.post(expectedEvent), { kind: 'retry', retryAfterMs: 120000 });
+  assert.deepEqual(await client.post(expectedEvent), { kind: 'retry', reason: 'http-429', retryAfterMs: 120000 });
   status = 503; hint = '99999999999999999999999999999999999';
-  assert.deepEqual(await client.post(expectedEvent), { kind: 'retry', retryAfterMs: Number.MAX_SAFE_INTEGER });
+  assert.deepEqual(await client.post(expectedEvent), { kind: 'retry', reason: 'http-503', retryAfterMs: Number.MAX_SAFE_INTEGER });
   hint = new Date(Date.now() + 180000).toUTCString(); const before = Date.now();
   const result = await client.post(expectedEvent); const after = Date.now();
   assert.equal(result.kind, 'retry'); if (result.kind !== 'retry') throw new Error('expected retry');
   assert.ok(result.retryAfterMs! >= Date.parse(hint) - after); assert.ok(result.retryAfterMs! <= Date.parse(hint) - before);
-  for (const invalid of ['-1', '1.5', 'not a date']) { hint = invalid; assert.deepEqual(await client.post(expectedEvent), { kind: 'retry' }); }
+  for (const invalid of ['-1', '1.5', 'not a date']) { hint = invalid; assert.deepEqual(await client.post(expectedEvent), { kind: 'retry', reason: 'http-503' }); }
 });
 
 test('TLS trust and hostname verification remain enabled; no requests reach untrusted endpoints', async (t) => {
   let hits = 0;
   const { ca, baseUrl } = await httpsFixture(t, (_request, response) => { hits++; response.writeHead(202); response.end(JSON.stringify(receipt)); });
   const bearerToken = randomBytes(32).toString('hex');
-  assert.deepEqual(await createOrkaClient({ ...scope, orkaBaseUrl: baseUrl }, { bearerToken }).post(expectedEvent), { kind: 'retry' });
-  assert.deepEqual(await createOrkaClient({ ...scope, orkaBaseUrl: baseUrl.replace('localhost', '127.0.0.1') }, { bearerToken, ca }).post(expectedEvent), { kind: 'retry' });
+  // The reason is Node's own code for the failed check; an expired certificate reads CERT_HAS_EXPIRED the same way.
+  assert.deepEqual(await createOrkaClient({ ...scope, orkaBaseUrl: baseUrl }, { bearerToken }).post(expectedEvent), { kind: 'retry', reason: 'DEPTH_ZERO_SELF_SIGNED_CERT' });
+  assert.deepEqual(await createOrkaClient({ ...scope, orkaBaseUrl: baseUrl.replace('localhost', '127.0.0.1') }, { bearerToken, ca }).post(expectedEvent), { kind: 'retry', reason: 'ERR_TLS_CERT_ALTNAME_INVALID' });
   assert.equal(hits, 0);
 });
 
@@ -109,12 +110,12 @@ test('response byte bound, truncated responses, timeout and cancellation never m
     else if (mode === 'reset') response.destroy();
   });
   const client = createOrkaClient({ ...scope, orkaBaseUrl: baseUrl }, { bearerToken: randomBytes(32).toString('hex'), ca, timeoutMs: 100 });
-  for (mode of ['oversize', 'truncated', 'reset', 'hang']) {
-    const before = hits; assert.deepEqual(await client.post(expectedEvent), { kind: 'retry' }); assert.equal(hits, before + 1);
+  for (const [next, reason] of [['oversize', 'response-too-large'], ['truncated', 'response-failed'], ['reset', 'ECONNRESET'], ['hang', 'timeout']] as const) {
+    mode = next; const before = hits; assert.deepEqual(await client.post(expectedEvent), { kind: 'retry', reason }); assert.equal(hits, before + 1);
   }
   const abort = new AbortController(); const arrived = new Promise<void>((resolve) => { notify = resolve; });
-  const posting = client.post(expectedEvent, abort.signal); await arrived; abort.abort(); assert.deepEqual(await posting, { kind: 'retry' });
-  const before = hits; assert.deepEqual(await client.post(expectedEvent, abort.signal), { kind: 'retry' }); assert.equal(hits, before);
+  const posting = client.post(expectedEvent, abort.signal); await arrived; abort.abort(); assert.deepEqual(await posting, { kind: 'retry', reason: 'cancelled' });
+  const before = hits; assert.deepEqual(await client.post(expectedEvent, abort.signal), { kind: 'retry', reason: 'cancelled' }); assert.equal(hits, before);
 });
 
 test('whole-request deadline stops continuously dripping response bytes rather than resetting on activity', { timeout: 5000 }, async (t) => {
@@ -126,7 +127,7 @@ test('whole-request deadline stops continuously dripping response bytes rather t
   });
   const client = createOrkaClient({ ...scope, orkaBaseUrl: baseUrl }, { bearerToken: randomBytes(32).toString('hex'), ca, timeoutMs: 150 });
   const closed = new Promise<void>((resolve) => { finished = resolve; });
-  const start = performance.now(); assert.deepEqual(await client.post(expectedEvent), { kind: 'retry' });
+  const start = performance.now(); assert.deepEqual(await client.post(expectedEvent), { kind: 'retry', reason: 'timeout' });
   assert.ok(performance.now() - start < 1500); assert.equal(hits, 1); await closed;
 });
 
@@ -137,7 +138,7 @@ test('default five-second absolute deadline includes a stalled TLS handshake', {
   t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise<void>((resolve) => server.close(() => resolve())); });
   const address = server.address(); assert.ok(address && typeof address !== 'string');
   const client = createOrkaClient({ ...scope, orkaBaseUrl: `https://localhost:${address.port}/` }, { bearerToken: randomBytes(32).toString('hex') });
-  const start = performance.now(); assert.deepEqual(await client.post(expectedEvent), { kind: 'retry' });
+  const start = performance.now(); assert.deepEqual(await client.post(expectedEvent), { kind: 'retry', reason: 'timeout' });
   const elapsed = performance.now() - start; assert.ok(elapsed >= 4500 && elapsed < 8500);
 });
 
@@ -147,7 +148,7 @@ test('the 64 KiB response limit is byte-exact, including multibyte optional mess
   const client = createOrkaClient({ ...scope, orkaBaseUrl: baseUrl }, { bearerToken: randomBytes(32).toString('hex'), ca });
   body = JSON.stringify({ ...receipt, message: 'é' + 'x'.repeat(65536 - prefixBytes - 2) });
   assert.equal(Buffer.byteLength(body), 65536); assert.deepEqual(await client.post(expectedEvent), { kind: 'receipt', receipt });
-  body += ' '; assert.deepEqual(await client.post(expectedEvent), { kind: 'retry' });
+  body += ' '; assert.deepEqual(await client.post(expectedEvent), { kind: 'retry', reason: 'response-too-large' });
 });
 
 test('client rejects insecure targets, unsafe headers/timeouts and oversized or raw events before I/O', async (t) => {

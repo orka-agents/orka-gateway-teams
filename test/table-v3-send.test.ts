@@ -79,7 +79,7 @@ test('Orka 101 closes before cancellation: already-drained requests still settle
   const client = createOrkaClient({ ...scope, orkaBaseUrl: remote.baseUrl }, { bearerToken: 'synthetic', ca: remote.ca });
   const abort = new AbortController(); const result = client.post(expectedEvent, abort.signal);
   await closed.promise; abort.abort();
-  assert.deepEqual(await Promise.race([result, turn().then(() => ({ kind: 'stuck-after-native-drain' }))]), { kind: 'retry' });
+  assert.deepEqual(await Promise.race([result, turn().then(() => ({ kind: 'stuck-after-native-drain' }))]), { kind: 'retry', reason: 'cancelled' });
 });
 
 test('Orka native handoff checks authority after event serialization, not only relay readiness', async t => {
@@ -89,5 +89,5 @@ test('Orka native handoff checks authority after event serialization, not only r
   const client = createOrkaClient({ ...scope, orkaBaseUrl: remote.baseUrl }, { bearerToken: 'synthetic', ca: remote.ca, authority } as Parameters<typeof createOrkaClient>[1]);
   const input = structuredClone(expectedEvent);
   Object.defineProperty(input, 'text', { enumerable: true, get() { allowed = false; return 'hello'; } });
-  assert.deepEqual(await client.post(input), { kind: 'retry' }); assert.equal(posts, 0);
+  assert.deepEqual(await client.post(input), { kind: 'retry', reason: 'lease' }); assert.equal(posts, 0);
 });
