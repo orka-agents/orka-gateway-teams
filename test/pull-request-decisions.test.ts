@@ -19,24 +19,50 @@ test('relink_requires_new_card for either account generation', async t => {
   const g = await decisionsFixture(t); await g.store.disconnect(g.subject, context()); await assert.rejects(g.decide());
   assert.equal(g.requests.length, 0);
 });
-test('approved_payload_is_only_post_body and two_replicas_one_post and returned head mismatch is disclosed', async t => {
+test('approved_payload_is_only_post_body and two_replicas_one_post', async t => {
   const f = await decisionsFixture(t);
+  const other = f.make(f.open());
+  await Promise.allSettled([f.decide(), other.decide(f.p, 'approve', 'other-invoke', f.ctx())]);
+  const p = await f.settled(); assert.equal(p.state, 'opened');
+  assert.ok(p.outcome?.kind === 'opened' && p.outcome.headSHA === f.p.headSHA);
+  const posts = f.requests.filter(r => r.method === 'POST'); assert.equal(posts.length, 1);
+  assert.deepEqual(posts[0]!.body, { base: 'main', head: 'orka/fix', title: 'Retry the lease read', body: 'Agent-written description' });
+  assert.ok(f.requests.every(r => r.method === 'GET' || r.path === '/repos/example/project/pulls'));
+});
+/** GitHub's answers when the branch is pushed between the head check and the POST: the new pull request comes back at commit ccc…. */
+function pushedBeforePost(f: Awaited<ReturnType<typeof decisionsFixture>>, close: (res: import('node:http').ServerResponse) => void) {
   f.behavior((req, res) => {
     if (req.path === '/user') return void res.end('{"id":123}');
     if (req.path.includes('/git/ref/')) return void res.end(JSON.stringify({ ref: 'refs/heads/orka/fix', object: { type: 'commit', sha: f.p.headSHA } }));
     if (req.method === 'GET') return void res.end('[]');
+    if (req.method === 'PATCH') return void close(res);
     res.statusCode = 201; res.end(JSON.stringify(f.result('c'.repeat(40))));
   });
-  const other = f.make(f.open());
-  await Promise.allSettled([f.decide(), other.decide(f.p, 'approve', 'other-invoke', f.ctx())]);
-  const p = await f.settled(); assert.equal(p.state, 'opened');
-  assert.equal(p.outcome?.kind, 'opened');
-  const posts = f.requests.filter(r => r.method === 'POST'); assert.equal(posts.length, 1);
-  assert.deepEqual(posts[0]!.body, { base: 'main', head: 'orka/fix', title: 'Retry the lease read', body: 'Agent-written description' });
-  assert.ok(f.requests.every(r => r.method === 'GET' || r.path === '/repos/example/project/pulls'));
-  const { buildPullRequestCard } = await import('../src/teams/pull-request-card.js');
-  assert.match(JSON.stringify(buildPullRequestCard(p, 'sender', true)), /branch moved while opening/);
-  assert.match(JSON.stringify(buildPullRequestCard(p, 'sender', true)), /ccccccc/);
+}
+test('a pull request GitHub opened at an unapproved commit is closed, and the card ends Not opened', async t => {
+  const f = await decisionsFixture(t); pushedBeforePost(f, res => res.end(JSON.stringify({ ...f.result('c'.repeat(40)), state: 'closed' })));
+  await f.decide(); const p = await f.settled();
+  assert.equal(p.state, 'branch-moved'); assert.deepEqual(p.outcome, { kind: 'branch-moved', closed: 12 });
+  const writes = f.requests.filter(r => r.method !== 'GET');
+  assert.deepEqual(writes.map(r => [r.method, r.path]), [['POST', '/repos/example/project/pulls'], ['PATCH', '/repos/example/project/pulls/12']]);
+  assert.deepEqual(writes[1]!.body, { state: 'closed' });
+});
+test('a closed pull request is still named when the write record cannot be completed', async t => {
+  const f = await decisionsFixture(t); pushedBeforePost(f, res => res.end(JSON.stringify({ ...f.result('c'.repeat(40)), state: 'closed' })));
+  const store = Object.create(f.store, { completeProposalWrite: { value: async () => { throw new Error('out of time'); } } }) as typeof f.store;
+  await f.make(store).decide(f.p, 'approve', 'invoke', f.ctx());
+  assert.deepEqual((await f.settled()).outcome, { kind: 'branch-moved', closed: 12 });
+});
+test('when that pull request cannot be closed, it stays open and the card says it has unapproved changes', async t => {
+  for (const close of [(res: import('node:http').ServerResponse) => { res.statusCode = 500; res.end('{}'); },
+    (res: import('node:http').ServerResponse) => res.end(JSON.stringify({ number: 12, state: 'open' }))]) {
+    const f = await decisionsFixture(t); pushedBeforePost(f, res => close(res));
+    await f.decide(); const p = await f.settled(); assert.equal(p.state, 'opened');
+    assert.ok(p.outcome?.kind === 'opened' && p.outcome.headSHA === 'c'.repeat(40) && !p.outcome.existing);
+    assert.deepEqual(f.logs.filter(l => l.includes('close')), ['pull-request-close-failed']);
+    const { buildPullRequestCard } = await import('../src/teams/pull-request-card.js');
+    assert.match(JSON.stringify(buildPullRequestCard(p, 'sender', true)), /Opened #12 with changes you didn't approve/);
+  }
 });
 test('moved_head_opens_nothing and existing_pr_is_linked_without_post', async t => {
   const f = await decisionsFixture(t);
@@ -47,6 +73,11 @@ test('moved_head_opens_nothing and existing_pr_is_linked_without_post', async t 
     { ref: 'refs/heads/orka/fix', object: { type: 'commit', sha: g.p.headSHA } } : [g.result()])));
   await g.decide(); const p = await g.settled(); assert.equal(p.state, 'opened');
   assert.ok(p.outcome?.kind === 'opened' && p.outcome.existing); assert.ok(g.requests.every(r => r.method === 'GET'));
+  // Someone else's pull request at a commit the sender didn't approve: nothing is opened and theirs is left alone.
+  const h = await decisionsFixture(t);
+  h.behavior((req, res) => res.end(JSON.stringify(req.path === '/user' ? { id: 123 } : req.path.includes('/git/ref/') ?
+    { ref: 'refs/heads/orka/fix', object: { type: 'commit', sha: h.p.headSHA } } : [h.result('c'.repeat(40))])));
+  await h.decide(); assert.deepEqual((await h.settled()).outcome, { kind: 'branch-moved' }); assert.ok(h.requests.every(r => r.method === 'GET'));
 });
 test('slow_post_does_not_hold_invoke and request_disconnect_does_not_cancel_claimed_work', async t => {
   const f = await decisionsFixture(t); const gate = deferred(); let post = false;

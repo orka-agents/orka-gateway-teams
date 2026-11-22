@@ -537,10 +537,17 @@ or invalidation requires a new proposal. A revoked GitHub token invalidates only
 the frozen account generation and sends a fixed sign-in notice without old
 private proposal details. Approval reacquires only that GitHub
 account, verifies its numeric `/user` identity, checks the current branch SHA and
-opens a ready PR with the stored title, description and refs. A branch moved
-before the check opens nothing. GitHub cannot pin PR creation to a SHA: a push
-between the check and POST can change the PR. The returned head is compared with
-the approved head and any mismatch is disclosed; the PR is not auto-closed.
+opens a ready PR with the stored title, description and refs. Approval covers
+only the approved commit. A branch moved before the check opens nothing, and so
+does an open PR found at another commit, which is left alone. GitHub cannot pin
+PR creation to a SHA: a push between the check and POST opens the PR at the new
+commit. The returned head is compared with the approved head, and on a mismatch
+the gateway closes the PR it has just opened. Each of these ends "Not opened"
+with the reason "The branch changed after you approved."; the last also names
+the closed PR. In a one-to-one chat the sender's card has an "Ask again" button,
+which posts a chat message as the sender asking for a new card. If the close
+fails (`teams-ingress: pull-request-close-failed`), or the PR is found only
+during recovery, the card says it has changes the sender didn't approve.
 Reject opens nothing and sends no turn to Orka. Neither decision deletes a branch
 or merges a PR. The result appears in the conversation and on refresh, not in
 Orka's completed Task history. Agent tool configuration remains operator work.
