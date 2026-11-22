@@ -429,12 +429,16 @@ the head SHA, and verifies every compared git author is
 `Orka Publisher <publisher@orka.ai>`, including later commit pages. This author
 identity can be spoofed; it is not cryptographic proof of publisher provenance. The card opens
 with the question or the outcome. The agent's title and description sit in one tinted box
-captioned “Written by the agent”. Below it are the verified counts, a “View changes” link
-pinned to both verified SHAs, and the five files with the most changed lines, then “and N more”.
+captioned “Written by the agent”. The box shows the description's first paragraph, cut at a
+sentence end. Below it are the verified counts, the five files with the most changed lines
+(long paths lose folders from the left), “and N more”, and a “View changes on GitHub” link
+pinned to both verified SHAs. The sender's card ends with the GitHub account that will open it.
 Up to ten file previews are stored; large filenames may reduce that count to fit the encrypted
-document budget. At the 300-file API boundary the card says GitHub returned only part of the
-file list. Long labels and descriptions end in “…” to preserve the existing 20 KiB message budget;
-“Show more” opens up to 1,800 bytes of the description. Full diffs and patches are not stored.
+document budget. At the 300-file API boundary the card says, directly under its heading, that
+GitHub returned only part of the file list; the count reads “and at least N more” and the
+sender gets a “View full diff” button above **Approve**. Long labels end in “…” to preserve
+the existing 20 KiB message budget;
+“Show full description” opens up to 1,800 bytes of the description. Full diffs and patches are not stored.
 The expiry is shown in the viewer's local time. A decided card keeps only the outcome, the
 agent's title and one link.
 
@@ -492,14 +496,14 @@ an armed or unknown card send is never resent, including after restart. An
 unconfirmed arrival is reported honestly, not as a successful send.
 
 The shared card is read-only. Authenticated sender refresh offers **Approve**,
-**Revise** and **Reject** while the selected proposal is pending. The
+**Ask for changes** and **Reject** while the selected proposal is pending. The
 server checks tenant, Entra object ID, conversation, current target and policy;
 Teams MRI selects the view, not authority. Other allowed members see waiting text
 and cannot decide. Refresh derives expiry/replacement from durable state. Live
 Teams per-user refresh, displayed-card replacement and interaction timing still
 need separate operator-approved qualification; synthetic tests do not prove them.
 
-**Revise** accepts a nonblank note of at most 2,000 Unicode characters. The first
+**Ask for changes** accepts a nonblank note of at most 2,000 Unicode characters. The first
 winning note, invoke identity and new reply target are saved encrypted before
 normal conversation admission. Until the inbox accepts that exact turn, the card
 says “Sending your changes…”; full/busy admission remains pending, not sent.

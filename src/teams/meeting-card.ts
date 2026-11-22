@@ -8,12 +8,13 @@ export type MeetingUnavailable = 'disabled' | 'channel' | 'roster' | 'attendees'
 const explanations: Record<MeetingUnavailable, string> = {
   disabled: 'Meeting drafts are turned off here, so there is no meeting link.',
   channel: 'Meeting links work only in personal and group chats, not channels.',
-  roster: "Couldn't confirm who is in this chat, so there is no meeting link.",
+  roster: "Couldn't confirm who is in this chat, so there is no meeting link. Create the meeting in Teams yourself.",
   attendees: "Couldn't match every requested attendee to one person in this chat, so there is no meeting link.",
   'link-too-long': 'The full meeting link is too long, so there is no link. No partial attendee list was used.',
   'card-too-large': "The full meeting link doesn't fit in one message, so there is no link. No partial attendee list was used.",
 };
-export interface MeetingAudience { labels: readonly string[]; count: number }
+/** `labels` are matched chat members. `notFound` are requested names that matched no single member. */
+export interface MeetingAudience { labels: readonly string[]; count: number; personal?: true; notFound?: readonly string[] }
 
 /** Private, per-attempt link. Never journal, log, or return it as a V1 receipt. */
 export function meetingLink(draft: MeetingDraft, upns: readonly string[]): string | undefined {
@@ -32,18 +33,25 @@ export function formatMeetingDraft(draft: MeetingDraft, audience: MeetingAudienc
     ` · asked by ${presentation.requesterDisplayName ? escapeMarkdown(safeMeetingLabel(presentation.requesterDisplayName)) : 'an allowed participant'}${presentation.continuation ? ' · continuing this chat' : ''}`;
   // The viewer's Teams client turns DATE and TIME into its own local time; they take whole seconds.
   const local = (time: string) => time.replace(/\.\d+/u, '');
-  const when = draft.suggestedStart === undefined ? [] : [{ title: 'When',
-    value: `{{DATE(${local(draft.suggestedStart)}, SHORT)}} {{TIME(${local(draft.suggestedStart)})}}–{{TIME(${local(meetingEnd(draft.suggestedStart, draft.durationMinutes))})}}` }];
-  const window = draft.preferredWindow === undefined ? [] : [{ title: when.length ? 'Window' : 'When', value: escapeMarkdown(draft.preferredWindow) }];
+  // A suggested time already says the length; a range alone needs it.
+  const when = draft.suggestedStart !== undefined ? [{ title: 'When',
+    value: `{{DATE(${local(draft.suggestedStart)}, SHORT)}} {{TIME(${local(draft.suggestedStart)})}}–{{TIME(${local(meetingEnd(draft.suggestedStart, draft.durationMinutes))})}} (suggested)` }] :
+    [...(draft.preferredWindow === undefined ? [] : [{ title: 'When', value: escapeMarkdown(draft.preferredWindow) }]), { title: 'Length', value: `${draft.durationMinutes} min` }];
   // Display-name lists are presentation only; count communicates the complete
   // snapshot. Never shorten the action's recipient list to make it fit.
   const labels = audience.labels.slice(0, 10).map(label => escapeMarkdown(safeMeetingLabel(label)));
+  const notFound = (audience.notFound ?? []).map(escapeMarkdown);
   const create = (link: string | undefined, unavailable: MeetingUnavailable | undefined, showLabels = true): OutgoingTeamsMessage => {
     const everyone = `Everyone here${audience.count ? ` (${audience.count})` : ''}` + (!audience.count ? '' : !showLabels ? '; names left out to fit the message limit' :
       `: ${labels.join(', ')}${audience.count > labels.length ? `; ${audience.count - labels.length} more` : ''}`);
+    // Named people are shown as the chat members they matched. Without a member list the request's own names are all there is.
+    const named = () => !labels.length && !notFound.length ? draft.names!.map(escapeMarkdown).join(', ') :
+      [...(!labels.length ? [] : [showLabels ? labels.join(', ') : `${audience.count} matched; names left out to fit the message limit`]),
+        ...(notFound.length ? [`not found: ${notFound.join(', ')}`] : [])].join('; ');
+    const who = audience.personal ? 'Just you. Add people in Teams.' : draft.attendees === 'named' ? named() : everyone;
     const body: CardElement[] = [line(`Meeting draft${asked}`, { ...note, spacing: 'None' }), line(escapeMarkdown(draft.subject), { weight: 'Bolder', size: 'Medium', spacing: 'Small' }),
-      { type: 'FactSet', spacing: 'Small', facts: [...when, ...window, { title: 'Length', value: `${draft.durationMinutes} min` },
-        { title: 'Who', value: draft.attendees === 'named' ? draft.names!.map(escapeMarkdown).join(', ') : everyone }] },
+      // Names nobody could confirm are left out.
+      { type: 'FactSet', spacing: 'Small', facts: [...when, ...(unavailable === 'roster' ? [] : [{ title: 'Who', value: who }])] },
       line('Agenda', { weight: 'Bolder', size: 'Small', spacing: 'Medium' }),
       line(draft.agenda.map((item, i) => `${i + 1}. ${escapeMarkdown(item)}`).join('\n'), { spacing: 'Small' }),
       line(link === undefined ? `Nothing is scheduled. ${unavailable ? explanations[unavailable] : 'This draft has no meeting link.'}`
@@ -51,7 +59,7 @@ export function formatMeetingDraft(draft: MeetingDraft, audience: MeetingAudienc
     const card: IAdaptiveCard = { type: 'AdaptiveCard', version: '1.4',
       // Fixed bounded fallback, independent of user/roster labels and URL.
       fallbackText: 'Meeting draft. Nothing scheduled. Review the agenda, duration and time suggestions in Teams.' + (unavailable ? ' No meeting link is available.' : ''), body,
-      ...(link === undefined ? {} : { actions: [{ type: 'Action.OpenUrl', title: 'Open in Teams', url: link }] }) };
+      ...(link === undefined ? {} : { actions: [{ type: 'Action.OpenUrl', title: 'Open in Teams', style: 'positive', url: link }] }) };
     return { type: 'message', ...(presentation?.replyToId === undefined ? {} : { replyToId: presentation.replyToId }),
       attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: card }] };
   };

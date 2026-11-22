@@ -7,7 +7,7 @@ import type { MeetingAudience } from '../teams/meeting-card.js';
 export const MAX_ROSTER_BYTES = 256 * 1024;
 export interface MeetingMember { id: string; name?: string; userPrincipalName?: string; role?: string; type?: string }
 export type MembersResult = { kind: 'members'; members: MeetingMember[] } | { kind: 'retryable' | 'unavailable' };
-export type AttendeesResult = { kind: 'attendees'; upns: string[]; audience: MeetingAudience } | { kind: 'unavailable' };
+export type AttendeesResult = { kind: 'attendees'; upns: string[]; audience: MeetingAudience } | { kind: 'unavailable'; audience?: MeetingAudience };
 
 /** Consume a single complete raw page. No address fallback, directory lookup or
  * SDK model conversion. Discard every unrelated field, including email. */
@@ -48,12 +48,14 @@ export function resolveMeetingAttendees(draft: MeetingDraft, route: Readonly<Rep
   if (!people.length || (route.conversation.conversationType === 'personal' && people.length !== 1)) return unavailable;
   let selected = people;
   if (draft.attendees === 'named') {
-    selected = [];
+    selected = []; const notFound: string[] = [];
     for (const requested of draft.names!) {
       const matches = people.filter(member => member.name?.trim().toLowerCase() === requested.trim().toLowerCase());
-      if (matches.length !== 1) return unavailable;
-      selected.push(matches[0]!);
+      if (matches.length === 1) selected.push(matches[0]!); else notFound.push(requested.trim());
     }
+    // The card says which names matched and which did not; nobody is invited.
+    if (notFound.length) return { ...unavailable, audience: { count: selected.length, notFound,
+      labels: route.conversation.conversationType === 'personal' ? [] : selected.map(member => safeMeetingLabel(member.name ?? 'a participant')) } };
   }
   const unique = new Map<string, MeetingMember>();
   for (const member of selected) {
@@ -66,8 +68,8 @@ export function resolveMeetingAttendees(draft: MeetingDraft, route: Readonly<Rep
   }
   const deduped = [...unique.values()];
   return { kind: 'attendees', upns: deduped.map(member => member.userPrincipalName!), audience: {
-    count: deduped.length, labels: route.conversation.conversationType === 'personal' ? ['You'] :
-      deduped.slice(0, 10).map(member => safeMeetingLabel(member.name ?? 'a participant')),
+    count: deduped.length, ...(route.conversation.conversationType === 'personal' ? { personal: true as const, labels: ['You'] } :
+      { labels: deduped.slice(0, 10).map(member => safeMeetingLabel(member.name ?? 'a participant')) }),
   } };
 }
 function record(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }

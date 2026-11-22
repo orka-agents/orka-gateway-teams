@@ -111,7 +111,7 @@ export function createDeliveryDispatcher(options: DispatcherOptions): DeliveryDi
           if (roster.kind !== 'members') reason = 'roster';
           else {
             const selected = resolveMeetingAttendees(draft, route, roster.members);
-            if (selected.kind !== 'attendees') reason = 'attendees';
+            if (selected.kind !== 'attendees') { reason = 'attendees'; audience = selected.audience ?? audience; }
             else {
               audience = selected.audience; url = meetingLink(draft, selected.upns);
               if (url === undefined) reason = 'link-too-long';
