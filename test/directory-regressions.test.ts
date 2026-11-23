@@ -10,8 +10,11 @@ import { binding, context, deferred, directoryFixture, eventually, key, sample }
 test('native timeout retains the original deadline when caller context is reused', async t => {
   const f = await directoryFixture(t); f.controls.hook = () => {};
   const table = createDirectoryTable(binding, f.dependencies); t.after(() => table.close());
+  // Hold the clock until the request arrives: a slow start would otherwise use up the
+  // 100 ms first, the request would never be sent and the wait below would fail.
+  const held = performance.now(); const clock = t.mock.method(performance, 'now', () => held);
   const ctx = context(100); const result = table.get({ kind: 'conn', conversationId: 'held' }, ctx).then(() => 'success', () => 'aborted');
-  await eventually(() => f.stats.requests === 1); ctx.deadline = performance.now() + 60000;
+  await eventually(() => f.stats.requests === 1); clock.mock.restore(); ctx.deadline = performance.now() + 60000;
   let timer: ReturnType<typeof setTimeout>;
   try { assert.equal(await Promise.race([result, new Promise(resolve => { timer = setTimeout(() => resolve('overdue'), 500); })]), 'aborted'); }
   finally { clearTimeout(timer!); }
