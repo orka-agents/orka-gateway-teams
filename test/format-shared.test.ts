@@ -4,8 +4,8 @@ import { formatDelivery, MAX_OUTGOING_MESSAGE_BYTES } from '../src/teams/format.
 import { finalDelivery, finalMessage } from './fixtures/outgoing.js';
 
 type Body = NonNullable<ReturnType<typeof formatDelivery>['attachments'][0]['content']['body']>;
-// Every line a reader sees, top to bottom.
-const flat = (body: Body): string[] => body.flatMap(block => 'text' in block && typeof block.text === 'string' ? [block.text] : []);
+// Every line a reader sees, top to bottom. A reply card has no box, so every block is a line.
+const flat = (body: Body): string[] => body.map(block => { assert.ok(block.type === 'TextBlock'); return block.text; });
 function text(message: ReturnType<typeof formatDelivery>) {
   return flat(message.attachments[0].content.body!).join('\n');
 }

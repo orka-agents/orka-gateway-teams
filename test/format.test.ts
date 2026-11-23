@@ -38,7 +38,8 @@ function cardOf(message: OutgoingTeamsMessage): IAdaptiveCard {
 }
 
 function answerOf(card: IAdaptiveCard) {
-  // The answer follows the failure heading when there is one, and precedes any shortening notice.
+  // The answer follows the failure heading when there is one, and precedes any shortening notice. A reply card has no box.
+  assert.ok(card.body?.every(block => block.type === 'TextBlock'));
   const answer = card.body?.find(block => block.type === 'TextBlock' && block.weight !== 'Bolder');
   assert.ok(answer?.type === 'TextBlock');
   assert.equal(answer.wrap, true);
