@@ -261,7 +261,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
       if (typeof data.proposal === 'string' && /^[a-f0-9]{64}$/u.test(data.proposal)) seen.proposal = data.proposal;
       if (action.type !== 'Action.Execute' || !cardVerbs.includes(String(action.verb)) || data.rev !== 1 || typeof data.proposal !== 'string' || typeof data.digest !== 'string' ||
         !supplied.subject.objectId || input.from.aadObjectId !== supplied.subject.objectId) return denied;
-      seen.stage = 'proposal'; let p = (await options.delegated.accounts.getProposal(data.proposal, ctx))?.proposal;
+      seen.stage = 'proposal'; const version = await options.delegated.accounts.getProposal(data.proposal, ctx); let p = version?.proposal;
       if (!p || p.conversationId !== input.conversation.id || input.conversation.tenantId !== undefined && p.tenantId !== input.conversation.tenantId || p.payloadDigest !== data.digest || p.revision !== data.rev) return denied;
       seen.targetId = p.targetId; seen.stage = 'connection'; if (!await proposalConnection(p, supplied.subject, ctx)) return denied;
       if (action.verb !== 'pr-refresh') {
@@ -273,7 +273,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
         p = await options.proposals.decide(p, revise ? 'revise' : action.verb === 'pr-approve' ? 'approve' : 'reject', identity(input.id), ctx, revise ? data.note as string : undefined);
       }
       if (action.verb === 'pr-refresh' && supplied.subject.objectId === p.objectId) options.proposals?.refresh(p, ctx);
-      seen.stage = 'output'; let card = buildPullRequestCard(p, supplied.subject.objectId === p.objectId ? 'sender' : 'room', !!options.proposals);
+      seen.stage = 'output'; let card = buildPullRequestCard(p, supplied.subject.objectId === p.objectId ? 'sender' : 'room', !!options.proposals, version?.newerCard);
       if (!await safeProposal(p, proposalOutput(p), ctx) || !await safeProposal(p, JSON.stringify(card), ctx)) {
         if (p.state !== 'revise-requested' || supplied.subject.objectId !== p.objectId || !supplied.controlRecipient) return denied;
         const subject = { objectId: p.objectId }; const current = await options.delegated.accounts.inspect(subject, ctx);

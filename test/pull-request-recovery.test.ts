@@ -17,7 +17,8 @@ test('restart_after_claim_before_projection_never_posts and confirmed_abandoned_
   await assert.rejects(claim(f)); delete f.controls.hook;
   const other = f.make(f.open()); await other.recover(context());
   const p = (await f.store.getProposal(f.p.id, context()))!.proposal;
-  assert.equal(p.state, 'failed'); assert.equal(p.outcome?.kind, 'failed'); assert.equal(f.requests.length, 0);
+  // The gateway stopped before asking GitHub for anything, and the saved outcome says so.
+  assert.equal(p.state, 'failed'); assert.deepEqual(p.outcome, { kind: 'failed', cause: 'gateway' }); assert.equal(f.requests.length, 0);
   assert.equal((await f.store.reserveProposalWrite({ ...p, state: 'approving' }, context())).kind, 'uncertain');
 });
 test('restart_after_reservation_before_post_stays_uncertain and lost_response_finds_matching_pr GET only', async t => {

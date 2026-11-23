@@ -441,6 +441,12 @@ the existing 20 KiB message budget;
 “Show full description” opens up to 1,800 bytes of the description. Full diffs and patches are not stored.
 The expiry is shown in the viewer's local time. A decided card keeps only the outcome, the
 agent's title and one link.
+A card replaced by a newer one gets a “Go to newer card” button once the newer card's
+message is known. Teams documents message links only for `19:` chat IDs, so a one-to-one
+chat, which reaches the gateway under an `a:` ID, gets no button. A “Not opened” card says
+“GitHub didn't respond.” after a timeout, a dropped connection or a GitHub server error, and
+“Something went wrong on our side.” when the gateway's own storage or shutdown stopped the
+work; when the gateway can't tell, it names no cause.
 
 A refused task-tool call still answers only `tool-unavailable` (or `signin-required`),
 but stderr gets one line naming where it stopped, with no values:

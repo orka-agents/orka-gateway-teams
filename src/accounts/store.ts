@@ -278,7 +278,10 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
     const selected = selector?.kind === 'proposal-selector' && selector.proposalId === p.id && selector.revision === p.revision;
     if (p.state === 'pending') p = selected && selector.state === 'claimed' ? projectClaim(p, selector.claim!) :
       { ...p, state: !selected ? 'superseded' : now() >= p.expiresAt ? 'expired' : 'pending' };
-    return { proposal: p, etag: row.etag, ...(p.claim && !row.value.proposal.claim ? { needsProjection: true as const } : {}) };
+    // The selector names the newest card this person has in this chat, so a replaced card can point at it.
+    const newer = p.state === 'superseded' && selector?.kind === 'proposal-selector' && selector.proposalId !== p.id ? (await read(proposalKey(selector.proposalId), c))?.value : undefined;
+    const newerCard = newer?.kind === 'proposal' && newer.proposal.conversationId === p.conversationId ? newer.proposal.cardActivityId : undefined;
+    return { proposal: p, etag: row.etag, ...(p.claim && !row.value.proposal.claim ? { needsProjection: true as const } : {}), ...(newerCard ? { newerCard } : {}) };
   }
   const proposalWriteId = (p: Proposal) => proposalHash(['teams-proposal-write-v1', p.id, p.revision, p.payloadDigest]);
   async function approved(p: Proposal, c: DirectoryContext) {

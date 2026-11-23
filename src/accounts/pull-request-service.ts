@@ -84,8 +84,11 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
         }
       }
     } catch (e) {
-      outcome = { kind: e instanceof GitHubError && e.code === 'permission' ? 'permission' :
-        e instanceof GitHubError && ['signin-required', 'unauthorized'].includes(e.code) ? 'signin-required' : sent || reserving ? 'uncertain' : 'failed' };
+      // A failure names its cause only when the gateway knows it: GitHub gave no answer, or the gateway's own storage or shutdown stopped the work.
+      const cause = e instanceof GitHubError && e.code === 'no-response' ? 'github' as const : !(e instanceof GitHubError) || !active(ctx) ? 'gateway' as const : undefined;
+      outcome = e instanceof GitHubError && e.code === 'permission' ? { kind: 'permission' } :
+        e instanceof GitHubError && ['signin-required', 'unauthorized'].includes(e.code) ? { kind: 'signin-required' } :
+          sent || reserving ? { kind: 'uncertain' } : { kind: 'failed', ...(cause ? { cause } : {}) };
       for (const g of guards.splice(0)) g.release();
       if (e instanceof GitHubError && e.code === 'unauthorized' && token) try { await options.githubAccounts.invalidate({ objectId: p.objectId }, p.githubGeneration, token, ctx); } catch { /* No retry. */ }
     } finally { for (const g of guards) g.release(); }
@@ -103,7 +106,8 @@ export function createPullRequestService(options: { accounts: AccountStore; gith
     const saved = await options.accounts.proposalWriteOutcome(p, ctx);
     if (saved) { await finish(p, saved, settlement); return; }
     const fence = await options.accounts.fenceUnsentProposal(p, ctx);
-    if (fence === 'abandoned') { await finish(p, { kind: 'failed' }, settlement); return; }
+    // The gateway stopped after the approval and before it asked GitHub for anything.
+    if (fence === 'abandoned') { await finish(p, { kind: 'failed', cause: 'gateway' }, settlement); return; }
     let outcome: ProposalOutcome = { kind: 'uncertain' };
     const guards: ReturnType<AccountStore['watch']>[] = [];
     const bound = { ...ctx, authorizeWrite: () => active(ctx) && guards.every(g => g.active()) };
