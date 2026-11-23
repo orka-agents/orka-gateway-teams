@@ -240,7 +240,8 @@ test('expired original deadline and corrupt directory cannot admit a late result
   // 30 ms first, the check would never be called and the wait below would spin without end.
   const held = performance.now(); const clock = t.mock.method(performance, 'now', () => held);
   const pending = f.sink.admit({ ...f.event, text: 'request' }, f.route, { ...context(), deadline: performance.now() + 30 });
-  while (!f.checks.length) await new Promise(resolve => setImmediate(resolve));
+  let ended = false; void pending.then(() => { ended = true; }, () => { ended = true; });
+  while (!f.checks.length) { assert.equal(ended, false, 'admission ended before the binding check'); await new Promise(resolve => setImmediate(resolve)); }
   clock.mock.restore();
   await new Promise(resolve => setTimeout(resolve, 40)); gate.resolve();
   assert.equal((await pending).kind, 'full'); assert.equal(f.admitted.length, 0);
