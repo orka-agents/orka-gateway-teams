@@ -552,7 +552,7 @@ test('claimed revision retains fixed status after sign-in changes generation wit
     p.revisionAdmission = status;
     const result = await f.sink.cardAction!(input, { ...context(), delegatedTenant: true, controlRecipient: { id: p.senderMRI } });
     assert.equal(result.status, 200); const wire = JSON.stringify(result.body);
-    assert.match(wire, status === 'delivered' ? /Changes requested\. Sent to the agent\./ : status === 'signin-required' ? /Changes not sent\. Sign in, then send them again\./ : status === 'conflict' ? /Changes not sent\. Reply in the chat/ : /Sending your changes…/);
+    assert.match(wire, status === 'delivered' ? /Changes requested.*Sent to Orka\./ : status === 'signin-required' ? /Changes not sent.*Your sign-in expired\./ : status === 'conflict' ? /Changes not sent.*Send it to Orka in the chat/ : /Sending your changes…/);
     assert.match(wire, /Details are hidden because you signed in again\./);
     for (const privateValue of [p.title, p.body, p.head, p.displayName, p.githubLogin, 'PRIVATE_NOTE']) assert.ok(!wire.includes(privateValue));
     assert.ok(!wire.includes('pr-approve')); assert.ok(!wire.includes('pr-revise'));

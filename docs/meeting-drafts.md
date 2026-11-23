@@ -136,7 +136,10 @@ Channels do **zero roster GETs** and show a visible no-action draft under the sa
 claim, preserving the saved reply root. Unsupported scope, permanent GET failures
 (including 401/403), incomplete/invalid roster, outsiders, ambiguous names, missing
 or invalid selected UPNs, and URL/card overflow likewise show a no-action card.
-No partial recipient list/link is substituted. If auxiliary roster display names
+No partial recipient list/link is substituted. For named people that card lists the members
+who matched and each requested name that matched no single member as not found; when the
+roster could not be read, or gave nothing to match the names against, it lists no names. With a suggested start the card shows one
+**When** row and no separate window or length. If auxiliary roster display names
 make the card overflow, their entire preview is explicitly omitted with the full
 count preserved; every structured draft field remains visible. Meeting-flag
 withdrawal alone yields a no-action card for a fresh otherwise-authorized message.

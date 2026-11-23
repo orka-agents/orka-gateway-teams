@@ -17,37 +17,57 @@ const line = (text: string, style: Partial<ITextBlock> = {}): ITextBlock => ({ t
 const caption = (text: string): ITextBlock => line(text, { isSubtle: true, size: 'Small', spacing: 'None' });
 // A path part that also cannot close the Markdown link it sits in.
 const part = (s: string) => encodeURIComponent(s).replace(/[!'()*~]/gu, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
-const LINK_EXPIRED = 'Your account link expired. Sign in, then ask the agent again for a new card.';
+const LINK_EXPIRED = 'Your sign-in expired. Sign in again, then ask Orka for a new card.';
+const AGAIN = 'Ask Orka again.';
+/** The opening of the description: its first paragraph, cut at a sentence end to about four lines on a phone. */
+function opening(body: string): string {
+  const paragraphs = body.trim().split(/\n\s*\n/u).map(p => p.replace(/\s+/gu, ' ').trim()).filter(Boolean);
+  // A Markdown heading alone says nothing, so start at the text under it.
+  const first = Array.from(paragraphs.find(p => !/^#{1,6} /u.test(p)) ?? paragraphs[0] ?? '');
+  if (first.length <= 140) return first.join('');
+  const cut = first.slice(0, 140).join(''); const sentence = Math.max(...['. ', '! ', '? '].map(end => cut.lastIndexOf(end)));
+  const space = cut.lastIndexOf(' ');
+  return sentence >= 40 ? cut.slice(0, sentence + 1) : `${space >= 40 ? cut.slice(0, space) : cut}…`;
+}
+/** A path that fits one line on a phone: whole folders are dropped from the left. */
+function shortPath(path: string, max = 30): string {
+  const points = Array.from(path); if (points.length <= max) return path;
+  const parts = path.split('/'); let kept = parts.pop()!;
+  while (parts.length && Array.from(`${parts.at(-1)}/${kept}`).length <= max - 2) kept = `${parts.pop()}/${kept}`;
+  return Array.from(kept).length <= max - 2 ? `…/${kept}` : `…${points.slice(1 - max).join('')}`;
+}
 
 interface Status { head: string; fallback?: string; alert?: true; detail?: string; note?: string; open?: true }
 function revisionStatus(admission: RevisionAdmission | undefined): Status {
-  return admission === 'delivered' ? { head: 'Changes requested. Sent to the agent.' } :
-    admission === 'signin-required' ? { head: 'Changes not sent. Sign in, then send them again.', alert: true } :
-      admission === 'conflict' ? { head: 'Changes not sent. Reply in the chat with what to change.', alert: true } : { head: 'Sending your changes…' };
+  // After a sent note the agent may ask a question instead of proposing again, so a new card is not promised.
+  return admission === 'delivered' ? { head: 'Changes requested', detail: 'Sent to Orka. It will reply in this chat with a new card or a question.' } :
+    admission === 'signin-required' ? { head: 'Changes not sent', alert: true, detail: 'Your sign-in expired. Sign in, then send your note to Orka in the chat.' } :
+      admission === 'conflict' ? { head: 'Changes not sent', alert: true, detail: "This card couldn't send your note. Send it to Orka in the chat instead." } : { head: 'Sending your changes…' };
 }
 function status(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolean): Status {
-  const who = label(p.displayName, 80); const o = p.outcome; const again = 'Ask the agent again for a new card.';
+  const who = label(p.displayName, 80); const o = p.outcome;
   if (p.state === 'pending') return { open: true, ...(decisionsEnabled ? {} : { detail: "Approval isn't turned on for this chat yet." }),
     ...(viewer === 'room' ? { head: `Waiting for ${who} to approve`, fallback: 'Waiting for approval' } : { head: decisionsEnabled ? 'Open this pull request?' : 'Pull request waiting' }) };
-  if (p.state === 'approving') return { head: 'Approved. Opening the pull request…' };
-  if (o?.kind === 'opened' && o.headSHA === p.headSHA) return { head: `${o.existing ? 'Already open: ' : 'Opened '}#${o.number}` };
+  if (p.state === 'approving') return { head: 'Approved', detail: 'Opening the pull request…' };
+  if (o?.kind === 'opened' && o.headSHA === p.headSHA) return { head: `${o.existing ? 'Already open as ' : 'Opened '}#${o.number}`, ...(o.existing ? { detail: 'Nothing new was opened.' } : {}) };
   // Reached only when the gateway couldn't close it, or found it, open or closed, after losing track of its own request.
   if (o?.kind === 'opened') return { head: o.existing ? `#${o.number} has changes you didn't approve` : `Opened #${o.number} with changes you didn't approve`, alert: true,
     detail: 'The branch changed after you approved. Review the pull request before it merges.',
     note: `Approved ${p.headSHA.slice(0, 7)} · pull request is at ${o.headSHA.slice(0, 7)}` };
-  if (p.state === 'rejected') return viewer === 'sender' ? { head: 'Not opened. You rejected it.' } : { head: `Not opened. ${who} rejected it.`, fallback: 'Not opened. Rejected.' };
-  // The rest of the chat sees the note only once it has been sent on as a chat turn.
-  if (p.state === 'revise-requested') return { ...revisionStatus(p.revisionAdmission), ...(viewer === 'sender' || p.revisionAdmission === 'delivered' ?
-    { detail: `${viewer === 'sender' ? 'Your note' : `Note from ${who}`}: "${label(p.claim?.note ?? '', 2400)}"` } : {}) };
-  if (p.state === 'expired') return { head: 'Expired. Nothing was opened.', detail: again };
+  if (p.state === 'rejected') return { head: 'Not opened', fallback: 'Not opened. Rejected.', detail: viewer === 'sender' ? 'You rejected it.' : `${who} rejected it.` };
+  if (p.state === 'revise-requested') { const s = revisionStatus(p.revisionAdmission);
+    // The step is for the sender, who alone can take it.
+    return viewer === 'sender' || p.revisionAdmission === 'delivered' ? s : { head: s.head, ...(s.alert ? { alert: s.alert } : {}) }; }
+  if (p.state === 'expired') return { head: 'Expired', detail: `Nothing was opened. ${AGAIN}` };
   if (p.state === 'superseded') return { head: 'Replaced by a newer card.' };
   if (p.state === 'uncertain') return { head: "Couldn't confirm the pull request opened", alert: true,
-    detail: `Check [the branch](https://github.com/${part(p.owner)}/${part(p.repo)}/tree/${part(p.head)}) on GitHub before asking again.` };
+    detail: `It may have opened. Look for it on GitHub before asking again${viewer === 'sender' ? ", so you don't get two" : ''}.` };
   // The sender's own card in a one-to-one chat carries an "Ask again" button in place of the instruction.
-  const reason = o?.kind === 'branch-moved' ? `The branch changed after you approved.${o.closed ? ` GitHub opened #${o.closed} at the new commit, so it was closed.` : ''}${askAgain(p, viewer) ? '' : ' Ask Orka again.'}` :
-    o?.kind === 'permission' ? `This GitHub account can't open pull requests in ${label(p.owner, 100)}/${label(p.repo, 100)}.` :
+  const reason = o?.kind === 'branch-moved' ? `The branch changed after you approved.${o.closed ? ` GitHub opened #${o.closed} at the new commit, so it was closed.` : ''}${askAgain(p, viewer) ? '' : ` ${AGAIN}`}` :
+    o?.kind === 'permission' ? `@${label(p.githubLogin, 39)} can't open pull requests in ${label(p.owner, 100)}/${label(p.repo, 100)}. Get access to the repository or link a different GitHub account, then ask again.` :
       o?.kind === 'signin-required' ? LINK_EXPIRED :
-        o?.kind === 'validation' ? `GitHub rejected the pull request details. ${again}` : o?.kind === 'failed' ? again : undefined;
+        o?.kind === 'validation' ? `GitHub rejected the pull request details. ${AGAIN}` :
+          o?.kind === 'failed' ? `Something went wrong before the pull request could be opened. ${AGAIN}` : undefined;
   return reason ? { head: 'Not opened', alert: true, detail: reason } : { head: 'This request is no longer pending.' };
 }
 /** The chat message "Ask again" sends as the sender, or nothing where a button can't send one: a group chat only hears messages that mention the bot. */
@@ -59,43 +79,57 @@ const ASK_AGAIN = /^Send a new approval card for the pull request(?: from [A-Za-
 /** Only the server-verified sender receives decision actions; invokes still recheck authority. */
 export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolean): IAdaptiveCard {
   const s = status(p, viewer, decisionsEnabled); const again = askAgain(p, viewer); const data = { proposal: p.id, rev: p.revision, digest: p.payloadDigest };
-  const compare = `https://github.com/${part(p.owner)}/${part(p.repo)}/compare/${p.baseSHA}...${p.headSHA}`;
-  const preview = p.body ? boundedLabel(p.body, 280) : { text: 'No description.', truncated: false }; const expanded = boundedLabel(p.body, 1800);
+  const repository = `https://github.com/${part(p.owner)}/${part(p.repo)}`; const compare = `${repository}/compare/${p.baseSHA}...${p.headSHA}`;
+  const start = opening(p.body); const preview = start ? boundedLabel(start, 280) : { text: 'No description.', truncated: false }; const expanded = boundedLabel(p.body, 1800);
+  const more = preview.truncated || start !== p.body.trim();
   const files = [...p.files].sort((a, b) => b.additions + b.deletions - a.additions - a.deletions).slice(0, 5);
+  const decide = decisionsEnabled && viewer === 'sender' && p.state === 'pending';
+  // The rest of the chat sees the note only once it has been sent on as a chat turn.
+  const note = p.state === 'revise-requested' && (viewer === 'sender' || p.revisionAdmission === 'delivered') ?
+    [line(`${viewer === 'sender' ? 'Your note' : `Note from ${label(p.displayName, 80)}`}: "${label(p.claim?.note ?? '', 2400)}"`, { spacing: 'Small' })] : [];
   // The viewer's Teams client turns TIME into its own local time. Agent text cannot: its braces are escaped.
   const expires = `Expires at {{TIME(${new Date(p.expiresAt).toISOString().slice(0, 19)}Z)}}`;
   const body: CardElement[] = [caption(`Pull request · ${label(p.owner, 100)}/${label(p.repo, 100)}`),
     line(s.head, { weight: 'Bolder', size: 'Medium', spacing: 'Small', ...(s.alert ? { color: 'Attention' } : {}) }),
-    ...(s.detail ? [line(s.detail, { spacing: 'Small' })] : []), ...(s.note ? [line(s.note, { isSubtle: true, size: 'Small', spacing: 'Small' })] : []),
-    ...(s.open ? [line(`${expires} · ${viewer === 'sender' ? `opens as @${label(p.githubLogin, 39)}` : `asked by ${label(p.displayName, 80)}`}`, { isSubtle: true, size: 'Small', spacing: 'Small' })] : []),
+    // What the sender has not seen comes before anything else they read.
+    ...(s.open && !p.filesComplete ? [line('GitHub returned only part of the file list. Check the full diff before approving.', { color: 'Attention', spacing: 'Small' })] : []),
+    ...(s.detail ? [line(s.detail, { spacing: 'Small' })] : []), ...(s.note ? [line(s.note, { isSubtle: true, size: 'Small', spacing: 'Small' })] : []), ...note,
+    ...(s.open ? [line(viewer === 'sender' ? expires : `${expires} · asked by ${label(p.displayName, 80)}`, { isSubtle: true, size: 'Small', spacing: 'Small' })] : []),
     // Everything the agent wrote sits in this one tinted box, under its caption.
     { type: 'Container', style: 'emphasis', spacing: 'Medium', items: [caption('Written by the agent'), line(label(p.title, 180), { weight: 'Bolder', spacing: 'Small' }),
-      ...(s.open ? [line(preview.text, { spacing: 'Small' })] : []),
-      ...(s.open && preview.truncated ? [{ type: 'ActionSet' as const, spacing: 'Small' as const, actions: [{ type: 'Action.ShowCard' as const, title: 'Show more',
-        card: { type: 'AdaptiveCard' as const, version: '1.5' as const, body: [caption('Written by the agent'), line(expanded.text, { spacing: 'Small' }),
-          ...(expanded.truncated ? [caption('Shortened to fit this card.')] : [])] } }] }] : [])] },
+      ...(s.open ? [line(preview.text, { spacing: 'Small' })] : [])] },
+    // Under the box, not in it: a button inside a tinted box is drawn filled, and only Approve should be.
+    ...(s.open && more ? [{ type: 'ActionSet' as const, spacing: 'Small' as const, actions: [{ type: 'Action.ShowCard' as const, title: 'Show full description',
+      card: { type: 'AdaptiveCard' as const, version: '1.5' as const, body: [caption('Written by the agent'), line(expanded.text, { spacing: 'Small' }),
+        ...(expanded.truncated ? [caption('Shortened to fit this card.')] : [])] } }] }] : []),
     ...(s.open ? [line(`${label(p.head, 180)} → ${label(p.base, 180)}`, { fontType: 'Monospace', size: 'Small', spacing: 'Medium' }),
-      line(`**${p.fileCount}${p.filesComplete ? '' : '+'} ${p.fileCount === 1 && p.filesComplete ? 'file' : 'files'}** · +${p.additions} −${p.deletions} · ${p.commits} ${p.commits === 1 ? 'commit' : 'commits'} · [View changes](${compare})`, { spacing: 'Small' }),
-      ...(p.filesComplete ? [] : [line('GitHub returned only part of the file list. Check the full diff before approving.', { color: 'Attention', size: 'Small', spacing: 'Small' })]),
+      line(`**${p.fileCount}${p.filesComplete ? '' : '+'} ${p.fileCount === 1 && p.filesComplete ? 'file' : 'files'}** · +${p.additions} −${p.deletions} · ${p.commits} ${p.commits === 1 ? 'commit' : 'commits'}`, { spacing: 'Small' }),
       ...files.map((f, i): CardElement => ({ type: 'ColumnSet', spacing: i ? 'None' : 'Small', columns: [
-        { type: 'Column', width: 'stretch', items: [line(label(f.path, 100), { fontType: 'Monospace', size: 'Small' })] },
+        { type: 'Column', width: 'stretch', items: [line(label(shortPath(f.path), 160), { fontType: 'Monospace', size: 'Small' })] },
         { type: 'Column', width: 'auto', items: [line(`+${f.additions} −${f.deletions}`, { isSubtle: true, size: 'Small' })] }] })),
-      ...(p.fileCount > files.length ? [caption(`and ${p.fileCount - files.length} more`)] : [])] : [])];
+      ...(p.fileCount > files.length ? [caption(`and ${p.filesComplete ? '' : 'at least '}${p.fileCount - files.length} more`)] : []),
+      ...(decide && !p.filesComplete ? [] : [line(`[View changes on GitHub](${compare})`, { spacing: 'Small' })]),
+      ...(viewer === 'sender' ? [line(`Opens on GitHub as @${label(p.githubLogin, 39)}`, { spacing: 'Medium' })] : []),
+      // With part of the list missing, reading the diff is the first button. It has its own row: four buttons don't fit a phone.
+      ...(decide && !p.filesComplete ? [{ type: 'ActionSet' as const, spacing: 'Small' as const, actions: [{ type: 'Action.OpenUrl' as const, title: 'View full diff', url: compare }] }] : [])] : [])];
   return { type: 'AdaptiveCard', version: '1.5', fallbackText: `Pull request: ${s.fallback ?? s.head}`, body,
     refresh: { action: { type: 'Action.Execute', verb: 'pr-refresh', data }, userIds: [p.senderMRI] },
-    actions: [...(decisionsEnabled && viewer === 'sender' && p.state === 'pending' ? [
+    actions: [...(decide ? [
       { type: 'Action.Execute' as const, title: 'Approve', style: 'positive' as const, verb: 'pr-approve', data },
-      { type: 'Action.ShowCard' as const, title: 'Revise', card: { type: 'AdaptiveCard' as const, version: '1.5' as const,
+      { type: 'Action.ShowCard' as const, title: 'Ask for changes', card: { type: 'AdaptiveCard' as const, version: '1.5' as const,
         body: [{ type: 'Input.Text' as const, id: 'note', isMultiline: true, maxLength: 2000, placeholder: 'What should change?' }],
         actions: [{ type: 'Action.Execute' as const, title: 'Send', verb: 'pr-revise', data }] } },
       { type: 'Action.Execute' as const, title: 'Reject', verb: 'pr-reject', data }] : []),
+      // The search lists any pull request already open from this branch.
+      ...(p.state === 'uncertain' ? [{ type: 'Action.OpenUrl' as const, title: 'Check on GitHub', url: `${repository}/pulls?q=is%3Apr+head%3A${part(p.head)}` }] : []),
       ...(again ? [{ type: 'Action.Submit' as const, title: 'Ask again', data: { msteams: { type: 'imBack' as const, value: again } } }] : []),
       ...(p.outcome?.kind === 'opened' ? [{ type: 'Action.OpenUrl' as const, title: 'Open pull request', url: p.outcome.url }] :
         s.open || p.state === 'superseded' ? [] : [{ type: 'Action.OpenUrl' as const, title: 'View changes', url: compare }])] };
 }
 /** A fixed notice for a card whose account link changed. It copies no proposal or account text. */
 export function pullRequestNotice(kind: 'signin-expired' | RevisionAdmission | undefined): IAdaptiveCard {
-  const s: Status = kind === 'signin-expired' ? { head: 'Not opened', detail: LINK_EXPIRED } : { ...revisionStatus(kind), detail: 'Details are hidden because you signed in again.' };
+  const hidden = 'Details are hidden because you signed in again.'; const r = kind === 'signin-expired' ? undefined : revisionStatus(kind);
+  const s: Status = r ? { ...r, detail: r.detail ? `${r.detail} ${hidden}` : hidden } : { head: 'Not opened', alert: true, detail: LINK_EXPIRED };
   return { type: 'AdaptiveCard', version: '1.5', fallbackText: `Pull request: ${s.head}`, body: [caption('Pull request'),
     line(s.head, { weight: 'Bolder', size: 'Medium', spacing: 'Small', ...(s.alert ? { color: 'Attention' } : {}) }), line(s.detail!, { spacing: 'Small' })] };
 }
@@ -112,12 +146,15 @@ export function cardInvokeResponse(input: unknown): { statusCode: 200; type: 'ap
     const text = (input: unknown) => { const t = object(input, ['type', 'text', 'wrap', 'weight', 'size', 'isSubtle', 'color', 'fontType', 'spacing']);
       if (t.type !== 'TextBlock' || t.wrap !== true) throw new Error(); string(t.text);
       only(t.weight, 'Bolder'); only(t.size, 'Medium', 'Small'); only(t.isSubtle, true); only(t.color, 'Attention'); only(t.fontType, 'Monospace'); only(t.spacing, 'None', 'Small', 'Medium'); };
-    // The agent's box: text, then at most one "Show more" that opens text only.
+    // The agent's box holds text only. Straight after it, at most one "Show full description" opens text only.
     const container = (input: unknown) => { const c = object(input, ['type', 'style', 'spacing', 'items']);
-      if (c.style !== 'emphasis' || c.spacing !== 'Medium') throw new Error();
-      list(c.items, 4, 1).forEach((item, i, items) => { if (!item || typeof item !== 'object' || !('type' in item) || item.type !== 'ActionSet') return text(item);
-        const s = object(item, ['type', 'spacing', 'actions']); const a = object(list(s.actions, 1, 1)[0], ['type', 'title', 'card']);
-        if (i !== items.length - 1 || s.spacing !== 'Small' || a.type !== 'Action.ShowCard' || a.title !== 'Show more') throw new Error(); validate(a.card, true); }); };
+      if (c.style !== 'emphasis' || c.spacing !== 'Medium') throw new Error(); list(c.items, 3, 1).forEach(text); };
+    const description = (input: unknown) => { const s = object(input, ['type', 'spacing', 'actions']); const a = object(list(s.actions, 1, 1)[0], ['type', 'title', 'card']);
+      if (s.spacing !== 'Small' || a.type !== 'Action.ShowCard' || a.title !== 'Show full description') throw new Error(); validate(a.card, true); };
+    const GITHUB = /^https:\/\/github\.com\/[A-Za-z0-9%_.-]+\/[A-Za-z0-9%_.-]+\/(?:(compare\/[A-Za-z0-9%_.-]+\.\.\.[a-f0-9]{40})|pull\/[1-9][0-9]*|pulls\?q=is%3Apr\+head%3A[A-Za-z0-9%_.-]+)$/u;
+    // The last body element may be one button to the full diff.
+    const diff = (input: unknown) => { const s = object(input, ['type', 'spacing', 'actions']); const a = object(list(s.actions, 1, 1)[0], ['type', 'title', 'url']);
+      if (s.spacing !== 'Small' || a.type !== 'Action.OpenUrl' || a.title !== 'View full diff' || typeof a.url !== 'string' || !GITHUB.exec(a.url)?.[1]) throw new Error(); };
     // One file: its path, then its line counts.
     const columns = (input: unknown) => { const s = object(input, ['type', 'spacing', 'columns']); only(s.spacing, 'None', 'Small');
       list(s.columns, 2, 2).forEach((column, i) => { const c = object(column, ['type', 'width', 'items']);
@@ -131,9 +168,12 @@ export function cardInvokeResponse(input: unknown): { statusCode: 200; type: 'ap
         const t = object(c.body[0], ['type', 'id', 'isMultiline', 'maxLength', 'placeholder']);
         if (t.type !== 'Input.Text' || t.id !== 'note' || t.isMultiline !== true || t.maxLength !== 2000 || t.placeholder !== 'What should change?') throw new Error();
       }
-      let boxes = 0;
-      for (const b of revision ? [] : c.body) { const type = b && typeof b === 'object' && 'type' in b ? b.type : undefined;
-        if (!nested && type === 'Container' && !boxes++) container(b); else if (!nested && type === 'ColumnSet') columns(b); else text(b); }
+      let boxes = 0; let box = -1;
+      const items: unknown[] = revision ? [] : c.body;
+      items.forEach((b, i) => { const type = b && typeof b === 'object' && 'type' in b ? b.type : undefined;
+        if (!nested && type === 'Container' && !boxes++) { container(b); box = i; } else if (!nested && type === 'ActionSet' && i === box + 1 && i) description(b);
+        else if (!nested && type === 'ActionSet' && i === items.length - 1) diff(b);
+        else if (!nested && type === 'ColumnSet') columns(b); else text(b); });
       if (c.actions !== undefined) {
         if (nested && !revision || !Array.isArray(c.actions) || c.actions.length > (revision ? 1 : 5)) throw new Error();
         for (const a of c.actions) { const v = object(a, ['type', 'title', ...(a.type === 'Action.ShowCard' ? ['card'] : a.type === 'Action.Execute' ? ['verb', 'data', ...(a.verb === 'pr-approve' ? ['style'] : [])] : a.type === 'Action.Submit' ? ['data'] : ['url'])]); string(v.title);
@@ -144,8 +184,8 @@ export function cardInvokeResponse(input: unknown): { statusCode: 200; type: 'ap
           } else if (v.type === 'Action.Execute') {
             const d = object(v.data, ['proposal', 'rev', 'digest']); only(v.style, 'positive');
             if (!(revision ? v.verb === 'pr-revise' && v.title === 'Send' : ['pr-approve', 'pr-reject'].includes(String(v.verb))) || d.rev !== 1 || !/^[a-f0-9]{64}$/u.test(String(d.proposal)) || !/^[a-f0-9]{64}$/u.test(String(d.digest))) throw new Error();
-          } else if (!nested && v.type === 'Action.ShowCard' && v.title === 'Revise') validate(v.card, true, true);
-          else if (nested || v.type !== 'Action.OpenUrl' || typeof v.url !== 'string' || !/^https:\/\/github\.com\/[A-Za-z0-9%_.-]+\/[A-Za-z0-9%_.-]+\/(?:compare\/[A-Za-z0-9%_.-]+\.\.\.[a-f0-9]{40}|pull\/[1-9][0-9]*)$/u.test(v.url)) throw new Error(); }
+          } else if (!nested && v.type === 'Action.ShowCard' && v.title === 'Ask for changes') validate(v.card, true, true);
+          else if (nested || v.type !== 'Action.OpenUrl' || typeof v.url !== 'string' || !GITHUB.test(v.url)) throw new Error(); }
       }
       if (c.refresh !== undefined) {
         if (nested) throw new Error(); const r = object(c.refresh, ['action', 'userIds']); const a = object(r.action, ['type', 'verb', 'data']); const d = object(a.data, ['proposal', 'rev', 'digest']);
