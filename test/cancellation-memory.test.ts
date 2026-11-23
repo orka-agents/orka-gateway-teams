@@ -8,19 +8,21 @@ type Sample = { scenario: 'idle' | 'dispatcher'; warmup: number; iterations: num
   rows?: number; pending?: number; kernelPending?: number; events?: number; routes?: number; seals?: number;
   indexBytes?: number; begins?: number; providerPosts?: number; callerListeners?: number };
 
+const stallMs = 60000;
+
 async function sample(t: TestContext, scenario: Sample['scenario']): Promise<Sample> {
   const child = fork(new URL('./support/cancellation-memory-worker.ts', import.meta.url), [scenario], {
-    execArgv: ['--expose-gc', '--import', 'tsx'], stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
-    // Hard process bound as well as the test timeout: even a broken drain cannot
-    // leave a worker running after the test runner has moved on.
-    timeout: 170000, killSignal: 'SIGKILL',
-  });
+    execArgv: ['--expose-gc', '--import', 'tsx'], stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
   let stderr = '';
   child.stderr!.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-4096); });
   const exited = new Promise<number | null>(resolve => child.once('exit', resolve));
-  t.after(async () => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited; });
+  // The worker needs about 100 s of CPU, so a limit on its total time fails on a busy
+  // machine. It reports every 500 calls (under a second of work) instead, and silence
+  // kills it: a broken drain still cannot leave a worker running or hold the runner.
+  const stalled = setTimeout(() => child.kill('SIGKILL'), stallMs);
+  t.after(async () => { clearTimeout(stalled); if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exited; });
   const result = await new Promise<Sample>((resolve, reject) => {
-    child.once('message', value => resolve(value as Sample));
+    child.on('message', value => { if ((value as { progress?: number }).progress === undefined) resolve(value as Sample); else stalled.refresh(); });
     child.once('error', () => reject(new Error('Cancellation memory worker failed to start')));
     child.once('exit', (code, signal) => reject(new Error(`Cancellation memory worker exited before reporting (${code ?? signal}): ${stderr}`)));
   });
@@ -41,7 +43,7 @@ function assertPlateau(result: Sample) {
   assert.ok(result.growth <= budget, `Completed cancellation scopes must plateau within ${budget} bytes: ${JSON.stringify(result)}`);
 }
 
-test('empty Table inbox idle-poll writes retain bounded cancellation memory with a live owner', { timeout: 180000 }, async t => {
+test('empty Table inbox idle-poll writes retain bounded cancellation memory with a live owner', async t => {
   const result = await sample(t, 'idle');
   assert.equal(result.pending, 0); assert.equal(result.kernelPending, 0); assert.equal(result.rows, 1);
   assert.equal(result.events, 0); assert.equal(result.routes, 0); assert.equal(result.seals, 0);
@@ -50,7 +52,7 @@ test('empty Table inbox idle-poll writes retain bounded cancellation memory with
   assertPlateau(result);
 });
 
-test('dispatcher receipt replays retain bounded cancellation memory with one live caller signal', { timeout: 180000 }, async t => {
+test('dispatcher receipt replays retain bounded cancellation memory with one live caller signal', async t => {
   const result = await sample(t, 'dispatcher');
   assert.equal(result.begins, 25000); assert.equal(result.providerPosts, 0); assert.equal(result.callerListeners, 0);
   assertPlateau(result);

@@ -26,7 +26,8 @@ async function retainedHeap() {
 async function repeat(count: number, operation: () => Promise<void>) {
   for (let i = 0; i < count; i++) {
     await operation();
-    if ((i + 1) % 500 === 0) await setImmediate();
+    // The parent test kills a worker that stops reporting progress.
+    if ((i + 1) % 500 === 0) { process.send!({ progress: i + 1 }); await setImmediate(); }
   }
 }
 
