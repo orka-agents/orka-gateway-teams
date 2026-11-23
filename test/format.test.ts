@@ -76,8 +76,9 @@ for (const [kind, expectedText] of [
       assert.equal(answerOf(card).text, expectedText);
       assert.ok(card.fallbackText?.includes(kind === 'final' ? expectedText : 'This request could not be completed.'));
       assert.equal(card.body?.length, kind === 'final' ? 1 : 2);
-      // Only text from Orka is fenced as the agent's.
-      assert.ok(!JSON.stringify(card).includes('Written by the agent'));
+      // Only text from Orka is fenced: our own sentence is a plain line, outside any box.
+      assert.deepEqual(card.body?.at(-1), { type: 'TextBlock', text: expectedText, wrap: true, spacing: 'Small' });
+      assert.ok(!JSON.stringify(card).includes('Container'));
     }
   });
 }

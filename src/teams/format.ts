@@ -35,8 +35,7 @@ export const formatDelivery: FormatDelivery = (delivery, presentation) => {
   // The explicit prefix changes presentation only, not wire or Task semantics.
   const asked = delivery.kind === 'message' && delivery.text.startsWith('Question: ') ? delivery.text.slice('Question: '.length) : '';
   const kind = delivery.kind === 'final' ? 'reply' : delivery.kind !== 'message' ? 'failure' : asked.trim() ? 'question' : 'update';
-  const title = kind === 'reply' ? 'Orka reply' : kind === 'failure' ? 'Orka could not complete the request' :
-    delivery.text.startsWith('Question: ') ? 'Orka question' : 'Orka update';
+  const title = kind === 'reply' ? 'Orka reply' : kind === 'failure' ? 'Orka could not complete the request' : kind === 'question' ? 'Orka question' : 'Orka update';
   // Text from Orka goes in the tinted box. A sentence of our own, used when there is none, does not.
   const written = kind === 'question' ? asked.charAt(0).toUpperCase() + asked.slice(1) :
     kind === 'failure' && delivery.text.trim() === NO_CAUSE ? '' : delivery.text.trim() ? delivery.text : '';

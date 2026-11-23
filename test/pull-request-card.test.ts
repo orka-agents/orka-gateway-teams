@@ -195,6 +195,19 @@ test('pending card in a shared chat: everyone but the sender gets the title, the
   assert.ok(!own.includes('opens as @'));
 });
 
+test('names: a sender Teams gave no name is "the sender", and a full-length GitHub login is never cut', () => {
+  const p = { ...proposalFixture(), displayName: ' ', githubLogin: `a${'-b'.repeat(19)}` }; const account = `@a${'\\-b'.repeat(19)}`;
+  const card = (q: Partial<Proposal>, viewer: 'room' | 'sender' = 'room') => texts(buildPullRequestCard({ ...p, ...q } as Proposal, viewer, true));
+  assert.deepEqual(card({}).slice(1, 3), ['Waiting for the sender to approve', `Expires at {{TIME(2027-01-15T09:00:00Z)}} · opens as ${account}`]);
+  assert.equal(card({}, 'sender').at(-1), `Opens on GitHub as ${account}`);
+  assert.equal(card({ state: 'opened', outcome: opened(p) })[2], `Approved by the sender · opened as ${account}`);
+  assert.equal(card({ state: 'opened', outcome: { ...opened(p), headSHA: 'c'.repeat(40) } })[1], "Opened #12 with changes the sender didn't approve");
+  assert.equal(card({ state: 'failed', outcome: { kind: 'signin-required' } })[2], "The sender's sign-in expired. Ask Orka again.");
+  assert.equal(card({ state: 'failed', outcome: { kind: 'permission' } })[2]!.startsWith(`${account} can't open`), true);
+  assert.equal(card({ state: 'revise-requested', revisionAdmission: 'pending', claim: claim(p, 'revise', 'x') })[1], "Sending the sender's changes…");
+  assert.ok(card({ state: 'revise-requested', revisionAdmission: 'delivered', claim: claim(p, 'revise', 'x') }).includes('Note from the sender: "x"'));
+});
+
 test('incomplete file list: the warning is directly under the heading, the count is a minimum, and the full diff is the sender\'s first button', () => {
   const p = { ...proposalFixture(), files: fiveFiles, fileCount: 300, filesComplete: false }; const compare = `https://github.com/example/project/compare/${p.baseSHA}...${p.headSHA}`;
   for (const viewer of ['sender', 'room'] as const) { const card = buildPullRequestCard(p, viewer, true); const body = card.body as any[];

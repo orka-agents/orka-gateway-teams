@@ -39,6 +39,8 @@ test('a room card says whose turn it is and whether the agent is done: working, 
     { type: 'TextBlock', text: 'Try again, or ask in a different way.', wrap: true, spacing: 'Small' }]);
   // A prefix with nothing after it is not a question, so nothing is stripped and no answer is asked for.
   assert.deepEqual(body('message', 'Question: '), [grey('Working for Ada'), box('Question: ')]);
+  // The fallback calls it what the card does.
+  assert.equal(formatDelivery({ ...finalDelivery, kind: 'message', text: 'Question: \t ' }, { requesterDisplayName: 'Ada' }).attachments[0].content.fallbackText, 'Orka update — Working for Ada: Question:');
   // Every kind says when it draws on the chat's earlier turns, and the fallback carries the same caption.
   for (const [kind, text, caption] of [['message', 'Reading.', 'Working for Ada'], ['message', 'Question: which?', 'Question for Ada'], ['final', 'Done.', 'Reply to Ada'], ['error', 'It failed.', 'Reply to Ada']] as const)
     assert.deepEqual(body(kind, text, true)[0], grey(`${caption} · uses this chat's history`));
