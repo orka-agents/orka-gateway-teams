@@ -146,7 +146,11 @@ test('abort and deadline destroy actual held native request and socket before co
   const controller = new AbortController(); const pending = table.get(key, { ...context(), signal: controller.signal });
   await eventually(() => f.stats.requests === 1); controller.abort(); await assert.rejects(pending, code('unavailable'));
   assert.equal(f.stats.socketCloses, 1); assert.equal(f.stats.requestCloses, 1);
-  await assert.rejects(table.get(key, context(40)), code('unavailable')); assert.equal(f.stats.socketCloses, 2);
+  // Hold the clock until the request arrives: a slow start would otherwise use up the
+  // 40 ms first and the deadline would pass with no request or socket to destroy.
+  const held = performance.now(); const clock = t.mock.method(performance, 'now', () => held);
+  const expired = table.get(key, context(40)); await eventually(() => f.stats.requests === 2); clock.mock.restore();
+  await assert.rejects(expired, code('unavailable')); assert.equal(f.stats.socketCloses, 2);
   const hanging = table.get(key, context()).catch(e => e); await eventually(() => f.stats.requests === 3); await table.close();
   assert.ok(code('unavailable')(await hanging)); assert.equal(f.stats.socketCloses, 3);
 });
