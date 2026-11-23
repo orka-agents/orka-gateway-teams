@@ -17,8 +17,10 @@ const longBody = 'First paragraph of the description. '.repeat(20);
 const fiveFiles = [['a.ts', 1, 0], ['dir/big.ts', 90, 30], ['c.ts', 4, 4], ['d.ts', 0, 2], ['e.ts', 50, 0], ['f.ts', 10, 10], ['g.ts', 3, 0]]
   .map(([path, additions, deletions]) => ({ path: String(path), additions: Number(additions), deletions: Number(deletions) }));
 
+const GROUP = '19:0123456789abcdef0123456789abcdef@thread.v2';
+const inGroup = (p: Proposal): Proposal => ({ ...p, conversationId: GROUP, route: { ...p.route, conversation: { ...p.route.conversation, id: GROUP, conversationType: 'groupChat' } } as Proposal['route'] });
 /** Every card state the gateway can show, with the heading, the lines under it and the buttons each one must have. */
-function states(): { name: string; p: Proposal; viewer?: 'room'; enabled?: false; head: string; alert?: true; lines?: string[]; buttons: string[] }[] {
+function states(): { name: string; p: Proposal; viewer?: 'room'; enabled?: false; newerCard?: string; head: string; alert?: true; lines?: string[]; buttons: string[] }[] {
   const p = proposalFixture(); const revise = (revisionAdmission: NonNullable<Proposal['revisionAdmission']>): Proposal =>
     ({ ...p, state: 'revise-requested', revisionAdmission, claim: claim(p, 'revise', 'Cap retries at 5') });
   const failed = (kind: 'branch-moved' | 'permission' | 'signin-required' | 'validation' | 'failed'): Proposal => ({ ...p, state: kind === 'branch-moved' ? 'branch-moved' : 'failed', outcome: { kind } });
@@ -50,7 +52,16 @@ function states(): { name: string; p: Proposal; viewer?: 'room'; enabled?: false
     { name: 'revise sign-in', p: revise('signin-required'), head: 'Changes not sent', alert: true, lines: ['Your sign-in expired. Sign in, then send your note to Orka in the chat.', note], buttons: ['View changes'] },
     { name: 'expired', p: { ...p, state: 'expired' }, head: 'Expired', lines: ['Nothing was opened. Ask Orka again.'], buttons: ['View changes'] },
     { name: 'superseded', p: { ...p, state: 'superseded' }, head: 'Replaced by a newer card.', buttons: [] },
+    { name: 'superseded, newer card known', p: { ...inGroup(p), state: 'superseded' }, newerCard: '1700000000000', head: 'Replaced by a newer card.', buttons: ['Go to newer card'] },
+    { name: 'superseded, newer card known, room', p: { ...inGroup(p), state: 'superseded' }, newerCard: '1700000000000', viewer: 'room', head: 'Replaced by a newer card.', buttons: ['Go to newer card'] },
+    // A record saved before the cause existed keeps the sentence it had.
     { name: 'failed', p: failed('failed'), head: 'Not opened', alert: true, lines: ['Something went wrong before the pull request could be opened. Ask Orka again.'], buttons: ['View changes'] },
+    { name: 'failed, GitHub gave no answer', p: { ...p, state: 'failed', outcome: { kind: 'failed', cause: 'github' } }, head: 'Not opened', alert: true,
+      lines: ["GitHub didn't respond. Nothing was opened. Ask Orka again."], buttons: ['View changes'] },
+    { name: 'failed, gateway stopped', p: { ...p, state: 'failed', outcome: { kind: 'failed', cause: 'gateway' } }, head: 'Not opened', alert: true,
+      lines: ['Something went wrong on our side. Nothing was opened. Ask Orka again.'], buttons: ['View changes'] },
+    { name: 'failed, gateway stopped, room', p: { ...p, state: 'failed', outcome: { kind: 'failed', cause: 'gateway' } }, viewer: 'room', head: 'Not opened', alert: true,
+      lines: ['Something went wrong on our side. Nothing was opened. Ask Orka again.'], buttons: ['View changes'] },
     { name: 'failed permission', p: failed('permission'), head: 'Not opened', alert: true,
       lines: ["@example\\-sender can't open pull requests in example/project. Get access to the repository or link a different GitHub account, then ask again."], buttons: ['View changes'] },
     { name: 'branch moved', p: failed('branch-moved'), head: 'Not opened', alert: true, lines: ['The branch changed after you approved.'], buttons: ['Ask again', 'View changes'] },
@@ -70,7 +81,7 @@ function states(): { name: string; p: Proposal; viewer?: 'room'; enabled?: false
   ];
 }
 for (const s of states()) test(`card state: ${s.name}`, () => {
-  const p = { ...s.p, body: longBody, files: fiveFiles, fileCount: 7 }; const card = buildPullRequestCard(p, s.viewer ?? 'sender', s.enabled ?? true);
+  const p = { ...s.p, body: longBody, files: fiveFiles, fileCount: 7 }; const card = buildPullRequestCard(p, s.viewer ?? 'sender', s.enabled ?? true, s.newerCard);
   const pending = p.state === 'pending'; const [caption, head, ...rest] = card.body as any[];
   // The first two lines are always ours: where it is, then the question or the outcome.
   assert.deepEqual(caption, { type: 'TextBlock', text: 'Pull request · example/project', wrap: true, isSubtle: true, size: 'Small', spacing: 'None' });
@@ -258,6 +269,15 @@ for (const [name, target] of Object.entries(part)) test(`projection rejects an u
   assert.ok(response(full()));
 });
 
+const newerUrl = `https://teams.microsoft.com/l/message/${GROUP}/1700000000000?context=%7B%22contextType%22:%22chat%22%7D`;
+/** Teams addresses that are not one message in one chat. */
+const otherTeamsLinks = [
+  newerUrl.replace('https://teams.microsoft.com', 'https://teams.microsoft.com.evil.invalid'), newerUrl.replace('https:', 'http:'), newerUrl.replace('https:', 'msteams:'),
+  newerUrl.replace('/l/message/', '/l/chat/'), newerUrl.replace('/l/message/', '/l/app/'), newerUrl.replace('1700000000000', '1700000000000/extra'), newerUrl.replace('1700000000000', 'abc'),
+  newerUrl.replace(GROUP, 'a:1abcDEF'), newerUrl.replace(GROUP, '19:general@thread.tacv2'), newerUrl.replace(GROUP, '19:a@thread.v2/19:b@thread.v2'), newerUrl.replace(GROUP, '19:a%2F..%2Fb@thread.v2'),
+  `${newerUrl}&tenantId=x`, `${newerUrl}#x`, newerUrl.replace('?context=%7B%22contextType%22:%22chat%22%7D', ''), newerUrl.replace('chat%22', 'channel%22'),
+  newerUrl.replace('?context=', '?users=28:bot&context='), 'https://teams.microsoft.com/l/chat/0/0?users=28:bot&message=hello',
+];
 test('projection rejects every value the builder does not use', () => {
   const mutations: [string, (c: any) => void][] = [
     ['text weight', c => { part.head(c).weight = 'Lighter'; }], ['text size', c => { part.head(c).size = 'ExtraLarge'; }], ['text colour', c => { part.head(c).color = 'Good'; }],
@@ -297,6 +317,9 @@ test('projection rejects every value the builder does not use', () => {
     ['second revise action', c => { part.revise(c).card.actions.push(part.approve(c)); }], ['revise card with text', c => { part.revise(c).card.body.push(part.head(c)); }],
     ['link elsewhere', c => { c.actions = [{ type: 'Action.OpenUrl', title: 'View changes', url: 'https://github.com.evil.invalid/a/b/pull/1' }]; }],
     ['link to another GitHub page', c => { c.actions = [{ type: 'Action.OpenUrl', title: 'View changes', url: 'https://github.com/a/b/settings' }]; }],
+    ['newer card link under another title', c => { c.actions = [{ type: 'Action.OpenUrl', title: 'View changes', url: newerUrl }]; }],
+    ['GitHub link under the newer card title', c => { c.actions = [{ type: 'Action.OpenUrl', title: 'Go to newer card', url: 'https://github.com/a/b/pull/1' }]; }],
+    ...otherTeamsLinks.map((url): [string, (c: any) => void] => [`newer card link: ${url}`, c => { c.actions = [{ type: 'Action.OpenUrl', title: 'Go to newer card', url }]; }]),
     ['six actions', c => { c.actions.push(...[1, 2, 3].map(n => ({ type: 'Action.OpenUrl', title: 'x', url: `https://github.com/a/b/pull/${n}` }))); }],
     ['33 body elements', c => { while (c.body.length < 33) c.body.push(part.head(c)); }], ['card version', c => { c.version = '1.4'; }],
     ['two refresh users', c => { c.refresh.userIds.push('29:other'); }], ['other refresh verb', c => { c.refresh.action.verb = 'pr-approve'; }], ['refresh key', c => { c.refresh.expires = '2030-01-01T00:00:00Z'; }],
@@ -311,5 +334,21 @@ test('projection accepts each allowed value, so the rejections above are not acc
     (c: any) => { part.head(c).color = 'Attention'; }, (c: any) => { part.head(c).size = 'Small'; part.head(c).spacing = 'Medium'; part.head(c).fontType = 'Monospace'; part.head(c).isSubtle = true; },
     (c: any) => { c.actions = [{ type: 'Action.OpenUrl', title: 'Open pull request', url: 'https://github.com/a/b/pull/1' }]; }, (c: any) => { delete c.actions; delete c.refresh; delete c.fallbackText; },
     (c: any) => { c.actions = [{ type: 'Action.OpenUrl', title: 'Check on GitHub', url: 'https://github.com/a/b/pulls?q=is%3Apr+head%3Aorka%2Ffix' }]; }, (c: any) => { c.body.pop(); },
+    (c: any) => { c.actions = [{ type: 'Action.OpenUrl', title: 'Go to newer card', url: newerUrl }]; },
+    (c: any) => { c.actions = [{ type: 'Action.OpenUrl', title: 'Go to newer card', url: newerUrl.replace(GROUP, '19:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa_bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb@unq.gbl.spaces') }]; },
   ]) { const card = full(); mutate(card); assert.ok(response(card)); }
+});
+
+test('a replaced card links to the newer card only where Teams documents a message link, and only once it is replaced', () => {
+  const p = proposalFixture(); const replaced: Proposal = { ...inGroup(p), state: 'superseded' };
+  const link = (card: { actions?: any[] }) => card.actions?.find(a => a.title === 'Go to newer card');
+  assert.deepEqual(link(buildPullRequestCard(replaced, 'sender', true, '1700000000000')), { type: 'Action.OpenUrl', title: 'Go to newer card', url: newerUrl });
+  // A one-to-one chat with a bot reaches the gateway under an ID Teams does not accept in a message link.
+  for (const chat of ['a:1abcDEF_ghi', 'chat-private', '19:general@thread.tacv2', '19:x@thread.v2/../y', `${GROUP}?x=1`])
+    assert.equal(link(buildPullRequestCard({ ...replaced, conversationId: chat }, 'sender', true, '1700000000000')), undefined, chat);
+  for (const message of [undefined, '', 'abc', '17/00', '1'.repeat(21), '1700000000000?x=1'])
+    assert.equal(link(buildPullRequestCard(replaced, 'sender', true, message)), undefined, String(message));
+  // A card that was not replaced never links to another one.
+  for (const state of ['pending', 'approving', 'expired', 'rejected', 'failed'] as const)
+    assert.equal(link(buildPullRequestCard({ ...replaced, state }, 'sender', true, '1700000000000')), undefined, state);
 });

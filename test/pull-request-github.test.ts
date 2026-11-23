@@ -38,3 +38,31 @@ test('findPullRequest validates repository refs URLs and uniqueness across pages
   f.behavior((_req, res) => res.end(JSON.stringify([{ ...f.result(), html_url: 'https://evil.invalid/' }])));
   await assert.rejects(f.github.findPullRequest(f.p, 'TOKEN_PRIVATE', context(), true));
 });
+
+test('no-response is reported only when GitHub gave no answer: a server error or a dropped connection, never an answer the gateway did not expect or its own stop', async t => {
+  const f = await setup(t); const code = async (work: Promise<unknown>) => { try { await work; return 'none'; } catch (e: any) { return e.code as string; } };
+  for (const status of [500, 502, 503]) {
+    f.behavior((_req, res) => { res.statusCode = status; res.end('{}'); });
+    assert.equal(await code(f.github.readHead(f.p, 'TOKEN_PRIVATE', context())), 'no-response', String(status));
+  }
+  // A proxy's error page is not JSON; it is still no answer from GitHub.
+  f.behavior((_req, res) => { res.statusCode = 502; res.setHeader('content-type', 'text/html'); res.end('<html></html>'); });
+  assert.equal(await code(f.github.readHead(f.p, 'TOKEN_PRIVATE', context())), 'no-response');
+  f.behavior((_req, res) => { res.destroy(); });
+  assert.equal(await code(f.github.findPullRequest(f.p, 'TOKEN_PRIVATE', context())), 'no-response');
+  f.behavior((_req, res) => { res.write('[{"number"'); setImmediate(() => res.destroy()); });
+  assert.equal(await code(f.github.findPullRequest(f.p, 'TOKEN_PRIVATE', context())), 'no-response');
+  // GitHub answered: a deleted branch, a rate limit, an unexpected body.
+  for (const [status, body] of [[404, '{"message":"Not Found"}'], [403, '{"message":"API rate limit exceeded"}'], [200, '{"ref":"refs/heads/other"}'], [200, 'not json']] as const) {
+    f.behavior((_req, res) => { res.statusCode = status; res.end(body); });
+    assert.equal(await code(f.github.readHead(f.p, 'TOKEN_PRIVATE', context())), 'unavailable', `${status} ${body}`);
+  }
+  f.behavior((_req, res) => { res.statusCode = 401; res.end('{}'); });
+  assert.equal(await code(f.github.readHead(f.p, 'TOKEN_PRIVATE', context())), 'unauthorized');
+  // The gateway's own stop while GitHub is still working is not GitHub's silence.
+  const stop = new AbortController(); f.behavior(() => { stop.abort(); });
+  assert.equal(await code(f.github.readHead(f.p, 'TOKEN_PRIVATE', { ...context(), signal: stop.signal })), 'unavailable');
+  // Nor is a deadline of the gateway's own that is shorter than the request's eight seconds.
+  f.behavior(() => { /* never answers */ });
+  assert.equal(await code(f.github.readHead(f.p, 'TOKEN_PRIVATE', { ...context(), deadline: performance.now() + 200 })), 'unavailable');
+});

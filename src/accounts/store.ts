@@ -272,13 +272,21 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
       child.binding.taskUID !== taskUID || child.binding.namespaceUID !== grant.binding.namespaceUID || child.binding.gatewayUID !== grant.binding.gatewayUID) return undefined;
     return { ...grant, binding: child.binding };
   }
-  async function proposalVersion(id: string, c: DirectoryContext): Promise<ProposalVersion | undefined> {
+  async function proposalVersion(id: string, c: DirectoryContext, link = false): Promise<ProposalVersion | undefined> {
     const row = await read(proposalKey(id), c); if (row?.value.kind !== 'proposal') return undefined;
     let p = row.value.proposal; const selector = (await read(selectorKey(proposalSelectorId(p)), c))?.value;
     const selected = selector?.kind === 'proposal-selector' && selector.proposalId === p.id && selector.revision === p.revision;
     if (p.state === 'pending') p = selected && selector.state === 'claimed' ? projectClaim(p, selector.claim!) :
       { ...p, state: !selected ? 'superseded' : now() >= p.expiresAt ? 'expired' : 'pending' };
-    return { proposal: p, etag: row.etag, ...(p.claim && !row.value.proposal.claim ? { needsProjection: true as const } : {}) };
+    // The selector names the newest card this person has in this chat, so a replaced card can point at it.
+    // Only a card needs it, and a card without the link is still right, so a failed read is not a failed proposal.
+    // It gets one second at most, so a slow read can't use up the time the card itself has left.
+    let newerCard: string | undefined;
+    if (link && p.state === 'superseded' && selector?.kind === 'proposal-selector' && selector.proposalId !== p.id) try {
+      const brief = { ...c, signal: AbortSignal.any([c.signal, AbortSignal.timeout(1000)]), deadline: Math.min(c.deadline, performance.now() + 1000) };
+      const newer = (await read(proposalKey(selector.proposalId), brief))?.value; if (newer?.kind === 'proposal') newerCard = newer.proposal.cardActivityId;
+    } catch { /* No link. */ }
+    return { proposal: p, etag: row.etag, ...(p.claim && !row.value.proposal.claim ? { needsProjection: true as const } : {}), ...(newerCard ? { newerCard } : {}) };
   }
   const proposalWriteId = (p: Proposal) => proposalHash(['teams-proposal-write-v1', p.id, p.revision, p.payloadDigest]);
   async function approved(p: Proposal, c: DirectoryContext) {
@@ -347,7 +355,7 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
         await persist(row, { ...row.value, state: 'done', outcome: proposalOutcome(p, outcome) }, c);
       });
     },
-    getProposal(id: string, ctx: DirectoryContext): Promise<ProposalVersion | undefined> { return run(ctx, c => proposalVersion(id, c)); },
+    getProposal(id: string, ctx: DirectoryContext): Promise<ProposalVersion | undefined> { return run(ctx, c => proposalVersion(id, c, true)); },
     reserveProposal(input: Proposal, operation: string, ctx: DirectoryContext): Promise<Proposal> {
       return run(ctx, async c => {
         const p = decodeProposal(structuredClone(input));

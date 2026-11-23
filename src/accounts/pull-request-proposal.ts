@@ -13,15 +13,20 @@ export interface ClaimEvidence { decision: 'approve' | 'reject' | 'revise'; tena
   decidedAt: number; note?: string; revisionReplyTarget?: string }
 export type RevisionAdmission = 'pending' | 'delivered' | 'full' | 'signin-required' | 'conflict';
 export type ProposalResult = { kind: 'opened'; number: number; url: string; headSHA: string; existing?: true };
-/** `closed` is the pull request GitHub opened at a commit that wasn't approved, which the gateway then closed. */
-export type ProposalOutcome = ProposalResult | { kind: 'branch-moved'; closed?: number } | { kind: 'permission' | 'signin-required' | 'validation' | 'failed' | 'uncertain' };
+/**
+ * `closed` is the pull request GitHub opened at a commit that wasn't approved, which the gateway then closed.
+ * `cause` is set only when the gateway knows it: GitHub gave no answer, or the gateway itself stopped. Records saved before it existed have none.
+ */
+export type ProposalOutcome = ProposalResult | { kind: 'branch-moved'; closed?: number } | { kind: 'failed'; cause?: 'github' | 'gateway' } |
+  { kind: 'permission' | 'signin-required' | 'validation' | 'uncertain' };
 export interface Proposal extends ProposalOrigin, ProposalFacts {
   id: string; revision: 1; state: 'pending' | 'approving' | 'opened' | 'rejected' | 'revise-requested' | 'superseded' | 'expired' | 'branch-moved' | 'failed' | 'uncertain';
   appId: string; tenantId: string; generation: number; githubGeneration: number; targetId: string; targetDigest: string; grantRef: string; taskUID: string;
   owner: string; repo: string; base: string; head: string; title: string; body: string; createdAt: number; expiresAt: number; payloadDigest: string;
   claim?: ClaimEvidence; revisionAdmission?: RevisionAdmission; cardActivityId?: string; prNumber?: number; prUrl?: string; outcome?: ProposalOutcome;
 }
-export interface ProposalVersion { proposal: Proposal; etag: string; needsProjection?: true }
+/** `newerCard` is the message that holds the card which replaced a superseded one. It is read from the newer proposal, never saved on this one. */
+export interface ProposalVersion { proposal: Proposal; etag: string; needsProjection?: true; newerCard?: string }
 export interface ProposalSelector { id: string; objectId: string; generation: number; proposalId: string; revision: 1;
   state: 'pending' | 'claimed'; claim?: ClaimEvidence }
 export const proposalHash = (v: unknown) => createHash('sha256').update(canonicalJSON(v)).digest('hex');
@@ -87,11 +92,12 @@ export function decodeProposal(input: unknown): Proposal {
   return p;
 }
 export function proposalOutcome(p: Pick<Proposal, 'owner' | 'repo'>, input: unknown): ProposalOutcome {
-  const v = object(input, ['kind', 'number', 'url', 'headSHA', 'existing', 'closed']);
+  const v = object(input, ['kind', 'number', 'url', 'headSHA', 'existing', 'closed', 'cause']);
   if (v.kind === 'opened') {
     integer(v.number, 1, Number.MAX_SAFE_INTEGER);
-    if ('closed' in v || v.url !== `https://github.com/${p.owner}/${p.repo}/pull/${v.number}` || typeof v.headSHA !== 'string' || !/^[a-f0-9]{40}$/u.test(v.headSHA) || v.existing !== undefined && v.existing !== true) throw new Error('Invalid result');
+    if ('closed' in v || 'cause' in v || v.url !== `https://github.com/${p.owner}/${p.repo}/pull/${v.number}` || typeof v.headSHA !== 'string' || !/^[a-f0-9]{40}$/u.test(v.headSHA) || v.existing !== undefined && v.existing !== true) throw new Error('Invalid result');
   } else if (v.kind === 'branch-moved' && v.closed !== undefined) { integer(v.closed, 1, Number.MAX_SAFE_INTEGER); if (Object.keys(v).length !== 2) throw new Error('Invalid outcome');
+  } else if (v.kind === 'failed' && v.cause !== undefined) { if (v.cause !== 'github' && v.cause !== 'gateway' || Object.keys(v).length !== 2) throw new Error('Invalid outcome');
   } else if (!['branch-moved', 'permission', 'signin-required', 'validation', 'failed', 'uncertain'].includes(String(v.kind)) || Object.keys(v).length !== 1) throw new Error('Invalid outcome');
   return v as unknown as ProposalOutcome;
 }

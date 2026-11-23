@@ -183,3 +183,29 @@ test('approval opens the pull request under an owner wildcard, and Reject needs 
   await denied.decide(g.p, 'reject', 'invoke', g.ctx()); assert.equal((await g.settled()).state, 'rejected');
   assert.equal(g.requests.length, 0); assert.deepEqual(g.logs, []);
 });
+
+test('a failed approval records its cause only when the gateway knows it', async t => {
+  const answer = (f: Awaited<ReturnType<typeof decisionsFixture>>, head: (res: import('node:http').ServerResponse) => void) =>
+    f.behavior((req, res) => { if (req.path === '/user') return void res.end('{"id":123}'); head(res); });
+  // GitHub gave no answer to the branch read.
+  for (const head of [(res: import('node:http').ServerResponse) => { res.statusCode = 503; res.end('{}'); }, (res: import('node:http').ServerResponse) => { res.destroy(); }]) {
+    const f = await decisionsFixture(t); answer(f, head); await f.decide(); const p = await f.settled();
+    assert.equal(p.state, 'failed'); assert.deepEqual(p.outcome, { kind: 'failed', cause: 'github' });
+    assert.ok(f.requests.every(r => r.method === 'GET')); assert.deepEqual(f.replies.at(-1)?.outcome, { kind: 'failed', cause: 'github' });
+  }
+  // GitHub answered, but not with the branch: the gateway cannot say whose fault it is, so it names no cause.
+  const g = await decisionsFixture(t); answer(g, res => { res.statusCode = 404; res.end('{"message":"Not Found"}'); });
+  await g.decide(); assert.deepEqual((await g.settled()).outcome, { kind: 'failed' });
+  // The repository left the allowed list after the card was posted: a refusal, not a fault.
+  const h = await decisionsFixture(t); await h.make(h.store, undefined, [{ id: 'tools', githubRepositories: ['example/other'] }]).decide(h.p, 'approve', 'invoke', h.ctx());
+  assert.deepEqual((await h.settled()).outcome, { kind: 'failed' }); assert.equal(h.requests.length, 0);
+  // The gateway's own storage failed before anything was asked of GitHub.
+  const s = await decisionsFixture(t);
+  const store = Object.create(s.gh, { acquire: { value: async () => { throw new Error('storage'); } } }) as typeof s.gh;
+  const { createPullRequestService } = await import('../src/accounts/pull-request-service.js');
+  const service = createPullRequestService({ accounts: s.store, githubAccounts: store, github: s.github, scope: { appId: s.p.appId, tenantId: s.p.tenantId }, now: s.now,
+    targets: [{ id: 'tools', githubRepositories: ['example/project'] }], postProposal: async () => 'delivered',
+    decisions: { authority: s.authority, connected: async () => true, postDecision: async p => { s.replies.push(structuredClone(p)); } } });
+  t.after(() => service.close()); await service.decide(s.p, 'approve', 'invoke', s.ctx());
+  assert.deepEqual((await s.settled()).outcome, { kind: 'failed', cause: 'gateway' }); assert.equal(s.requests.length, 0);
+});

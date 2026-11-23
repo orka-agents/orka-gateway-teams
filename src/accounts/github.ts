@@ -10,6 +10,7 @@ import type { GitHubTool } from './grants.js';
 import type { Proposal, ProposalFacts, ProposalResult } from './pull-request-proposal.js';
 
 /** step is a fixed proposal-read stage for logs, never a value. */
+/** `no-response` means GitHub gave no answer: a request ran out its eight seconds, the connection dropped, or GitHub returned a server error. */
 export class GitHubError extends Error { constructor(readonly code = 'unavailable', readonly step?: string) { super('GitHub sign-in unavailable'); } }
 export function githubArguments(tool: GitHubTool, input: unknown): Record<string, string> {
   const keys = tool === 'github-read-file' ? ['path', 'ref'] : tool === 'github-list-issues' ? ['state'] : tool === 'github-read-issue' ? [] :
@@ -79,14 +80,17 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
     const body = api?.body ? Buffer.from(JSON.stringify(api.body)) : userToken ? undefined : Buffer.from(new URLSearchParams({ client_id: config.clientId, client_secret: config.clientSecret, ...fields }).toString());
     return new Promise((resolve, reject) => {
       let req: ClientRequest | undefined; let requestClosed = false; let socketClosed = true;
-      let result: unknown; let failed = false; let reason = failure();
+      let result: unknown; let failed = false; let reason = failure(); let silent = false;
       const finish = () => {
         if (!requestClosed || !socketClosed) return;
         clearTimeout(timer); ctx.signal.removeEventListener('abort', abort); shutdown.signal.removeEventListener('abort', abort);
-        if (result !== undefined && !failed) resolve(result); else reject(reason);
+        if (result !== undefined && !failed) resolve(result); else reject(silent && reason.code === 'unavailable' ? new GitHubError('no-response') : reason);
       };
       const abort = () => { failed = true; req?.destroy(); };
-      const timer = setTimeout(abort, Math.max(1, Math.min(8000, ctx.deadline - performance.now()))); timer.unref();
+      // Only a failure the gateway did not cause itself counts as GitHub's silence.
+      const dropped = () => { if (!failed) silent = true; abort(); };
+      const wait = Math.max(1, Math.min(8000, ctx.deadline - performance.now()));
+      const timer = setTimeout(() => { if (wait === 8000) dropped(); else abort(); }, wait); timer.unref();
       ctx.signal.addEventListener('abort', abort, { once: true }); shutdown.signal.addEventListener('abort', abort, { once: true });
       try {
         active(ctx);
@@ -96,11 +100,12 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
             ...(userToken ? { Authorization: `Bearer ${userToken}`, 'User-Agent': 'orka-gateway-teams', 'X-GitHub-Api-Version': '2026-03-10' } : {}),
             ...(body ? { 'Content-Type': api ? 'application/json' : 'application/x-www-form-urlencoded', 'Content-Length': body.length } : {}) } }, res => {
           const chunks: Buffer[] = []; let size = 0;
-          res.on('error', abort); res.on('aborted', abort);
+          res.on('error', dropped); res.on('aborted', dropped);
           res.on('data', (b: Buffer) => { size += b.length; if (size > maxResponseBytes) abort(); else chunks.push(b); });
           res.on('end', () => {
             try {
               active(ctx);
+              if (api && (res.statusCode ?? 0) >= 500) throw new GitHubError('no-response');
               if (!res.complete || res.headers['content-encoding'] !== undefined && res.headers['content-encoding'] !== 'identity' ||
                 !/^application\/json(?:\s*;\s*charset=utf-8)?$/iu.test(res.headers['content-type'] ?? '')) throw failure();
               const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)));
@@ -114,7 +119,7 @@ export function createGitHub(input: { clientId: string; clientSecret: string; pu
           });
         });
         req.once('socket', socket => { socketClosed = false; socket.once('close', () => { socketClosed = true; finish(); }); });
-        req.once('error', () => { failed = true; }); req.once('close', () => { requestClosed = true; finish(); });
+        req.once('error', dropped); req.once('close', () => { requestClosed = true; finish(); });
         active(ctx); req.end(body);
       } catch { abort(); if (!req) { requestClosed = true; finish(); } }
     });

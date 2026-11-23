@@ -382,6 +382,19 @@ test('uncertain_card_send_never_resends_after_restart and refresh scopes identit
   assert.equal((await restarted.cardAction!({ ...input, conversation: { ...input.conversation, id: 'foreign' } }, context())).status, 403);
   assert.equal((await restarted.cardAction!({ ...input, value: { action: { ...input.value.action, verb: 'pr-approve' } } }, context())).status, 403);
   p.state = 'superseded'; assert.match(JSON.stringify((await restarted.cardAction!(input, context())).body), /Replaced/);
+  // Once the newer card's message is known, the refreshed card links to it, for the sender and for anyone else in the chat. No other state does.
+  const group = '19:0123456789abcdef0123456789abcdef@thread.v2'; await f.provision('primary', group, 'groupChat');
+  const moved = { ...p, conversationId: group, route: { ...p.route, conversation: { ...p.route.conversation, id: group } } } as typeof p; let newerCard: string | undefined = '1700000000000';
+  d.delegated.accounts.getProposal = async () => ({ proposal: moved, etag: 'W/"1"', ...(newerCard ? { newerCard } : {}) });
+  const there = { ...input, conversation: { ...input.conversation, id: group } }; const link = `https://teams.microsoft.com/l/message/${group}/1700000000000?context=%7B%22contextType%22:%22chat%22%7D`;
+  const urls = async (action = there, ctx = context()) => { const r = await restarted.cardAction!(action, ctx); assert.equal(r.status, 200);
+    return ((r.body as any).cardInvokeResponse.value.actions as any[]).filter(a => a.type === 'Action.OpenUrl').map(a => a.url); };
+  assert.deepEqual(await urls(), [link]);
+  assert.deepEqual(await urls({ ...there, from: { id: '29:other', aadObjectId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' } },
+    { ...context(), subject: { ...context().subject, objectId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', chatKind: 'groupChat' } }), [link]);
+  newerCard = undefined; assert.deepEqual(await urls(), []);
+  newerCard = '1700000000000'; moved.state = 'expired'; assert.equal((await urls()).includes(link), false);
+  d.delegated.accounts.getProposal = async () => ({ proposal: p, etag: 'W/"1"' });
   p.state = 'expired'; assert.match(JSON.stringify((await restarted.cardAction!(input, context())).body), /Expired/);
   f.policy({ kind: 'no-access', text: '' }); assert.equal((await restarted.cardAction!(input, context())).status, 403);
 });

@@ -19,6 +19,13 @@ const caption = (text: string): ITextBlock => line(text, { isSubtle: true, size:
 const part = (s: string) => encodeURIComponent(s).replace(/[!'()*~]/gu, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
 const LINK_EXPIRED = 'Your sign-in expired. Sign in again, then ask Orka for a new card.';
 const AGAIN = 'Ask Orka again.';
+const NEWER = 'Go to newer card';
+const MESSAGE = /^https:\/\/teams\.microsoft\.com\/l\/message\/19:[A-Za-z0-9_-]{1,200}@(?:thread\.v2|unq\.gbl\.spaces)\/[0-9]{1,20}\?context=%7B%22contextType%22:%22chat%22%7D$/u;
+/** A link to a message in the same chat, or nothing where Teams documents none: a one-to-one chat with a bot has no `19:` chat ID. */
+function messageLink(chat: string, message: string | undefined): string | undefined {
+  const url = `https://teams.microsoft.com/l/message/${chat}/${message}?context=%7B%22contextType%22:%22chat%22%7D`;
+  return message !== undefined && MESSAGE.test(url) ? url : undefined;
+}
 /** The opening of the description: its first paragraph, cut at a sentence end to about four lines on a phone. */
 function opening(body: string): string {
   const paragraphs = body.trim().split(/\n\s*\n/u).map(p => p.replace(/\s+/gu, ' ').trim()).filter(Boolean);
@@ -67,7 +74,8 @@ function status(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolea
     o?.kind === 'permission' ? `@${label(p.githubLogin, 39)} can't open pull requests in ${label(p.owner, 100)}/${label(p.repo, 100)}. Get access to the repository or link a different GitHub account, then ask again.` :
       o?.kind === 'signin-required' ? LINK_EXPIRED :
         o?.kind === 'validation' ? `GitHub rejected the pull request details. ${AGAIN}` :
-          o?.kind === 'failed' ? `Something went wrong before the pull request could be opened. ${AGAIN}` : undefined;
+          o?.kind === 'failed' ? `${o.cause === 'github' ? "GitHub didn't respond. Nothing was opened." : o.cause === 'gateway' ? 'Something went wrong on our side. Nothing was opened.' :
+            'Something went wrong before the pull request could be opened.'} ${AGAIN}` : undefined;
   return reason ? { head: 'Not opened', alert: true, detail: reason } : { head: 'This request is no longer pending.' };
 }
 /** The chat message "Ask again" sends as the sender, or nothing where a button can't send one: a group chat only hears messages that mention the bot. */
@@ -76,9 +84,9 @@ function askAgain(p: Proposal, viewer: 'room' | 'sender'): string | undefined {
   return `Send a new approval card for the pull request${/^[A-Za-z0-9._\/-]{1,100}$/u.test(p.head) ? ` from ${p.head}` : ''}. The branch changed after I approved.`;
 }
 const ASK_AGAIN = /^Send a new approval card for the pull request(?: from [A-Za-z0-9._\/-]{1,100})?\. The branch changed after I approved\.$/u;
-/** Only the server-verified sender receives decision actions; invokes still recheck authority. */
-export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolean): IAdaptiveCard {
-  const s = status(p, viewer, decisionsEnabled); const again = askAgain(p, viewer); const data = { proposal: p.id, rev: p.revision, digest: p.payloadDigest };
+/** Only the server-verified sender receives decision actions; invokes still recheck authority. `newerCard` is the message holding the card that replaced this one. */
+export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolean, newerCard?: string): IAdaptiveCard {
+  const s = status(p, viewer, decisionsEnabled); const newer = p.state === 'superseded' ? messageLink(p.conversationId, newerCard) : undefined; const again = askAgain(p, viewer); const data = { proposal: p.id, rev: p.revision, digest: p.payloadDigest };
   const repository = `https://github.com/${part(p.owner)}/${part(p.repo)}`; const compare = `${repository}/compare/${p.baseSHA}...${p.headSHA}`;
   const start = opening(p.body); const preview = start ? boundedLabel(start, 280) : { text: 'No description.', truncated: false }; const expanded = boundedLabel(p.body, 1800);
   const more = preview.truncated || start !== p.body.trim();
@@ -122,6 +130,7 @@ export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', dec
       { type: 'Action.Execute' as const, title: 'Reject', verb: 'pr-reject', data }] : []),
       // The search lists any pull request already open from this branch.
       ...(p.state === 'uncertain' ? [{ type: 'Action.OpenUrl' as const, title: 'Check on GitHub', url: `${repository}/pulls?q=is%3Apr+head%3A${part(p.head)}` }] : []),
+      ...(newer ? [{ type: 'Action.OpenUrl' as const, title: NEWER, url: newer }] : []),
       ...(again ? [{ type: 'Action.Submit' as const, title: 'Ask again', data: { msteams: { type: 'imBack' as const, value: again } } }] : []),
       ...(p.outcome?.kind === 'opened' ? [{ type: 'Action.OpenUrl' as const, title: 'Open pull request', url: p.outcome.url }] :
         s.open || p.state === 'superseded' ? [] : [{ type: 'Action.OpenUrl' as const, title: 'View changes', url: compare }])] };
@@ -185,7 +194,8 @@ export function cardInvokeResponse(input: unknown): { statusCode: 200; type: 'ap
             const d = object(v.data, ['proposal', 'rev', 'digest']); only(v.style, 'positive');
             if (!(revision ? v.verb === 'pr-revise' && v.title === 'Send' : ['pr-approve', 'pr-reject'].includes(String(v.verb))) || d.rev !== 1 || !/^[a-f0-9]{64}$/u.test(String(d.proposal)) || !/^[a-f0-9]{64}$/u.test(String(d.digest))) throw new Error();
           } else if (!nested && v.type === 'Action.ShowCard' && v.title === 'Ask for changes') validate(v.card, true, true);
-          else if (nested || v.type !== 'Action.OpenUrl' || typeof v.url !== 'string' || !GITHUB.test(v.url)) throw new Error(); }
+          // One button may leave for Teams, and only to a message in a chat.
+          else if (nested || v.type !== 'Action.OpenUrl' || typeof v.url !== 'string' || !(v.title === NEWER ? MESSAGE : GITHUB).test(v.url)) throw new Error(); }
       }
       if (c.refresh !== undefined) {
         if (nested) throw new Error(); const r = object(c.refresh, ['action', 'userIds']); const a = object(r.action, ['type', 'verb', 'data']); const d = object(a.data, ['proposal', 'rev', 'digest']);

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { proposalOutcome as decodeOutcome } from '../src/accounts/pull-request-proposal.js';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { canonicalJSON } from '../src/directory/codec.js';
 import { proposalDigest, decodeProposal, projectClaim } from '../src/accounts/pull-request-proposal.js';
@@ -147,4 +148,78 @@ test('old_grant_round_trip_unchanged and child_inherits_origin_not_parent_tool_a
   await f.store.bindGrant(input.ref, input.targetId, { ...root, taskUID: 'child', parentTaskUID: 'root', tools: ['workiq'] }, context());
   const child = await f.store.getGrant(input.ref, context(), 'child');
   assert.deepEqual(child?.proposalOrigin, origin); assert.deepEqual(child?.binding?.tools, ['workiq']);
+});
+
+test('a failed outcome may name its cause, and one saved without a cause still decodes', async t => {
+  const f = await grantsFixture(t); const p = proposalFixture(); const repo = { owner: p.owner, repo: p.repo };
+  // The record as the gateway wrote it before the cause existed.
+  assert.deepEqual(decodeOutcome(repo, { kind: 'failed' }), { kind: 'failed' });
+  assert.deepEqual(decodeProposal(JSON.parse(JSON.stringify({ ...p, state: 'failed', outcome: { kind: 'failed' } }))).outcome, { kind: 'failed' });
+  for (const cause of ['github', 'gateway'] as const) assert.deepEqual(decodeOutcome(repo, { kind: 'failed', cause }), { kind: 'failed', cause });
+  for (const bad of [{ kind: 'failed', cause: 'user' }, { kind: 'failed', cause: '' }, { kind: 'failed', cause: null }, { kind: 'failed', cause: ['github'] }, { kind: 'failed', cause: 'github', closed: 1 },
+    { kind: 'failed', cause: 'github', number: 1 }, { kind: 'uncertain', cause: 'github' }, { kind: 'permission', cause: 'gateway' }, { kind: 'branch-moved', cause: 'github' },
+    { kind: 'branch-moved', closed: 1, cause: 'github' }, { kind: 'opened', number: 12, url: 'https://github.com/example/project/pull/12', headSHA: p.headSHA, cause: 'github' }])
+    assert.throws(() => decodeOutcome(repo, bad), JSON.stringify(bad));
+  // Through the encrypted store and a reopen.
+  await f.store.reserveProposal(p, 'operation', context());
+  await f.store.claimProposal(p, { decision: 'approve', tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: 'invoke', decidedAt: f.now() }, context());
+  for (const outcome of [{ kind: 'failed' as const }, { kind: 'failed' as const, cause: 'github' as const }, { kind: 'failed' as const, cause: 'gateway' as const }]) {
+    const version = (await f.store.getProposal(p.id, context()))!;
+    await f.store.replaceProposal(version, { ...version.proposal, state: 'failed', outcome }, context());
+    const reopened = f.open(); assert.deepEqual((await reopened.getProposal(p.id, context()))?.proposal.outcome, outcome); await reopened.close();
+  }
+});
+
+test('a replaced proposal reports the message of the newest card in its chat, read from that card and saved nowhere else', async t => {
+  const f = await grantsFixture(t); const first = proposalFixture(); await f.store.reserveProposal(first, 'operation', context());
+  const delivered = async (id: string, message: string) => { const v = (await f.store.getProposal(id, context()))!; await f.store.replaceProposal(v, { ...v.proposal, cardActivityId: message }, context()); };
+  await delivered(first.id, '1700000000001');
+  // The current card has nothing newer, whatever its own message is.
+  assert.equal((await f.store.getProposal(first.id, context()))!.newerCard, undefined);
+  const second = proposalFixture('second'); await f.store.reserveProposal(second, 'second', context());
+  // Replaced, but the newer card has not been confirmed in the chat yet.
+  const early = (await f.store.getProposal(first.id, context()))!; assert.equal(early.proposal.state, 'superseded'); assert.equal(early.newerCard, undefined);
+  await delivered(second.id, '1700000000002');
+  assert.equal((await f.store.getProposal(first.id, context()))!.newerCard, '1700000000002');
+  assert.equal((await f.store.getProposal(second.id, context()))!.newerCard, undefined);
+  // After a second replacement both older cards point at the newest, not at each other.
+  const third = proposalFixture('third'); await f.store.reserveProposal(third, 'third', context()); await delivered(third.id, '1700000000003');
+  for (const old of [first, second]) assert.equal((await f.store.getProposal(old.id, context()))!.newerCard, '1700000000003');
+  // The stored record of the replaced card is unchanged: no new field, and it still decodes after a reopen.
+  const reopened = f.open(); const again = (await reopened.getProposal(first.id, context()))!;
+  assert.equal(again.newerCard, '1700000000003'); assert.equal('newerCard' in again.proposal, false); assert.equal(again.proposal.cardActivityId, '1700000000001');
+  await reopened.close();
+  // A card that was decided before the newer one arrived is not "replaced", so it reports nothing.
+  const g = await grantsFixture(t); const decided = proposalFixture(); await g.store.reserveProposal(decided, 'operation', context());
+  await g.store.claimProposal(decided, { decision: 'reject', tenantId: decided.tenantId, objectId: decided.objectId, invokeActivityId: 'invoke', decidedAt: g.now() }, context());
+  const next = proposalFixture('second'); await g.store.reserveProposal(next, 'second', context());
+  const v = (await g.store.getProposal(next.id, context()))!; await g.store.replaceProposal(v, { ...v.proposal, cardActivityId: '1700000000009' }, context());
+  const old = (await g.store.getProposal(decided.id, context()))!; assert.equal(old.proposal.state, 'rejected'); assert.equal(old.newerCard, undefined);
+});
+
+test('the newer card is looked up only for a card, and a failed lookup costs the link, not the proposal or recovery', async t => {
+  const f = await grantsFixture(t); const first = proposalFixture(); await f.store.reserveProposal(first, 'operation', context());
+  const second = proposalFixture('second'); await f.store.reserveProposal(second, 'second', context());
+  const v = (await f.store.getProposal(second.id, context()))!; await f.store.replaceProposal(v, { ...v.proposal, cardActivityId: '1700000000002' }, context());
+  // Row keys are hashes, so count point reads of proposal rows and fail the second distinct one on request.
+  const reads: string[] = []; let failNewer = false;
+  f.controls.hook = ({ req, url, res, reply }) => { const row = /RowKey='(proposal_[a-f0-9]{64})'/u.exec(decodeURIComponent(url.pathname))?.[1];
+    if (req.method === 'GET' && row) { reads.push(row); if (failNewer && row !== reads[0]) return void res.destroy(); } reply(); };
+  t.after(() => { delete f.controls.hook; });
+  assert.equal((await f.store.getProposal(first.id, context()))!.newerCard, '1700000000002'); assert.equal(new Set(reads).size, 2);
+  failNewer = true; reads.length = 0; const without = (await f.store.getProposal(first.id, context()))!;
+  assert.equal(without.proposal.state, 'superseded'); assert.equal(without.newerCard, undefined); assert.equal(new Set(reads).size, 2);
+  // A read that never answers costs one second, not the caller's whole deadline, and the store still works afterwards.
+  let hold = true; const held: (() => void)[] = []; const plain = f.controls.hook!;
+  f.controls.hook = request => { const row = /RowKey='(proposal_[a-f0-9]{64})'/u.exec(decodeURIComponent(request.url.pathname))?.[1];
+    if (hold && request.req.method === 'GET' && row && row !== reads[0]) { held.push(request.reply); return; } return plain(request); };
+  failNewer = false; const started = performance.now(); const slow = (await f.store.getProposal(first.id, { ...context(), deadline: performance.now() + 10000 }))!;
+  assert.equal(slow.proposal.state, 'superseded'); assert.equal(slow.newerCard, undefined); assert.ok(performance.now() - started < 5000);
+  hold = false; for (const reply of held) try { reply(); } catch { /* The client has gone. */ }
+  assert.equal((await f.store.getProposal(first.id, context()))!.newerCard, '1700000000002');
+  // Recovery reads each listed proposal once and never the newer card's row on behalf of the replaced one.
+  failNewer = false; await f.store.claimProposal(second, { decision: 'approve', tenantId: second.tenantId, objectId: second.objectId, invokeActivityId: 'invoke', decidedAt: f.now() }, context());
+  reads.length = 0; const visited: string[] = [];
+  await f.store.visitRecoverableProposals(context(), async p => { visited.push(p.id); });
+  assert.deepEqual(visited, [second.id]); assert.equal(reads.length, new Set(reads).size, 'no proposal row is read twice');
 });
