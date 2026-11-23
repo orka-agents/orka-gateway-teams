@@ -329,8 +329,8 @@ for (const conversationType of ['groupChat', 'channel'] as const) test(`register
     const body = { ...finalDelivery, contextId, ...(conversationType === 'channel' ? { threadId: 'root' } : {}), replyTarget: events[n - 1]!.replyTarget!,
       originatingEventId: `origin-${n}`, idempotencyId: `shared-op-${n}`, deliveryId: `shared-delivery-${n}`, text: 'x'.repeat(65000) };
     const response = await deliver(runtime, f.config, body); assert.equal((await response.json() as { status: string }).status, 'delivered');
-    const card = JSON.stringify(messages[n - 1]); assert.ok(card.includes(n === 1 ? 'Reply to \\\\[Alice\\\\]\\\\*' : 'Reply to Bob · continuing this chat'));
-    assert.equal(card.includes('continuing this chat'), n === 2); assert.ok(!card.includes('synthetic-aad'));
+    const card = JSON.stringify(messages[n - 1]); assert.ok(card.includes(n === 1 ? 'Reply to \\\\[Alice\\\\]\\\\*' : "Reply to Bob · uses this chat's history"));
+    assert.equal(card.includes("uses this chat's history"), n === 2); assert.ok(!card.includes('synthetic-aad'));
     await runtime.stop(); runtime = f.own(await startIngressRuntime(f.config, dependencies));
     assert.equal((await (await deliver(runtime, f.config, { ...body, deliveryId: `restart-alias-${n}` })).json() as { status: string }).status, 'delivered');
     assert.equal(messages.length, n);
@@ -347,7 +347,7 @@ test('missing configured sidecar operates without continuation wording and never
     body = bytes.toString(); return { status: 201, data: Buffer.from('{"id":"missing-sidecar-receipt"}') };
   } }));
   assert.equal((await (await deliver(runtime, f.config)).json() as { status: string }).status, 'delivered');
-  assert.ok(body.includes('Reply to Alice')); assert.ok(!body.includes('continuing')); await runtime.stop();
+  assert.ok(body.includes('Reply to Alice')); assert.ok(!body.includes("uses this chat")); await runtime.stop();
   assert.equal(existsSync(correlationDbPath), false); assert.equal(existsSync(`${correlationDbPath}.owner.sqlite`), false);
   initializeSessionCorrelation(correlationDbPath, journalScope); const owner = openSessionCorrelation(correlationDbPath, journalScope);
   let opens = 0; const deps = { openIngressStore: () => { opens++; throw new Error('must not open'); } };

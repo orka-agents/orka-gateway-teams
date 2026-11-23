@@ -28,23 +28,29 @@ function states(): { name: string; p: Proposal; viewer?: 'room'; enabled?: false
   const sent = 'Sent to Orka. It will reply in this chat with a new card or a question.';
   return [
     { name: 'pending sender', p, head: 'Open this pull request?', lines: [expires], buttons: ['Approve', 'Ask for changes', 'Reject'] },
-    { name: 'pending room', p, viewer: 'room', head: 'Waiting for Example Sender to approve', lines: [`${expires} · asked by Example Sender`], buttons: [] },
+    { name: 'pending room', p, viewer: 'room', head: 'Waiting for Example Sender to approve', lines: [`${expires} · opens as @example\\-sender`], buttons: [] },
     { name: 'pending sender, decisions off', p, enabled: false, head: 'Pull request waiting', lines: ["Approval isn't turned on for this chat yet.", expires], buttons: [] },
-    { name: 'pending room, decisions off', p, viewer: 'room', enabled: false, head: 'Waiting for Example Sender to approve', lines: ["Approval isn't turned on for this chat yet.", `${expires} · asked by Example Sender`], buttons: [] },
+    { name: 'pending room, decisions off', p, viewer: 'room', enabled: false, head: 'Waiting for Example Sender to approve', lines: ["Approval isn't turned on for this chat yet.", `${expires} · opens as @example\\-sender`], buttons: [] },
     { name: 'approving', p: { ...p, state: 'approving' }, head: 'Approved', lines: ['Opening the pull request…'], buttons: ['View changes'] },
-    { name: 'opened', p: { ...p, state: 'opened', outcome: opened(p) }, head: 'Opened #12', buttons: ['Open pull request'] },
+    { name: 'opened', p: { ...p, state: 'opened', outcome: opened(p) }, head: 'Opened #12', lines: ['Approved by Example Sender · opened as @example\\-sender'], buttons: ['Open pull request'] },
+    { name: 'opened, room', p: { ...p, state: 'opened', outcome: opened(p) }, viewer: 'room', head: 'Opened #12', lines: ['Approved by Example Sender · opened as @example\\-sender'], buttons: ['Open pull request'] },
     { name: 'already open', p: { ...p, state: 'opened', outcome: { ...opened(p), existing: true } }, head: 'Already open as #12', lines: ['Nothing new was opened.'], buttons: ['Open pull request'] },
     { name: 'opened, branch moved', p: { ...p, state: 'opened', outcome: { ...opened(p), headSHA: 'c'.repeat(40) } }, head: "Opened #12 with changes you didn't approve", alert: true,
       lines: ['The branch changed after you approved. Review the pull request before it merges.', 'Approved aaaaaaa · pull request is at ccccccc'], buttons: ['Open pull request'] },
     { name: 'found open, branch moved', p: { ...p, state: 'opened', outcome: { ...opened(p), headSHA: 'c'.repeat(40), existing: true } }, head: "#12 has changes you didn't approve", alert: true,
       lines: ['The branch changed after you approved. Review the pull request before it merges.', 'Approved aaaaaaa · pull request is at ccccccc'], buttons: ['Open pull request'] },
+    // Only the sender's own card says "you".
+    { name: 'opened, branch moved, room', p: { ...p, state: 'opened', outcome: { ...opened(p), headSHA: 'c'.repeat(40) } }, viewer: 'room', head: "Opened #12 with changes Example Sender didn't approve", alert: true,
+      lines: ['The branch changed after Example Sender approved. Review the pull request before it merges.', 'Approved aaaaaaa · pull request is at ccccccc'], buttons: ['Open pull request'] },
+    { name: 'found open, branch moved, room', p: { ...p, state: 'opened', outcome: { ...opened(p), headSHA: 'c'.repeat(40), existing: true } }, viewer: 'room', head: "#12 has changes Example Sender didn't approve", alert: true,
+      lines: ['The branch changed after Example Sender approved. Review the pull request before it merges.', 'Approved aaaaaaa · pull request is at ccccccc'], buttons: ['Open pull request'] },
     { name: 'rejected sender', p: { ...p, state: 'rejected', claim: claim(p, 'reject') }, head: 'Not opened', lines: ['You rejected it.'], buttons: ['View changes'] },
     { name: 'rejected room', p: { ...p, state: 'rejected', claim: claim(p, 'reject') }, viewer: 'room', head: 'Not opened', lines: ['Example Sender rejected it.'], buttons: ['View changes'] },
     { name: 'revise sending', p: revise('pending'), head: 'Sending your changes…', lines: [note], buttons: ['View changes'] },
     { name: 'revise queue full', p: revise('full'), head: 'Sending your changes…', lines: [note], buttons: ['View changes'] },
     { name: 'revise sent', p: revise('delivered'), head: 'Changes requested', lines: [sent, note], buttons: ['View changes'] },
     { name: 'revise sent, room', p: revise('delivered'), viewer: 'room', head: 'Changes requested', lines: [sent, 'Note from Example Sender: "Cap retries at 5"'], buttons: ['View changes'] },
-    { name: 'revise sending, room', p: revise('pending'), viewer: 'room', head: 'Sending your changes…', buttons: ['View changes'] },
+    { name: 'revise sending, room', p: revise('pending'), viewer: 'room', head: "Sending Example Sender's changes…", buttons: ['View changes'] },
     // Only the sender can take the step, so only the sender is told it.
     { name: 'revise conflict, room', p: revise('conflict'), viewer: 'room', head: 'Changes not sent', alert: true, buttons: ['View changes'] },
     { name: 'revise sign-in, room', p: revise('signin-required'), viewer: 'room', head: 'Changes not sent', alert: true, buttons: ['View changes'] },
@@ -65,13 +71,14 @@ function states(): { name: string; p: Proposal; viewer?: 'room'; enabled?: false
     { name: 'failed permission', p: failed('permission'), head: 'Not opened', alert: true,
       lines: ["@example\\-sender can't open pull requests in example/project. Get access to the repository or link a different GitHub account, then ask again."], buttons: ['View changes'] },
     { name: 'branch moved', p: failed('branch-moved'), head: 'Not opened', alert: true, lines: ['The branch changed after you approved.'], buttons: ['Ask again', 'View changes'] },
-    { name: 'branch moved, room', p: failed('branch-moved'), viewer: 'room', head: 'Not opened', alert: true, lines: ['The branch changed after you approved. Ask Orka again.'], buttons: ['View changes'] },
+    { name: 'branch moved, room', p: failed('branch-moved'), viewer: 'room', head: 'Not opened', alert: true, lines: ['The branch changed after Example Sender approved. Ask Orka again.'], buttons: ['View changes'] },
     { name: 'branch moved, group chat', p: { ...failed('branch-moved'), route: { ...p.route, conversation: { ...p.route.conversation, conversationType: 'groupChat' } } as Proposal['route'] }, head: 'Not opened', alert: true,
       lines: ['The branch changed after you approved. Ask Orka again.'], buttons: ['View changes'] },
     { name: 'branch moved, opened and closed', p: { ...p, state: 'branch-moved', outcome: { kind: 'branch-moved', closed: 12 } }, head: 'Not opened', alert: true,
       lines: ['The branch changed after you approved. GitHub opened #12 at the new commit, so it was closed.'], buttons: ['Ask again', 'View changes'] },
     { name: 'failed validation', p: failed('validation'), head: 'Not opened', alert: true, lines: ['GitHub rejected the pull request details. Ask Orka again.'], buttons: ['View changes'] },
     { name: 'failed sign-in', p: failed('signin-required'), head: 'Not opened', alert: true, lines: ['Your sign-in expired. Sign in again, then ask Orka for a new card.'], buttons: ['View changes'] },
+    { name: 'failed sign-in, room', p: failed('signin-required'), viewer: 'room', head: 'Not opened', alert: true, lines: ["Example Sender's sign-in expired. Ask Orka again."], buttons: ['View changes'] },
     // The first button looks for a pull request from this branch, which is what prevents a second one.
     { name: 'uncertain', p: { ...p, state: 'uncertain', outcome: { kind: 'uncertain' } }, head: "Couldn't confirm the pull request opened", alert: true,
       lines: ["It may have opened. Look for it on GitHub before asking again, so you don't get two."], buttons: ['Check on GitHub', 'View changes'] },
@@ -82,7 +89,7 @@ function states(): { name: string; p: Proposal; viewer?: 'room'; enabled?: false
 }
 for (const s of states()) test(`card state: ${s.name}`, () => {
   const p = { ...s.p, body: longBody, files: fiveFiles, fileCount: 7 }; const card = buildPullRequestCard(p, s.viewer ?? 'sender', s.enabled ?? true, s.newerCard);
-  const pending = p.state === 'pending'; const [caption, head, ...rest] = card.body as any[];
+  const pending = p.state === 'pending'; const full = pending && s.viewer !== 'room'; const [caption, head, ...rest] = card.body as any[];
   // The first two lines are always ours: where it is, then the question or the outcome.
   assert.deepEqual(caption, { type: 'TextBlock', text: 'Pull request · example/project', wrap: true, isSubtle: true, size: 'Small', spacing: 'None' });
   assert.deepEqual(head, { type: 'TextBlock', text: s.head, wrap: true, weight: 'Bolder', size: 'Medium', spacing: 'Small', ...(s.alert ? { color: 'Attention' } : {}) });
@@ -92,15 +99,18 @@ for (const s of states()) test(`card state: ${s.name}`, () => {
   assert.equal(card.fallbackText, `Pull request: ${s.viewer === 'room' && pending ? 'Waiting for approval' : p.state === 'rejected' ? 'Not opened. Rejected.' : s.head}`);
   // The agent's words appear only inside the captioned box: the title always, the description only while pending.
   const agent = box(card); assert.deepEqual(agent.items.slice(0, 2).map((i: any) => i.text), ['Written by the agent', 'Retry the lease read']);
-  assert.equal(agent.items.length, pending ? 3 : 2);
+  assert.equal(agent.items.length, full ? 3 : 2);
   // The one way to read the rest is the plain button straight under the box.
-  const after = card.body![card.body!.indexOf(agent) + 1] as any; assert.equal(after?.type === 'ActionSet', pending);
+  const after = card.body![card.body!.indexOf(agent) + 1] as any; assert.equal(after?.type === 'ActionSet', full);
   assert.equal(JSON.stringify(card.body!.filter(b => b !== agent && b !== after)).includes('First paragraph'), false);
   // The account that will open it is the last thing the sender reads before the buttons.
   assert.equal((card.body!.at(-1) as any).text === 'Opens on GitHub as @example\\-sender', pending && s.viewer !== 'room');
-  // Size, branch, files and expiry belong to a card that can still be decided.
+  // Size, expiry and the link belong to a card that can still be decided. The branch and the files are for the one who decides.
   const wire = JSON.stringify(card);
-  for (const detail of ['{{TIME(', 'orka/fix → main', 'ColumnSet', 'dir/big', 'View changes on GitHub](']) assert.equal(wire.includes(detail), pending, detail);
+  for (const detail of ['{{TIME(', '**7 files** · +3 −1 · 1 commit', 'View changes on GitHub](']) assert.equal(wire.includes(detail), pending, detail);
+  for (const detail of ['orka/fix → main', 'ColumnSet', 'dir/big', 'and 2 more', 'First paragraph']) assert.equal(wire.includes(detail), full, detail);
+  // "You" is the sender. Nobody else's card says it.
+  if (s.viewer === 'room') assert.doesNotMatch(texts(card).join('\n'), /\b[Yy]ou(?:r)?\b/u);
   // Only the sender of a pending card with decisions on gets anything that acts.
   assert.equal(/pr-approve|pr-reject|pr-revise/u.test(wire), pending && s.viewer !== 'room' && s.enabled !== false);
   assert.deepEqual(card.refresh, { action: { type: 'Action.Execute', verb: 'pr-refresh', data: { proposal: p.id, rev: 1, digest: p.payloadDigest } }, userIds: ['29:sender-private'] });
@@ -168,11 +178,30 @@ test('long paths lose whole folders from the left, so each file stays on one pho
   for (const path of ['字'.repeat(60), `${'d/'.repeat(40)}f.ts`, 'x'.repeat(31)]) assert.ok(Array.from(shown(path)).length <= 30, path);
 });
 
+test('pending card in a shared chat: everyone but the sender gets the title, the size and the link, and nothing to press', () => {
+  const p = { ...inGroup(proposalFixture()), body: longBody, files: fiveFiles, fileCount: 7 }; const card = buildPullRequestCard(p, 'room', true);
+  const compare = `https://github.com/example/project/compare/${p.baseSHA}...${p.headSHA}`; const grey = { wrap: true, isSubtle: true, size: 'Small' };
+  assert.deepEqual(card.body, [{ type: 'TextBlock', text: 'Pull request · example/project', ...grey, spacing: 'None' },
+    { type: 'TextBlock', text: 'Waiting for Example Sender to approve', wrap: true, weight: 'Bolder', size: 'Medium', spacing: 'Small' },
+    // Whose GitHub account will open it replaces the sender's name, which the heading already gives.
+    { type: 'TextBlock', text: 'Expires at {{TIME(2027-01-15T09:00:00Z)}} · opens as @example\\-sender', ...grey, spacing: 'Small' },
+    { type: 'Container', style: 'emphasis', spacing: 'Medium', items: [{ type: 'TextBlock', text: 'Written by the agent', ...grey, spacing: 'None' },
+      { type: 'TextBlock', text: 'Retry the lease read', wrap: true, weight: 'Bolder', spacing: 'Small' }] },
+    { type: 'TextBlock', text: '**7 files** · +3 −1 · 1 commit', wrap: true, spacing: 'Medium' },
+    { type: 'TextBlock', text: `[View changes on GitHub](${compare})`, wrap: true, spacing: 'Small' }]);
+  assert.equal(card.actions?.length, 0); assert.ok(response(card));
+  // The sender's own card in the same chat keeps everything.
+  const own = JSON.stringify(buildPullRequestCard(p, 'sender', true)); for (const kept of ['First paragraph', 'Show full description', 'orka/fix → main', 'dir/big', 'and 2 more', 'pr-approve', 'Opens on GitHub as']) assert.ok(own.includes(kept), kept);
+  assert.ok(!own.includes('opens as @'));
+});
+
 test('incomplete file list: the warning is directly under the heading, the count is a minimum, and the full diff is the sender\'s first button', () => {
   const p = { ...proposalFixture(), files: fiveFiles, fileCount: 300, filesComplete: false }; const compare = `https://github.com/example/project/compare/${p.baseSHA}...${p.headSHA}`;
   for (const viewer of ['sender', 'room'] as const) { const card = buildPullRequestCard(p, viewer, true); const body = card.body as any[];
-    assert.deepEqual(body[2], { type: 'TextBlock', text: 'GitHub returned only part of the file list. Check the full diff before approving.', wrap: true, color: 'Attention', spacing: 'Small' });
-    assert.ok(texts(card).some(t => t.startsWith('**300+ files** · '))); assert.ok(texts(card).includes('and at least 295 more'));
+    // The warning tells the sender what to do before approving. The rest of the chat can't approve, and still sees the count is a minimum.
+    if (viewer === 'sender') assert.deepEqual(body[2], { type: 'TextBlock', text: 'GitHub returned only part of the file list. Check the full diff before approving.', wrap: true, color: 'Attention', spacing: 'Small' });
+    else assert.ok(!JSON.stringify(card).includes('only part'));
+    assert.ok(texts(card).some(t => t.startsWith('**300+ files** · '))); assert.equal(texts(card).includes('and at least 295 more'), viewer === 'sender');
     // The button has its own row above Approve: four in one row are cut off on a phone.
     assert.deepEqual(body.at(-1), viewer === 'room' ? { type: 'TextBlock', text: `[View changes on GitHub](${compare})`, wrap: true, spacing: 'Small' } :
       { type: 'ActionSet', spacing: 'Small', actions: [{ type: 'Action.OpenUrl', title: 'View full diff', url: compare }] });
