@@ -209,6 +209,14 @@ test('the newer card is looked up only for a card, and a failed lookup costs the
   assert.equal((await f.store.getProposal(first.id, context()))!.newerCard, '1700000000002'); assert.equal(new Set(reads).size, 2);
   failNewer = true; reads.length = 0; const without = (await f.store.getProposal(first.id, context()))!;
   assert.equal(without.proposal.state, 'superseded'); assert.equal(without.newerCard, undefined); assert.equal(new Set(reads).size, 2);
+  // A read that never answers costs one second, not the caller's whole deadline, and the store still works afterwards.
+  let hold = true; const held: (() => void)[] = []; const plain = f.controls.hook!;
+  f.controls.hook = request => { const row = /RowKey='(proposal_[a-f0-9]{64})'/u.exec(decodeURIComponent(request.url.pathname))?.[1];
+    if (hold && request.req.method === 'GET' && row && row !== reads[0]) { held.push(request.reply); return; } return plain(request); };
+  failNewer = false; const started = performance.now(); const slow = (await f.store.getProposal(first.id, { ...context(), deadline: performance.now() + 10000 }))!;
+  assert.equal(slow.proposal.state, 'superseded'); assert.equal(slow.newerCard, undefined); assert.ok(performance.now() - started < 5000);
+  hold = false; for (const reply of held) try { reply(); } catch { /* The client has gone. */ }
+  assert.equal((await f.store.getProposal(first.id, context()))!.newerCard, '1700000000002');
   // Recovery reads each listed proposal once and never the newer card's row on behalf of the replaced one.
   failNewer = false; await f.store.claimProposal(second, { decision: 'approve', tenantId: second.tenantId, objectId: second.objectId, invokeActivityId: 'invoke', decidedAt: f.now() }, context());
   reads.length = 0; const visited: string[] = [];

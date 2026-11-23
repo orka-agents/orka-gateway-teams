@@ -280,9 +280,11 @@ export function createAccountStore(binding: DirectoryBinding, key: Buffer, depen
       { ...p, state: !selected ? 'superseded' : now() >= p.expiresAt ? 'expired' : 'pending' };
     // The selector names the newest card this person has in this chat, so a replaced card can point at it.
     // Only a card needs it, and a card without the link is still right, so a failed read is not a failed proposal.
+    // It gets one second at most, so a slow read can't use up the time the card itself has left.
     let newerCard: string | undefined;
     if (link && p.state === 'superseded' && selector?.kind === 'proposal-selector' && selector.proposalId !== p.id) try {
-      const newer = (await read(proposalKey(selector.proposalId), c))?.value; if (newer?.kind === 'proposal') newerCard = newer.proposal.cardActivityId;
+      const brief = { ...c, signal: AbortSignal.any([c.signal, AbortSignal.timeout(1000)]), deadline: Math.min(c.deadline, performance.now() + 1000) };
+      const newer = (await read(proposalKey(selector.proposalId), brief))?.value; if (newer?.kind === 'proposal') newerCard = newer.proposal.cardActivityId;
     } catch { /* No link. */ }
     return { proposal: p, etag: row.etag, ...(p.claim && !row.value.proposal.claim ? { needsProjection: true as const } : {}), ...(newerCard ? { newerCard } : {}) };
   }
