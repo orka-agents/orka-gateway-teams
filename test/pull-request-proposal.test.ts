@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { proposalOutcome as decodeOutcome, decodeProposal as decodeStored } from '../src/accounts/pull-request-proposal.js';
+import { proposalOutcome as decodeOutcome } from '../src/accounts/pull-request-proposal.js';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { canonicalJSON } from '../src/directory/codec.js';
 import { proposalDigest, decodeProposal, projectClaim } from '../src/accounts/pull-request-proposal.js';
@@ -154,7 +154,7 @@ test('a failed outcome may name its cause, and one saved without a cause still d
   const f = await grantsFixture(t); const p = proposalFixture(); const repo = { owner: p.owner, repo: p.repo };
   // The record as the gateway wrote it before the cause existed.
   assert.deepEqual(decodeOutcome(repo, { kind: 'failed' }), { kind: 'failed' });
-  assert.deepEqual(decodeStored(JSON.parse(JSON.stringify({ ...p, state: 'failed', outcome: { kind: 'failed' } }))).outcome, { kind: 'failed' });
+  assert.deepEqual(decodeProposal(JSON.parse(JSON.stringify({ ...p, state: 'failed', outcome: { kind: 'failed' } }))).outcome, { kind: 'failed' });
   for (const cause of ['github', 'gateway'] as const) assert.deepEqual(decodeOutcome(repo, { kind: 'failed', cause }), { kind: 'failed', cause });
   for (const bad of [{ kind: 'failed', cause: 'user' }, { kind: 'failed', cause: '' }, { kind: 'failed', cause: null }, { kind: 'failed', cause: ['github'] }, { kind: 'failed', cause: 'github', closed: 1 },
     { kind: 'failed', cause: 'github', number: 1 }, { kind: 'uncertain', cause: 'github' }, { kind: 'permission', cause: 'gateway' }, { kind: 'branch-moved', cause: 'github' },
@@ -189,4 +189,29 @@ test('a replaced proposal reports the message of the newest card in its chat, re
   const reopened = f.open(); const again = (await reopened.getProposal(first.id, context()))!;
   assert.equal(again.newerCard, '1700000000003'); assert.equal('newerCard' in again.proposal, false); assert.equal(again.proposal.cardActivityId, '1700000000001');
   await reopened.close();
+  // A card that was decided before the newer one arrived is not "replaced", so it reports nothing.
+  const g = await grantsFixture(t); const decided = proposalFixture(); await g.store.reserveProposal(decided, 'operation', context());
+  await g.store.claimProposal(decided, { decision: 'reject', tenantId: decided.tenantId, objectId: decided.objectId, invokeActivityId: 'invoke', decidedAt: g.now() }, context());
+  const next = proposalFixture('second'); await g.store.reserveProposal(next, 'second', context());
+  const v = (await g.store.getProposal(next.id, context()))!; await g.store.replaceProposal(v, { ...v.proposal, cardActivityId: '1700000000009' }, context());
+  const old = (await g.store.getProposal(decided.id, context()))!; assert.equal(old.proposal.state, 'rejected'); assert.equal(old.newerCard, undefined);
+});
+
+test('the newer card is looked up only for a card, and a failed lookup costs the link, not the proposal or recovery', async t => {
+  const f = await grantsFixture(t); const first = proposalFixture(); await f.store.reserveProposal(first, 'operation', context());
+  const second = proposalFixture('second'); await f.store.reserveProposal(second, 'second', context());
+  const v = (await f.store.getProposal(second.id, context()))!; await f.store.replaceProposal(v, { ...v.proposal, cardActivityId: '1700000000002' }, context());
+  // Row keys are hashes, so count point reads of proposal rows and fail the second distinct one on request.
+  const reads: string[] = []; let failNewer = false;
+  f.controls.hook = ({ req, url, res, reply }) => { const row = /RowKey='(proposal_[a-f0-9]{64})'/u.exec(decodeURIComponent(url.pathname))?.[1];
+    if (req.method === 'GET' && row) { reads.push(row); if (failNewer && row !== reads[0]) return void res.destroy(); } reply(); };
+  t.after(() => { delete f.controls.hook; });
+  assert.equal((await f.store.getProposal(first.id, context()))!.newerCard, '1700000000002'); assert.equal(new Set(reads).size, 2);
+  failNewer = true; reads.length = 0; const without = (await f.store.getProposal(first.id, context()))!;
+  assert.equal(without.proposal.state, 'superseded'); assert.equal(without.newerCard, undefined); assert.equal(new Set(reads).size, 2);
+  // Recovery reads each listed proposal once and never the newer card's row on behalf of the replaced one.
+  failNewer = false; await f.store.claimProposal(second, { decision: 'approve', tenantId: second.tenantId, objectId: second.objectId, invokeActivityId: 'invoke', decidedAt: f.now() }, context());
+  reads.length = 0; const visited: string[] = [];
+  await f.store.visitRecoverableProposals(context(), async p => { visited.push(p.id); });
+  assert.deepEqual(visited, [second.id]); assert.equal(reads.length, new Set(reads).size, 'no proposal row is read twice');
 });
