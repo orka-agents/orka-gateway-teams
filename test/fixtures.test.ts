@@ -47,8 +47,8 @@ test('expected replies are one readable card, not text plus card', () => {
     const card = attachment.content;
     assert.equal(card.type, 'AdaptiveCard');
     assert.ok(card.fallbackText?.trim());
-    // The reply is in the agent's box. The failure sample has no cause, so it ends with what to do.
-    const last = card.body?.at(-1); const answer = last?.type === 'Container' ? last.items?.[1] : last;
+    // The failure sample has no cause, so it ends with what to do.
+    const answer = card.body?.at(-1);
     assert.ok(answer?.type === 'TextBlock');
     // The kind is always in the fallback; on the card only a failure needs a heading.
     assert.ok(card.fallbackText?.startsWith(delivery.kind === 'final' ? `${title}: ` : 'Orka could not complete the request: '));

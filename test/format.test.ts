@@ -24,7 +24,7 @@ for (const [delivery, expected] of [
     assert.equal(card.type, 'AdaptiveCard');
     assert.equal(card.version, '1.4');
     assert.ok(card.fallbackText?.trim());
-    // A reply is the agent's box alone under the bot's name. A failure with no cause is its heading, in the alert colour, and what to do.
+    // A reply is its text alone under the bot's name. A failure with no cause is its heading, in the alert colour, and what to do.
     assert.equal(card.body?.length, delivery.kind === 'final' ? 1 : 2);
     const heading = delivery.kind === 'final' ? undefined : card.body?.[0];
     assert.deepEqual(heading, delivery.kind === 'final' ? undefined
@@ -38,9 +38,8 @@ function cardOf(message: OutgoingTeamsMessage): IAdaptiveCard {
 }
 
 function answerOf(card: IAdaptiveCard) {
-  // Text from Orka is the last line of its tinted box. Without a box, the answer is the gateway's own line under any failure heading.
-  const box = card.body?.find(block => block.type === 'Container');
-  const answer = box?.type === 'Container' ? box.items?.at(-1) : card.body?.find(block => block.type === 'TextBlock' && block.weight !== 'Bolder');
+  // The answer follows the failure heading when there is one, and precedes any shortening notice.
+  const answer = card.body?.find(block => block.type === 'TextBlock' && block.weight !== 'Bolder');
   assert.ok(answer?.type === 'TextBlock');
   assert.equal(answer.wrap, true);
   return answer;
@@ -76,9 +75,7 @@ for (const [kind, expectedText] of [
       assert.equal(answerOf(card).text, expectedText);
       assert.ok(card.fallbackText?.includes(kind === 'final' ? expectedText : 'This request could not be completed.'));
       assert.equal(card.body?.length, kind === 'final' ? 1 : 2);
-      // Only text from Orka is fenced: our own sentence is a plain line, outside any box.
       assert.deepEqual(card.body?.at(-1), { type: 'TextBlock', text: expectedText, wrap: true, spacing: 'Small' });
-      assert.ok(!JSON.stringify(card).includes('Container'));
     }
   });
 }
@@ -213,22 +210,20 @@ test('formatting ignores routing and internal references and does not mutate fro
   }
 });
 
-test('a personal reply is fenced as agent text; an update and a question each say so in one grey line', () => {
+test('a personal reply is plain text with no box; an update and a question each say so in one grey line', () => {
   const grey = (text: string) => ({ type: 'TextBlock', text, wrap: true, isSubtle: true, size: 'Small', spacing: 'None' });
-  const box = (text: string) => ({ type: 'Container', style: 'emphasis', spacing: 'Small', items: [grey('Written by the agent'), { type: 'TextBlock', text, wrap: true, spacing: 'Small' }] });
-  assert.deepEqual(cardOf(formatText('Done.')).body, [box('Done.')]);
-  assert.deepEqual(cardOf(formatText('Reading the logs.', 'message')).body, [grey('Still working'), box('Reading the logs.')]);
+  const plain = (text: string) => ({ type: 'TextBlock', text, wrap: true, spacing: 'Small' });
+  assert.deepEqual(cardOf(formatText('Done.')).body, [plain('Done.')]);
+  assert.deepEqual(cardOf(formatText('Reading the logs.', 'message')).body, [grey('Still working'), plain('Reading the logs.')]);
   // A personal chat needs no name and no mention, so the question has neither.
-  assert.deepEqual(cardOf(formatText('Question: which branch?', 'message')).body, [grey('Question'), box('Which branch?')]);
+  assert.deepEqual(cardOf(formatText('Question: which branch?', 'message')).body, [grey('Question'), plain('Which branch?')]);
   assert.equal(cardOf(formatText('Reading the logs.', 'message')).fallbackText, 'Orka update: Reading the logs.');
 });
 
-test('a failure gives its cause once, fenced, then what to do; Orka\'s own no-cause sentence is not repeated under the heading', () => {
+test('a failure gives its cause once as plain text, then what to do; Orka\'s own no-cause sentence is not repeated under the heading', () => {
   const heading = { type: 'TextBlock', text: "Couldn't complete the request", weight: 'Bolder', wrap: true, spacing: 'Small', color: 'Attention' };
   const next = { type: 'TextBlock', text: 'Try again, or ask in a different way.', wrap: true, spacing: 'Small' };
-  const known = cardOf(formatText('The model ran out of time.', 'error')).body!;
-  // The cause is fenced without the agent's caption: Orka may have written it.
-  assert.deepEqual(known, [heading, { type: 'Container', style: 'emphasis', spacing: 'Small', items: [{ type: 'TextBlock', text: 'The model ran out of time.', wrap: true }] }, next]);
+  assert.deepEqual(cardOf(formatText('The model ran out of time.', 'error')).body, [heading, { ...next, text: 'The model ran out of time.' }, next]);
   for (const text of ['This request could not be completed.', ' This request could not be completed.\n', '']) assert.deepEqual(cardOf(formatText(text, 'error')).body, [heading, next]);
   // Anything else Orka sends is a cause, even one that starts the same way.
   assert.equal(cardOf(formatText('This request could not be completed. Quota reached.', 'error')).body?.length, 3);
