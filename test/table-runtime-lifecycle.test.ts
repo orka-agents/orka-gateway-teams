@@ -226,8 +226,8 @@ test('production-selected Table interim on/off: shared roots and prior-origin ev
     assert.equal((await deliver({ ...body, text: 'é'.repeat(8193) })).status, 400);
     assert.deepEqual(await (await deliver(body)).json(), receipt);
     const message = messages[n - 1]!; const card = message.attachments[0].content;
-    assert.equal(message.replyToId, 'root'); assert.equal(card.body[1].text, 'Question');
-    assert.equal(card.body[0].text, `Reply to ${n === 1 ? 'Alice' : 'Bob · continuing this chat'}`);
+    assert.equal(message.replyToId, 'root'); assert.equal(card.body[2].text, 'Answer by mentioning @Orka.');
+    assert.equal(card.body[0].text, `Question for ${n === 1 ? 'Alice' : "Bob · uses this chat's history"}`);
     await runtime.stop(); await runtime.done; await f.drained();
     f.config.outbound!.interimDelivery = false; runtime = await f.start(dependencies);
     assert.equal(Object.hasOwn(await capability(), 'interimDelivery'), false);
@@ -352,7 +352,7 @@ test('production-selected Table shared runtime uses the existing journal correla
     const deliver = (request: typeof body) => fetch(`http://127.0.0.1:${runtime.outboundPort}/v1/deliveries`, { method: 'POST', headers: {
       Authorization: `Bearer ${f.config.outbound!.bearerToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(request) });
     assert.deepEqual(await (await deliver(body)).json(), { status: 'delivered', providerMessageId: 'shared-table-receipt' });
-    assert.equal(messages[n - 1]!.includes('continuing this chat'), n === 2);
+    assert.equal(messages[n - 1]!.includes("uses this chat's history"), n === 2);
     assert.ok(messages[n - 1]!.includes(`Reply to ${n === 1 ? 'Alice' : 'Bob'}`));
     await runtime.stop(); await runtime.done; await f.drained(); runtime = await f.start(dependencies);
     assert.deepEqual(await (await deliver({ ...body, deliveryId: `table-restart-alias-${n}` })).json(), { status: 'delivered', providerMessageId: 'shared-table-receipt' });

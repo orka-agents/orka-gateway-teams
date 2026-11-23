@@ -30,7 +30,7 @@ export function formatMeetingDraft(draft: MeetingDraft, audience: MeetingAudienc
   const line = (text: string, style: Partial<ITextBlock> = {}): ITextBlock => ({ type: 'TextBlock', text, wrap: true, ...style });
   const note: Partial<ITextBlock> = { isSubtle: true, size: 'Small' };
   const asked = presentation === undefined ? '' :
-    ` · asked by ${presentation.requesterDisplayName ? escapeMarkdown(safeMeetingLabel(presentation.requesterDisplayName)) : 'an allowed participant'}${presentation.continuation ? ' · continuing this chat' : ''}`;
+    ` · asked by ${presentation.requesterDisplayName ? escapeMarkdown(safeMeetingLabel(presentation.requesterDisplayName)) : 'an allowed participant'}${presentation.continuation ? " · uses this chat's history" : ''}`;
   // The viewer's Teams client turns DATE and TIME into its own local time; they take whole seconds.
   const local = (time: string) => time.replace(/\.\d+/u, '');
   // A suggested time already says the length; a range alone needs it.
@@ -55,7 +55,8 @@ export function formatMeetingDraft(draft: MeetingDraft, audience: MeetingAudienc
       line('Agenda', { weight: 'Bolder', size: 'Small', spacing: 'Medium' }),
       line(draft.agenda.map((item, i) => `${i + 1}. ${escapeMarkdown(item)}`).join('\n'), { spacing: 'Small' }),
       line(link === undefined ? `Nothing is scheduled. ${unavailable ? explanations[unavailable] : 'This draft has no meeting link.'}`
-        : 'Nothing is scheduled until you open it in Teams and send it.', { ...note, spacing: 'Medium' })];
+        // In a shared chat anyone may open the draft, so it doesn't say "you".
+        : `Nothing is scheduled until ${presentation === undefined ? 'you open it in Teams and send' : 'someone opens it in Teams and sends'} it.`, { ...note, spacing: 'Medium' })];
     const card: IAdaptiveCard = { type: 'AdaptiveCard', version: '1.4',
       // Fixed bounded fallback, independent of user/roster labels and URL.
       fallbackText: 'Meeting draft. Nothing scheduled. Review the agenda, duration and time suggestions in Teams.' + (unavailable ? ' No meeting link is available.' : ''), body,

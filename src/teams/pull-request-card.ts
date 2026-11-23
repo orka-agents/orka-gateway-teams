@@ -13,6 +13,10 @@ function boundedLabel(s: string, max: number): { text: string; truncated: boolea
   return { text: escaped(low) + (low < points.length ? '…' : ''), truncated: low < points.length };
 }
 const label = (s: string, max: number) => boundedLabel(s, max).text;
+// The budget counts escapes, so a login of GitHub's full 39 characters needs more than 39 to stay whole.
+const login = (p: Proposal) => `@${label(p.githubLogin, 160)}`;
+// Teams may send no name. The card still has to say who it is waiting for.
+const sender = (p: Proposal) => p.displayName.trim() ? label(p.displayName, 80) : 'the sender';
 const line = (text: string, style: Partial<ITextBlock> = {}): ITextBlock => ({ type: 'TextBlock', text, wrap: true, ...style });
 const caption = (text: string): ITextBlock => line(text, { isSubtle: true, size: 'Small', spacing: 'None' });
 // A path part that also cannot close the Markdown link it sits in.
@@ -45,24 +49,27 @@ function shortPath(path: string, max = 30): string {
 }
 
 interface Status { head: string; fallback?: string; alert?: true; detail?: string; note?: string; open?: true }
-function revisionStatus(admission: RevisionAdmission | undefined): Status {
+function revisionStatus(admission: RevisionAdmission | undefined, whose = 'your'): Status {
   // After a sent note the agent may ask a question instead of proposing again, so a new card is not promised.
   return admission === 'delivered' ? { head: 'Changes requested', detail: 'Sent to Orka. It will reply in this chat with a new card or a question.' } :
     admission === 'signin-required' ? { head: 'Changes not sent', alert: true, detail: 'Your sign-in expired. Sign in, then send your note to Orka in the chat.' } :
-      admission === 'conflict' ? { head: 'Changes not sent', alert: true, detail: "This card couldn't send your note. Send it to Orka in the chat instead." } : { head: 'Sending your changes…' };
+      admission === 'conflict' ? { head: 'Changes not sent', alert: true, detail: "This card couldn't send your note. Send it to Orka in the chat instead." } : { head: `Sending ${whose} changes…` };
 }
 function status(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolean): Status {
-  const who = label(p.displayName, 80); const o = p.outcome;
+  const who = sender(p); const o = p.outcome;
+  // Only the sender's own card says "you": everyone else in the chat reads the name.
+  const approver = viewer === 'sender' ? 'you' : who;
   if (p.state === 'pending') return { open: true, ...(decisionsEnabled ? {} : { detail: "Approval isn't turned on for this chat yet." }),
     ...(viewer === 'room' ? { head: `Waiting for ${who} to approve`, fallback: 'Waiting for approval' } : { head: decisionsEnabled ? 'Open this pull request?' : 'Pull request waiting' }) };
   if (p.state === 'approving') return { head: 'Approved', detail: 'Opening the pull request…' };
-  if (o?.kind === 'opened' && o.headSHA === p.headSHA) return { head: `${o.existing ? 'Already open as ' : 'Opened '}#${o.number}`, ...(o.existing ? { detail: 'Nothing new was opened.' } : {}) };
+  if (o?.kind === 'opened' && o.headSHA === p.headSHA) return { head: `${o.existing ? 'Already open as ' : 'Opened '}#${o.number}`,
+    ...(o.existing ? { detail: 'Nothing new was opened.' } : { note: `Approved by ${who} · opened as ${login(p)}` }) };
   // Reached only when the gateway couldn't close it, or found it, open or closed, after losing track of its own request.
-  if (o?.kind === 'opened') return { head: o.existing ? `#${o.number} has changes you didn't approve` : `Opened #${o.number} with changes you didn't approve`, alert: true,
-    detail: 'The branch changed after you approved. Review the pull request before it merges.',
+  if (o?.kind === 'opened') return { head: o.existing ? `#${o.number} has changes ${approver} didn't approve` : `Opened #${o.number} with changes ${approver} didn't approve`, alert: true,
+    detail: `The branch changed after ${approver} approved. Review the pull request before it merges.`,
     note: `Approved ${p.headSHA.slice(0, 7)} · pull request is at ${o.headSHA.slice(0, 7)}` };
   if (p.state === 'rejected') return { head: 'Not opened', fallback: 'Not opened. Rejected.', detail: viewer === 'sender' ? 'You rejected it.' : `${who} rejected it.` };
-  if (p.state === 'revise-requested') { const s = revisionStatus(p.revisionAdmission);
+  if (p.state === 'revise-requested') { const s = revisionStatus(p.revisionAdmission, viewer === 'sender' ? 'your' : `${who}'s`);
     // The step is for the sender, who alone can take it.
     return viewer === 'sender' || p.revisionAdmission === 'delivered' ? s : { head: s.head, ...(s.alert ? { alert: s.alert } : {}) }; }
   if (p.state === 'expired') return { head: 'Expired', detail: `Nothing was opened. ${AGAIN}` };
@@ -70,9 +77,9 @@ function status(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolea
   if (p.state === 'uncertain') return { head: "Couldn't confirm the pull request opened", alert: true,
     detail: `It may have opened. Look for it on GitHub before asking again${viewer === 'sender' ? ", so you don't get two" : ''}.` };
   // The sender's own card in a one-to-one chat carries an "Ask again" button in place of the instruction.
-  const reason = o?.kind === 'branch-moved' ? `The branch changed after you approved.${o.closed ? ` GitHub opened #${o.closed} at the new commit, so it was closed.` : ''}${askAgain(p, viewer) ? '' : ` ${AGAIN}`}` :
-    o?.kind === 'permission' ? `@${label(p.githubLogin, 39)} can't open pull requests in ${label(p.owner, 100)}/${label(p.repo, 100)}. Get access to the repository or link a different GitHub account, then ask again.` :
-      o?.kind === 'signin-required' ? LINK_EXPIRED :
+  const reason = o?.kind === 'branch-moved' ? `The branch changed after ${approver} approved.${o.closed ? ` GitHub opened #${o.closed} at the new commit, so it was closed.` : ''}${askAgain(p, viewer) ? '' : ` ${AGAIN}`}` :
+    o?.kind === 'permission' ? `${login(p)} can't open pull requests in ${label(p.owner, 100)}/${label(p.repo, 100)}. Get access to the repository or link a different GitHub account, then ask again.` :
+      o?.kind === 'signin-required' ? (viewer === 'sender' ? LINK_EXPIRED : `${who.replace(/^the /u, 'The ')}'s sign-in expired. ${AGAIN}`) :
         o?.kind === 'validation' ? `GitHub rejected the pull request details. ${AGAIN}` :
           o?.kind === 'failed' ? `${o.cause === 'github' ? "GitHub didn't respond. Nothing was opened." : o.cause === 'gateway' ? 'Something went wrong on our side. Nothing was opened.' :
             'Something went wrong before the pull request could be opened.'} ${AGAIN}` : undefined;
@@ -92,32 +99,34 @@ export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', dec
   const more = preview.truncated || start !== p.body.trim();
   const files = [...p.files].sort((a, b) => b.additions + b.deletions - a.additions - a.deletions).slice(0, 5);
   const decide = decisionsEnabled && viewer === 'sender' && p.state === 'pending';
+  // The rest of the chat can't act on a pending card, so theirs is short: the title, the size and the link.
+  const full = viewer === 'sender';
   // The rest of the chat sees the note only once it has been sent on as a chat turn.
   const note = p.state === 'revise-requested' && (viewer === 'sender' || p.revisionAdmission === 'delivered') ?
-    [line(`${viewer === 'sender' ? 'Your note' : `Note from ${label(p.displayName, 80)}`}: "${label(p.claim?.note ?? '', 2400)}"`, { spacing: 'Small' })] : [];
+    [line(`${viewer === 'sender' ? 'Your note' : `Note from ${sender(p)}`}: "${label(p.claim?.note ?? '', 2400)}"`, { spacing: 'Small' })] : [];
   // The viewer's Teams client turns TIME into its own local time. Agent text cannot: its braces are escaped.
   const expires = `Expires at {{TIME(${new Date(p.expiresAt).toISOString().slice(0, 19)}Z)}}`;
   const body: CardElement[] = [caption(`Pull request · ${label(p.owner, 100)}/${label(p.repo, 100)}`),
     line(s.head, { weight: 'Bolder', size: 'Medium', spacing: 'Small', ...(s.alert ? { color: 'Attention' } : {}) }),
     // What the sender has not seen comes before anything else they read.
-    ...(s.open && !p.filesComplete ? [line('GitHub returned only part of the file list. Check the full diff before approving.', { color: 'Attention', spacing: 'Small' })] : []),
+    ...(s.open && full && !p.filesComplete ? [line('GitHub returned only part of the file list. Check the full diff before approving.', { color: 'Attention', spacing: 'Small' })] : []),
     ...(s.detail ? [line(s.detail, { spacing: 'Small' })] : []), ...(s.note ? [line(s.note, { isSubtle: true, size: 'Small', spacing: 'Small' })] : []), ...note,
-    ...(s.open ? [line(viewer === 'sender' ? expires : `${expires} · asked by ${label(p.displayName, 80)}`, { isSubtle: true, size: 'Small', spacing: 'Small' })] : []),
+    ...(s.open ? [line(full ? expires : `${expires} · opens as ${login(p)}`, { isSubtle: true, size: 'Small', spacing: 'Small' })] : []),
     // Everything the agent wrote sits in this one tinted box, under its caption.
     { type: 'Container', style: 'emphasis', spacing: 'Medium', items: [caption('Written by the agent'), line(label(p.title, 180), { weight: 'Bolder', spacing: 'Small' }),
-      ...(s.open ? [line(preview.text, { spacing: 'Small' })] : [])] },
+      ...(s.open && full ? [line(preview.text, { spacing: 'Small' })] : [])] },
     // Under the box, not in it: a button inside a tinted box is drawn filled, and only Approve should be.
-    ...(s.open && more ? [{ type: 'ActionSet' as const, spacing: 'Small' as const, actions: [{ type: 'Action.ShowCard' as const, title: 'Show full description',
+    ...(s.open && full && more ? [{ type: 'ActionSet' as const, spacing: 'Small' as const, actions: [{ type: 'Action.ShowCard' as const, title: 'Show full description',
       card: { type: 'AdaptiveCard' as const, version: '1.5' as const, body: [caption('Written by the agent'), line(expanded.text, { spacing: 'Small' }),
         ...(expanded.truncated ? [caption('Shortened to fit this card.')] : [])] } }] }] : []),
-    ...(s.open ? [line(`${label(p.head, 180)} → ${label(p.base, 180)}`, { fontType: 'Monospace', size: 'Small', spacing: 'Medium' }),
-      line(`**${p.fileCount}${p.filesComplete ? '' : '+'} ${p.fileCount === 1 && p.filesComplete ? 'file' : 'files'}** · +${p.additions} −${p.deletions} · ${p.commits} ${p.commits === 1 ? 'commit' : 'commits'}`, { spacing: 'Small' }),
-      ...files.map((f, i): CardElement => ({ type: 'ColumnSet', spacing: i ? 'None' : 'Small', columns: [
+    ...(s.open ? [...(full ? [line(`${label(p.head, 180)} → ${label(p.base, 180)}`, { fontType: 'Monospace', size: 'Small', spacing: 'Medium' })] : []),
+      line(`**${p.fileCount}${p.filesComplete ? '' : '+'} ${p.fileCount === 1 && p.filesComplete ? 'file' : 'files'}** · +${p.additions} −${p.deletions} · ${p.commits} ${p.commits === 1 ? 'commit' : 'commits'}`, { spacing: full ? 'Small' : 'Medium' }),
+      ...(full ? files : []).map((f, i): CardElement => ({ type: 'ColumnSet', spacing: i ? 'None' : 'Small', columns: [
         { type: 'Column', width: 'stretch', items: [line(label(shortPath(f.path), 160), { fontType: 'Monospace', size: 'Small' })] },
         { type: 'Column', width: 'auto', items: [line(`+${f.additions} −${f.deletions}`, { isSubtle: true, size: 'Small' })] }] })),
-      ...(p.fileCount > files.length ? [caption(`and ${p.filesComplete ? '' : 'at least '}${p.fileCount - files.length} more`)] : []),
+      ...(full && p.fileCount > files.length ? [caption(`and ${p.filesComplete ? '' : 'at least '}${p.fileCount - files.length} more`)] : []),
       ...(decide && !p.filesComplete ? [] : [line(`[View changes on GitHub](${compare})`, { spacing: 'Small' })]),
-      ...(viewer === 'sender' ? [line(`Opens on GitHub as @${label(p.githubLogin, 39)}`, { spacing: 'Medium' })] : []),
+      ...(viewer === 'sender' ? [line(`Opens on GitHub as ${login(p)}`, { spacing: 'Medium' })] : []),
       // With part of the list missing, reading the diff is the first button. It has its own row: four buttons don't fit a phone.
       ...(decide && !p.filesComplete ? [{ type: 'ActionSet' as const, spacing: 'Small' as const, actions: [{ type: 'Action.OpenUrl' as const, title: 'View full diff', url: compare }] }] : [])] : [])];
   return { type: 'AdaptiveCard', version: '1.5', fallbackText: `Pull request: ${s.fallback ?? s.head}`, body,

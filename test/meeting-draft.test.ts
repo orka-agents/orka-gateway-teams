@@ -75,7 +75,8 @@ test('card layout: caption, bold subject, facts in the viewer\'s local time, age
         { title: 'Who', value: 'Everyone here (2): Ada, Grace' }] },
       { type: 'TextBlock', text: 'Agenda', wrap: true, weight: 'Bolder', size: 'Small', spacing: 'Medium' },
       { type: 'TextBlock', text: '1. Review \\[design\\]\n2. Decide', wrap: true, spacing: 'Small' },
-      { type: 'TextBlock', text: 'Nothing is scheduled until you open it in Teams and send it.', wrap: true, isSubtle: true, size: 'Small', spacing: 'Medium' }],
+      // Anyone in a shared chat may open the draft, so the line doesn't say "you".
+      { type: 'TextBlock', text: 'Nothing is scheduled until someone opens it in Teams and sends it.', wrap: true, isSubtle: true, size: 'Small', spacing: 'Medium' }],
     // The card's only action is the filled one.
     actions: [{ type: 'Action.OpenUrl', title: 'Open in Teams', style: 'positive', url: 'https://teams.microsoft.com/l/meeting/new?subject=x' }] });
 });
@@ -85,6 +86,8 @@ test('facts: a range alone is "When" with a length; a personal chat has no asker
   const card = formatMeetingDraft(windowOnly, { labels: [], count: 0 }).attachments[0].content;
   assert.deepEqual(facts(card), [{ title: 'When', value: 'Next \\*week\\*' }, { title: 'Length', value: '30 min' }, { title: 'Who', value: 'Everyone here' }]);
   assert.equal(lines(card)[0], 'Meeting draft');
+  // In a personal chat the reader is the one who opens it.
+  assert.equal(lines(formatMeetingDraft(windowOnly, { labels: [], count: 0, personal: true }, 'https://teams.microsoft.com/l/meeting/new?subject=x').attachments[0].content).at(-1), 'Nothing is scheduled until you open it in Teams and send it.');
   const many = formatMeetingDraft(windowOnly, { labels: Array.from({ length: 12 }, (_, i) => `P${i}`), count: 14 }).attachments[0].content;
   assert.equal(facts(many).at(-1)!.value, 'Everyone here (14): P0, P1, P2, P3, P4, P5, P6, P7, P8, P9; 4 more');
   assert.equal(lines(many).at(-1), 'Nothing is scheduled. This draft has no meeting link.');
@@ -138,7 +141,7 @@ test('maximum escaped structured fields and roster labels fall back visibly with
   assert.equal(card.version, '1.4'); assert.ok(Buffer.byteLength(card.fallbackText!) <= 512);
   assert.ok(Buffer.byteLength(JSON.stringify(message)) <= 20480); assert.equal(JSON.stringify(draft), before);
   assert.equal(message.replyToId, '\\'.repeat(256));
-  assert.deepEqual(lines(card), [`Meeting draft · asked by ${'\\'.repeat(512)} · continuing this chat`, '\\'.repeat(400), 'Agenda',
+  assert.deepEqual(lines(card), [`Meeting draft · asked by ${'\\'.repeat(512)} · uses this chat's history`, '\\'.repeat(400), 'Agenda',
     Array.from({ length: 5 }, (_, i) => `${i + 1}. ${'\\'.repeat(512)}`).join('\n'),
     "Nothing is scheduled. The full meeting link doesn't fit in one message, so there is no link. No partial attendee list was used."]);
   assert.deepEqual(facts(card), [{ title: 'When', value: '{{DATE(2028-02-29T12:00:00Z, SHORT)}} {{TIME(2028-02-29T12:00:00Z)}}–{{TIME(2028-02-29T20:00:00Z)}} (suggested)' },
@@ -159,7 +162,7 @@ test('link overflow never emits a partial action; measured dedicated card preser
   assert.equal(message.text, undefined); assert.equal(message.attachments.length, 1); assert.equal(message.replyToId, 'root');
   const card = message.attachments[0].content; assert.equal(card.version, '1.4'); assert.equal(card.actions, undefined);
   assert.ok(Buffer.byteLength(card.fallbackText!) <= 512); assert.ok(Buffer.byteLength(JSON.stringify(message)) <= 20480);
-  const body = JSON.stringify(card.body); for (const text of ['A \\\\+ B', '{{TIME(2028-01-01T12:00:00Z)}}–{{TIME(2028-01-01T12:30:00Z)}} (suggested)', 'Nothing is scheduled. ', ' · continuing this chat']) assert.ok(body.includes(text), text);
+  const body = JSON.stringify(card.body); for (const text of ['A \\\\+ B', '{{TIME(2028-01-01T12:00:00Z)}}–{{TIME(2028-01-01T12:30:00Z)}} (suggested)', 'Nothing is scheduled. ', " · uses this chat's history"]) assert.ok(body.includes(text), text);
   assert.ok(body.includes('\\\\[Ada\\\\]')); assert.ok(body.includes('asked by \\\\[Owner\\\\]'));
   assert.ok(body.includes('Review \\\\[design\\\\]')); assert.ok(body.includes('too long'));
   const action = formatMeetingDraft(draft, { labels: ['You'], count: 1 }, meetingLink(draft, ['one@example.test']));
