@@ -30,7 +30,7 @@ test('oversized preview exports a genuinely shortened formatter card', () => {
   assert.deepEqual(card, formatDelivery(oversizedDelivery).attachments[0].content);
   assert.equal(card.type, 'AdaptiveCard');
   assert.equal(card.body?.length, 2);
-  const box = card.body?.[0]; const answer = box?.type === 'Container' ? box.items?.[1] : undefined;
+  const answer = card.body?.[0];
   const notice = card.body?.[1];
   assert.ok(answer?.type === 'TextBlock');
   assert.ok(notice?.type === 'TextBlock');

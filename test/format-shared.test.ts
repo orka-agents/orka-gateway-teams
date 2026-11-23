@@ -4,41 +4,40 @@ import { formatDelivery, MAX_OUTGOING_MESSAGE_BYTES } from '../src/teams/format.
 import { finalDelivery, finalMessage } from './fixtures/outgoing.js';
 
 type Body = NonNullable<ReturnType<typeof formatDelivery>['attachments'][0]['content']['body']>;
-// Every line a reader sees, top to bottom, with the agent's box opened out.
-const flat = (body: Body): string[] => body.flatMap(block => block.type === 'Container' ? flat(block.items ?? []) : 'text' in block && typeof block.text === 'string' ? [block.text] : []);
+// Every line a reader sees, top to bottom. A reply card has no box, so every block is a line.
+const flat = (body: Body): string[] => body.map(block => { assert.ok(block.type === 'TextBlock'); return block.text; });
 function text(message: ReturnType<typeof formatDelivery>) {
   return flat(message.attachments[0].content.body!).join('\n');
 }
 const grey = (text: string) => ({ type: 'TextBlock', text, wrap: true, isSubtle: true, size: 'Small', spacing: 'None' });
-const box = (text: string) => ({ type: 'Container', style: 'emphasis', spacing: 'Small', items: [grey('Written by the agent'), { type: 'TextBlock', text, wrap: true, spacing: 'Small' }] });
+const plain = (text: string) => ({ type: 'TextBlock', text, wrap: true, spacing: 'Small' });
 
 test('room attribution escapes Markdown and never includes a provider ID; personal golden remains exact', () => {
   const message = formatDelivery(finalDelivery, { requesterDisplayName: '[Eve](https://evil.invalid) *admin* _x_ `code` \\' });
   assert.ok(text(message).includes('Reply to \\[Eve\\]\\(https://evil\\.invalid\\) \\*admin\\* \\_x\\_ \\`code\\` \\\\'));
   assert.ok(!JSON.stringify(message).includes(finalDelivery.sessionRef!.name));
   assert.deepEqual(formatDelivery(finalDelivery), finalMessage);
-  assert.equal(text(formatDelivery(finalDelivery, {})), `Reply to an allowed participant\nWritten by the agent\n${finalDelivery.text}`);
+  assert.equal(text(formatDelivery(finalDelivery, {})), `Reply to an allowed participant\n${finalDelivery.text}`);
   assert.ok(!text(message).includes('history'));
-  // One subtle line carries both facts, above the agent's box.
+  // One subtle line carries both facts, above the reply as plain text.
   assert.deepEqual(formatDelivery(finalDelivery, { requesterDisplayName: 'Ada', continuation: true }).attachments[0].content.body,
-    [grey("Reply to Ada · uses this chat's history"), box(finalDelivery.text)]);
+    [grey("Reply to Ada · uses this chat's history"), plain(finalDelivery.text)]);
   assert.equal(formatDelivery(finalDelivery, { requesterDisplayName: 'Ada', continuation: true }).attachments[0].content.fallbackText,
     `Orka reply — Reply to Ada · uses this chat's history: ${finalDelivery.text.replace(/\s+/gu, ' ')}`);
 });
 
 test('a room card says whose turn it is and whether the agent is done: working, a question with how to answer, a reply or a failure', () => {
   const body = (kind: 'message' | 'error' | 'final', text: string, continuation = false) => formatDelivery({ ...finalDelivery, kind, text }, { requesterDisplayName: 'Ada', continuation }).attachments[0].content.body!;
-  assert.deepEqual(body('message', 'Reading the logs.'), [grey('Working for Ada'), box('Reading the logs.')]);
+  assert.deepEqual(body('message', 'Reading the logs.'), [grey('Working for Ada'), plain('Reading the logs.')]);
   // The caption replaces the old heading. A group chat only hears mentions, so the card says how to answer.
-  assert.deepEqual(body('message', 'Question: which branch?'), [grey('Question for Ada'), box('Which branch?'),
+  assert.deepEqual(body('message', 'Question: which branch?'), [grey('Question for Ada'), plain('Which branch?'),
     { type: 'TextBlock', text: 'Answer by mentioning @Orka.', wrap: true, spacing: 'Small', isSubtle: true, size: 'Small' }]);
-  assert.deepEqual(body('final', 'Done.'), [grey('Reply to Ada'), box('Done.')]);
+  assert.deepEqual(body('final', 'Done.'), [grey('Reply to Ada'), plain('Done.')]);
   assert.deepEqual(body('error', 'It failed.'), [grey('Reply to Ada'),
     { type: 'TextBlock', text: "Couldn't complete the request", weight: 'Bolder', wrap: true, spacing: 'Small', color: 'Attention' },
-    { type: 'Container', style: 'emphasis', spacing: 'Small', items: [{ type: 'TextBlock', text: 'It failed.', wrap: true }] },
-    { type: 'TextBlock', text: 'Try again, or ask in a different way.', wrap: true, spacing: 'Small' }]);
+    plain('It failed.'), plain('Try again, or ask in a different way.')]);
   // A prefix with nothing after it is not a question, so nothing is stripped and no answer is asked for.
-  assert.deepEqual(body('message', 'Question: '), [grey('Working for Ada'), box('Question: ')]);
+  assert.deepEqual(body('message', 'Question: '), [grey('Working for Ada'), plain('Question: ')]);
   // The fallback calls it what the card does.
   assert.equal(formatDelivery({ ...finalDelivery, kind: 'message', text: 'Question: \t ' }, { requesterDisplayName: 'Ada' }).attachments[0].content.fallbackText, 'Orka update — Working for Ada: Question:');
   // Every kind says when it draws on the chat's earlier turns, and the fallback carries the same caption.
@@ -68,7 +67,7 @@ test('giant first grapheme leaves shared attribution, reply target and bounded f
   const message = formatDelivery({ ...finalDelivery, text: 'a' + '\u0301'.repeat(30000) }, { replyToId: 'root', continuation: true });
   assert.ok(Buffer.byteLength(JSON.stringify(message)) <= MAX_OUTGOING_MESSAGE_BYTES);
   assert.ok(Buffer.byteLength(message.attachments[0].content.fallbackText!) <= 512);
-  assert.ok(text(message).startsWith("Reply to an allowed participant · uses this chat's history\nWritten by the agent\n"));
+  assert.ok(text(message).startsWith("Reply to an allowed participant · uses this chat's history\n"));
   assert.equal(message.replyToId, 'root');
   assert.ok(!text(message).includes('\u0301'));
 });

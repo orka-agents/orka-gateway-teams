@@ -101,8 +101,7 @@ for (const [text, title] of [
   // Only the exact prefix makes a question, and the body then starts after it. Any other message is an update with its text unchanged.
   const question = title === 'Orka question'; const grey = { type: 'TextBlock', wrap: true, isSubtle: true, size: 'Small', spacing: 'None' };
   assert.deepEqual(card.body, [{ ...grey, text: question ? 'Question' : 'Still working' },
-    { type: 'Container', style: 'emphasis', spacing: 'Small', items: [{ ...grey, text: 'Written by the agent' },
-      { type: 'TextBlock', text: question ? 'Which option?' : text, wrap: true, spacing: 'Small' }] }]);
+    { type: 'TextBlock', text: question ? 'Which option?' : text, wrap: true, spacing: 'Small' }]);
   assert.ok(card.fallbackText?.startsWith(title + ': '));
 });
 
@@ -114,8 +113,7 @@ test('message cards budget escaping, attribution and root with grapheme-safe bod
   const output = formatDelivery(input, presentation); const card = output.attachments[0].content;
   assert.ok(Buffer.byteLength(JSON.stringify(output)) <= 20480); assert.equal(output.replyToId, presentation.replyToId);
   assert.ok(card.fallbackText && Buffer.byteLength(card.fallbackText) <= 512);
-  const [label, box, mention] = card.body ?? []; assert.ok(mention?.type === 'TextBlock' && mention.text === 'Answer by mentioning @Orka.');
-  const body = box?.type === 'Container' ? box.items?.[1] : undefined;
+  const [label, body, mention] = card.body ?? []; assert.ok(mention?.type === 'TextBlock' && mention.text === 'Answer by mentioning @Orka.');
   assert.ok(label?.type === 'TextBlock' && label.text === `Question for ${'\\['.repeat(256)} · uses this chat's history` && label.isSubtle);
   assert.equal(card.body?.length, 4); text = text.slice('Question: '.length);
   assert.ok(body?.type === 'TextBlock'); assert.ok(body.text.length < text.length && text.startsWith(body.text));
@@ -128,6 +126,6 @@ test('message cards budget escaping, attribution and root with grapheme-safe bod
   assert.ok(Buffer.byteLength(JSON.stringify(formatDelivery({ ...message, text: '\n'.repeat(16383) + 'a' }, presentation))) <= 20480);
   const giantText = 'a' + '\u0301'.repeat(8000);
   const giant = formatDelivery({ ...message, text: giantText }).attachments[0].content;
-  const whole = giant.body?.[1]; assert.ok(whole?.type === 'Container' && whole.items?.[1]?.type === 'TextBlock' && whole.items[1].text === giantText);
+  assert.ok(giant.body?.[1]?.type === 'TextBlock' && giant.body[1].text === giantText);
   assert.equal(giant.fallbackText, 'Orka update: … (shortened)');
 });

@@ -1,5 +1,5 @@
 import type { IMessageActivityInput } from '@microsoft/teams.api';
-import type { CardElement, IAdaptiveCard } from '@microsoft/teams.cards';
+import type { IAdaptiveCard, ITextBlock } from '@microsoft/teams.cards';
 import type { DeliveryRequest } from '../protocol/types.js';
 
 export const MAX_OUTGOING_MESSAGE_BYTES = 20 * 1024;
@@ -26,7 +26,6 @@ export type FormatDelivery = (delivery: Readonly<DeliveryRequest>, presentation?
 const MAX_FALLBACK_BYTES = 512;
 const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
 
-const AGENT = 'Written by the agent';
 const HISTORY = " · uses this chat's history";
 // Orka's own sentence when it has no cause to give. Under the failure heading it would say the same thing twice.
 const NO_CAUSE = 'This request could not be completed.';
@@ -36,11 +35,10 @@ export const formatDelivery: FormatDelivery = (delivery, presentation) => {
   const asked = delivery.kind === 'message' && delivery.text.startsWith('Question: ') ? delivery.text.slice('Question: '.length) : '';
   const kind = delivery.kind === 'final' ? 'reply' : delivery.kind !== 'message' ? 'failure' : asked.trim() ? 'question' : 'update';
   const title = kind === 'reply' ? 'Orka reply' : kind === 'failure' ? 'Orka could not complete the request' : kind === 'question' ? 'Orka question' : 'Orka update';
-  // Text from Orka goes in the tinted box. A sentence of our own, used when there is none, does not.
   const written = kind === 'question' ? asked.charAt(0).toUpperCase() + asked.slice(1) :
     kind === 'failure' && delivery.text.trim() === NO_CAUSE ? '' : delivery.text.trim() ? delivery.text : '';
-  const own = written || kind === 'failure' ? undefined : kind === 'reply' ? 'Orka finished without a text reply.' : NO_CAUSE;
-  const text = written || own || NO_CAUSE;
+  // With nothing from Orka, a sentence of our own stands in. A failure's card leaves it out: the heading already says it.
+  const text = written || (kind === 'reply' ? 'Orka finished without a text reply.' : NO_CAUSE);
   // One grey line says whose turn this is and whether the agent is done. A personal chat needs no name.
   const who = presentation === undefined ? undefined :
     `${presentation.requesterDisplayName ? escapeMarkdown(presentation.requesterDisplayName) : 'an allowed participant'}${presentation.continuation ? HISTORY : ''}`;
@@ -50,7 +48,7 @@ export const formatDelivery: FormatDelivery = (delivery, presentation) => {
   const next = kind === 'failure' ? 'Try again, or ask in a different way.' : kind === 'question' && who !== undefined ? 'Answer by mentioning @Orka.' : undefined;
   const fallbackTitle = [title, ...(who === undefined ? [] : [label!])].join(' — ');
   const create = (body: string, fallback: string, shortened: boolean) =>
-    createMessage({ label, failure: kind === 'failure', written: written ? body : undefined, own: written ? undefined : own, next, shortened }, fallback, presentation?.replyToId);
+    createMessage({ label, failure: kind === 'failure', text: written || kind !== 'failure' ? body : undefined, next, shortened }, fallback, presentation?.replyToId);
   const full = create(text, formatFallback(fallbackTitle, text, false), false);
   if (messageBytes(full) <= MAX_OUTGOING_MESSAGE_BYTES) return full;
 
@@ -100,18 +98,13 @@ function messageBytes(message: OutgoingTeamsMessage): number {
   return Buffer.byteLength(JSON.stringify(message), 'utf8');
 }
 
-interface Parts { label: string | undefined; failure: boolean; written: string | undefined; own: string | undefined; next: string | undefined; shortened: boolean }
+interface Parts { label: string | undefined; failure: boolean; text: string | undefined; next: string | undefined; shortened: boolean }
 function createMessage(parts: Parts, fallbackText: string, replyToId?: string): OutgoingTeamsMessage {
   const note = { wrap: true, isSubtle: true, size: 'Small' as const };
-  const body: CardElement[] = [
+  const body: ITextBlock[] = [
     ...(parts.label === undefined ? [] : [{ type: 'TextBlock' as const, text: parts.label, ...note, spacing: 'None' as const }]),
     ...(parts.failure ? [{ type: 'TextBlock' as const, text: "Couldn't complete the request", weight: 'Bolder' as const, wrap: true, spacing: 'Small' as const, color: 'Attention' as const }] : []),
-    // The same tinted box as on the pull request card, so agent text is fenced wherever it appears.
-    // A failure's cause is fenced too, without the caption: Orka may have written it, not the agent.
-    ...(parts.written !== undefined ? [{ type: 'Container' as const, style: 'emphasis' as const, spacing: 'Small' as const, items: [
-      ...(parts.failure ? [] : [{ type: 'TextBlock' as const, text: AGENT, ...note, spacing: 'None' as const }]),
-      { type: 'TextBlock' as const, text: parts.written, wrap: true, ...(parts.failure ? {} : { spacing: 'Small' as const }) }] }] : []),
-    ...(parts.own === undefined ? [] : [{ type: 'TextBlock' as const, text: parts.own, wrap: true, spacing: 'Small' as const }]),
+    ...(parts.text === undefined ? [] : [{ type: 'TextBlock' as const, text: parts.text, wrap: true, spacing: 'Small' as const }]),
     ...(parts.next === undefined ? [] : [{ type: 'TextBlock' as const, text: parts.next, wrap: true, spacing: 'Small' as const, ...(parts.failure ? {} : { isSubtle: true, size: 'Small' as const }) }]),
   ];
   if (parts.shortened) body.push({ type: 'TextBlock', text: 'Reply shortened to fit the message limit.', ...note });

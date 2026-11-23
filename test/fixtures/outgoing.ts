@@ -43,9 +43,7 @@ const finalCard = {
   version: '1.4',
   fallbackText: 'Orka reply: Project summary - Review open issues - Run `npm test` こんにちは 🧑🏽‍💻',
   body: [
-    { type: 'Container', style: 'emphasis', spacing: 'Small', items: [
-      { type: 'TextBlock', text: 'Written by the agent', wrap: true, isSubtle: true, size: 'Small', spacing: 'None' },
-      { type: 'TextBlock', text: 'Project summary\n\n- Review open issues\n- Run `npm test`\n\nこんにちは 🧑🏽‍💻', wrap: true, spacing: 'Small' }] },
+    { type: 'TextBlock', text: 'Project summary\n\n- Review open issues\n- Run `npm test`\n\nこんにちは 🧑🏽‍💻', wrap: true, spacing: 'Small' },
   ],
 } satisfies IAdaptiveCard;
 
