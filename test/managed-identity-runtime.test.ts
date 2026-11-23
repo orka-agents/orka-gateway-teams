@@ -188,6 +188,12 @@ for (const variant of ['failure', 'cancel', 'deadline', 'shutdown']) test(`MI ${
   const receiver = await startReceiver(miConfig, owned.store, { managedIdentity: { imdsRequest: imds.imdsRequest,
     entraNetwork: entraNetwork(async () => { exchanges++; return { status: 200, headers: {}, body: { access_token: assertion(), token_type: 'Bearer', expires_in: 3600 } }; }) },
     providerPost: async () => { sends++; throw new Error('No late send'); } }, { journal: owned.journal, getRoute: (key) => owned.store.getRoute(key) });
+  // Hold the clock from the delivery's start until IMDS is reached: a slow start would
+  // otherwise use up the 100 ms first, IMDS would never be called and the wait below would hang.
+  if (variant === 'deadline') {
+    const now = performance.now.bind(performance); const held = now(); let outstanding = false;
+    t.mock.method(performance, 'now', () => outstanding ? now() : held); void reached.promise.then(() => { outstanding = true; });
+  }
   const abort = new AbortController();
   const pending = receiver.outbound!.deliver(finalDelivery, { signal: abort.signal,
     ...(variant === 'deadline' ? { deadline: performance.now() + 100 } : {}) });
