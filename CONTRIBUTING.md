@@ -40,7 +40,7 @@ private keys are never checked in or printed. Tests do not call live Teams/Orka.
 For focused tests: `node --import tsx --test test/convert.test.ts` or
 `node --import tsx --test test/format.test.ts`.
 On a machine with more than four CPUs `npm test` runs fewer test files at once than Node's
-default, about one per two CPUs, so it leaves room for other work; see `scripts/run-tests.mjs`.
+default, about two per three CPUs, so it leaves room for other work; see `scripts/run-tests.mjs`.
 `npm run typecheck` is also mandatory: `test/contracts.typecheck.ts` checks the
 public contracts and callable implementations, including non-message inputs and one-card/no-ordinary-text
 constraints, and is not run by the runtime test command. `npm run check` runs
