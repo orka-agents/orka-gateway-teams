@@ -24,6 +24,13 @@ const part = (s: string) => encodeURIComponent(s).replace(/[!'()*~]/gu, c => `%$
 const LINK_EXPIRED = 'Your sign-in expired. Sign in again, then ask Orka for a new card.';
 const AGAIN = 'Ask Orka again.';
 const NEWER = 'Go to newer card';
+const SIGN_IN = 'Sign in';
+const cardData = (p: Proposal) => ({ proposal: p.id, rev: p.revision, digest: p.payloadDigest });
+const senderRefresh = (p: Proposal) => ({ action: { type: 'Action.Execute' as const, verb: 'pr-refresh', data: cardData(p) }, userIds: [p.senderMRI] });
+// The button asks the gateway to send the sign-in to the person who pressed it. No card holds a sign-in link.
+const signInAction = (p: Proposal) => ({ type: 'Action.Execute' as const, title: SIGN_IN, verb: 'pr-signin', data: cardData(p) });
+/** The two states a sign-in can mend: a note that wasn't sent, and an approval that found the sign-in expired. */
+export const signInState = (p: Proposal): boolean => p.state === 'revise-requested' ? p.revisionAdmission === 'signin-required' : p.outcome?.kind === 'signin-required';
 const MESSAGE = /^https:\/\/teams\.microsoft\.com\/l\/message\/19:[A-Za-z0-9_-]{1,200}@(?:thread\.v2|unq\.gbl\.spaces)\/[0-9]{1,20}\?context=%7B%22contextType%22:%22chat%22%7D$/u;
 /** A link to a message in the same chat, or nothing where Teams documents none: a one-to-one chat with a bot has no `19:` chat ID. */
 function messageLink(chat: string, message: string | undefined): string | undefined {
@@ -91,9 +98,10 @@ function askAgain(p: Proposal, viewer: 'room' | 'sender'): string | undefined {
   return `Send a new approval card for the pull request${/^[A-Za-z0-9._\/-]{1,100}$/u.test(p.head) ? ` from ${p.head}` : ''}. The branch changed after I approved.`;
 }
 const ASK_AGAIN = /^Send a new approval card for the pull request(?: from [A-Za-z0-9._\/-]{1,100})?\. The branch changed after I approved\.$/u;
-/** Only the server-verified sender receives decision actions; invokes still recheck authority. `newerCard` is the message holding the card that replaced this one. */
-export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolean, newerCard?: string): IAdaptiveCard {
-  const s = status(p, viewer, decisionsEnabled); const newer = p.state === 'superseded' ? messageLink(p.conversationId, newerCard) : undefined; const again = askAgain(p, viewer); const data = { proposal: p.id, rev: p.revision, digest: p.payloadDigest };
+/** Only the server-verified sender receives decision actions; invokes still recheck authority. `newerCard` is the message holding the card that replaced this one.
+ * `signIn` is set when the sender still has to sign in; their card in a sign-in state then carries the button. */
+export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', decisionsEnabled: boolean, newerCard?: string, signIn = false): IAdaptiveCard {
+  const s = status(p, viewer, decisionsEnabled); const newer = p.state === 'superseded' ? messageLink(p.conversationId, newerCard) : undefined; const again = askAgain(p, viewer); const data = cardData(p);
   const repository = `https://github.com/${part(p.owner)}/${part(p.repo)}`; const compare = `${repository}/compare/${p.baseSHA}...${p.headSHA}`;
   const start = opening(p.body); const preview = start ? boundedLabel(start, 280) : { text: 'No description.', truncated: false }; const expanded = boundedLabel(p.body, 1800);
   const more = preview.truncated || start !== p.body.trim();
@@ -130,8 +138,8 @@ export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', dec
       // With part of the list missing, reading the diff is the first button. It has its own row: four buttons don't fit a phone.
       ...(decide && !p.filesComplete ? [{ type: 'ActionSet' as const, spacing: 'Small' as const, actions: [{ type: 'Action.OpenUrl' as const, title: 'View full diff', url: compare }] }] : [])] : [])];
   return { type: 'AdaptiveCard', version: '1.5', fallbackText: `Pull request: ${s.fallback ?? s.head}`, body,
-    refresh: { action: { type: 'Action.Execute', verb: 'pr-refresh', data }, userIds: [p.senderMRI] },
-    actions: [...(decide ? [
+    refresh: senderRefresh(p),
+    actions: [...(signIn && viewer === 'sender' && signInState(p) ? [signInAction(p)] : []), ...(decide ? [
       { type: 'Action.Execute' as const, title: 'Approve', style: 'positive' as const, verb: 'pr-approve', data },
       { type: 'Action.ShowCard' as const, title: 'Ask for changes', card: { type: 'AdaptiveCard' as const, version: '1.5' as const,
         body: [{ type: 'Input.Text' as const, id: 'note', isMultiline: true, maxLength: 2000, placeholder: 'What should change?' }],
@@ -144,12 +152,14 @@ export function buildPullRequestCard(p: Proposal, viewer: 'room' | 'sender', dec
       ...(p.outcome?.kind === 'opened' ? [{ type: 'Action.OpenUrl' as const, title: 'Open pull request', url: p.outcome.url }] :
         s.open || p.state === 'superseded' ? [] : [{ type: 'Action.OpenUrl' as const, title: 'View changes', url: compare }])] };
 }
-/** A fixed notice for a card whose account link changed. It copies no proposal or account text. */
-export function pullRequestNotice(kind: 'signin-expired' | RevisionAdmission | undefined): IAdaptiveCard {
+/** A fixed notice for a card whose account link changed. It copies no proposal or account text.
+ * With the proposal it refreshes for the sender, whose copy carries the button when `signIn` is set. */
+export function pullRequestNotice(kind: 'signin-expired' | RevisionAdmission | undefined, p?: Proposal, signIn = false): IAdaptiveCard {
   const hidden = 'Details are hidden because you signed in again.'; const r = kind === 'signin-expired' ? undefined : revisionStatus(kind);
   const s: Status = r ? { ...r, detail: r.detail ? `${r.detail} ${hidden}` : hidden } : { head: 'Not opened', alert: true, detail: LINK_EXPIRED };
   return { type: 'AdaptiveCard', version: '1.5', fallbackText: `Pull request: ${s.head}`, body: [caption('Pull request'),
-    line(s.head, { weight: 'Bolder', size: 'Medium', spacing: 'Small', ...(s.alert ? { color: 'Attention' } : {}) }), line(s.detail!, { spacing: 'Small' })] };
+    line(s.head, { weight: 'Bolder', size: 'Medium', spacing: 'Small', ...(s.alert ? { color: 'Attention' } : {}) }), line(s.detail!, { spacing: 'Small' })],
+    ...(p ? { refresh: senderRefresh(p), ...(signIn ? { actions: [signInAction(p)] } : {}) } : {}) };
 }
 /** Closed projection: SDK/arbitrary card properties cannot become an HTTP invoke response. */
 export function cardInvokeResponse(input: unknown): { statusCode: 200; type: 'application/vnd.microsoft.card.adaptive'; value: IAdaptiveCard } | undefined {
@@ -201,7 +211,8 @@ export function cardInvokeResponse(input: unknown): { statusCode: 200; type: 'ap
             if (nested || v.title !== 'Ask again' || m.type !== 'imBack' || typeof m.value !== 'string' || !ASK_AGAIN.test(m.value)) throw new Error();
           } else if (v.type === 'Action.Execute') {
             const d = object(v.data, ['proposal', 'rev', 'digest']); only(v.style, 'positive');
-            if (!(revision ? v.verb === 'pr-revise' && v.title === 'Send' : ['pr-approve', 'pr-reject'].includes(String(v.verb))) || d.rev !== 1 || !/^[a-f0-9]{64}$/u.test(String(d.proposal)) || !/^[a-f0-9]{64}$/u.test(String(d.digest))) throw new Error();
+            // "Sign in" is an action the gateway checks, never a link.
+            if (!(revision ? v.verb === 'pr-revise' && v.title === 'Send' : v.verb === 'pr-signin' ? v.title === SIGN_IN : ['pr-approve', 'pr-reject'].includes(String(v.verb))) || d.rev !== 1 || !/^[a-f0-9]{64}$/u.test(String(d.proposal)) || !/^[a-f0-9]{64}$/u.test(String(d.digest))) throw new Error();
           } else if (!nested && v.type === 'Action.ShowCard' && v.title === 'Ask for changes') validate(v.card, true, true);
           // One button may leave for Teams, and only to a message in a chat.
           else if (nested || v.type !== 'Action.OpenUrl' || typeof v.url !== 'string' || !(v.title === NEWER ? MESSAGE : GITHUB).test(v.url)) throw new Error(); }

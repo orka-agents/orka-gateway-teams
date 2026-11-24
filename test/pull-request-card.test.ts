@@ -288,6 +288,50 @@ test('fixed notices copy nothing from the proposal and pass the projection', () 
   for (const kind of ['signin-expired', 'pending', 'delivered', 'conflict', 'signin-required'] as const) assert.ok(response(pullRequestNotice(kind)));
 });
 
+const signInButton = (p: Proposal) => ({ type: 'Action.Execute', title: 'Sign in', verb: 'pr-signin', data: { proposal: p.id, rev: 1, digest: p.payloadDigest } });
+/** The two sign-in states: the approval found the sign-in expired, and the note wasn't sent. */
+const signInStates = (): Proposal[] => { const p = proposalFixture();
+  return [{ ...p, state: 'failed', outcome: { kind: 'signin-required' } }, { ...p, state: 'revise-requested', revisionAdmission: 'signin-required', claim: claim(p, 'revise', 'Cap retries at 5') }]; };
+test('sign-in states: the sender who still has to sign in gets "Sign in" first; nobody else, and no other state, does', () => {
+  for (const p of signInStates()) {
+    const card = buildPullRequestCard(p, 'sender', true, undefined, true); assert.deepEqual(titles(card), ['Sign in', 'View changes']);
+    // An action the gateway checks, like Approve. It is plain, and no card holds a link to the sign-in page.
+    assert.deepEqual(card.actions![0], signInButton(p)); assert.ok(response(card));
+    assert.deepEqual(JSON.stringify(card).match(/https?:[^"\s)]+/gu), [`https://github.com/example/project/compare/${p.baseSHA}...${p.headSHA}`]);
+    assert.deepEqual(titles(buildPullRequestCard(p, 'room', true, undefined, true)), ['View changes']);
+    assert.deepEqual(titles(buildPullRequestCard(p, 'sender', true)), ['View changes']);
+  }
+  for (const s of states().filter(s => !s.name.includes('sign-in'))) assert.ok(!JSON.stringify(buildPullRequestCard(s.p, s.viewer ?? 'sender', s.enabled ?? true, s.newerCard, true)).includes('pr-signin'), s.name);
+});
+test('a fixed notice given its proposal refreshes for the sender, and carries "Sign in" only when told to', () => {
+  const [p] = signInStates() as [Proposal]; const refresh = { action: { type: 'Action.Execute', verb: 'pr-refresh', data: signInButton(p).data }, userIds: ['29:sender-private'] };
+  for (const kind of ['signin-expired', 'signin-required'] as const) {
+    const plain = pullRequestNotice(kind); const posted = pullRequestNotice(kind, p); const own = pullRequestNotice(kind, p, true);
+    assert.deepEqual(posted, { ...plain, refresh }); assert.deepEqual(own, { ...plain, refresh, actions: [signInButton(p)] });
+    for (const card of [posted, own]) { assert.ok(response(card));
+      for (const copied of [p.title, p.body, p.head, p.displayName, p.githubLogin, p.owner, 'http']) assert.ok(!JSON.stringify(card).includes(copied), copied); }
+  }
+});
+test('projection: "Sign in" passes only as the gateway\'s own action, never as a link or another kind of button', () => {
+  const card = () => buildPullRequestCard(signInStates()[0]!, 'sender', true, undefined, true) as any; assert.ok(response(card()));
+  const page = 'https://signin.example.invalid/signin?challenge=opaque-challenge';
+  const forged: [string, (c: any) => void][] = [
+    ['a link to the sign-in page', c => { c.actions[0] = { type: 'Action.OpenUrl', title: 'Sign in', url: page }; }],
+    ['a link under another title', c => { c.actions[1].url = page; }], ['a link on the action', c => { c.actions[0].url = page; }],
+    ['a link in its data', c => { c.actions[0].data.url = page; }], ['a sign-in card button', c => { c.actions[0] = { type: 'signin', title: 'Sign in', value: page }; }],
+    ['a submit', c => { c.actions[0] = { type: 'Action.Submit', title: 'Sign in', data: { msteams: { type: 'signin', value: page } } }; }],
+    ['a chat message', c => { c.actions[0] = { type: 'Action.Submit', title: 'Sign in', data: { msteams: { type: 'imBack', value: 'Sign in' } } }; }],
+    ['another title', c => { c.actions[0].title = 'Approve'; }], ['filled', c => { c.actions[0].style = 'positive'; }],
+    ['another proposal id shape', c => { c.actions[0].data.proposal = 'x'; }], ['another revision', c => { c.actions[0].data.rev = 2; }],
+    ['in the body', c => { c.body.push({ type: 'ActionSet', spacing: 'Small', actions: [c.actions[0]] }); }],
+    ['as the refresh', c => { c.refresh.action.verb = 'pr-signin'; }],
+  ];
+  for (const [name, forge] of forged) { const c = card(); forge(c); assert.equal(response(c), undefined, name); }
+  // Nor inside the note box of a pending card, whose one action is Send.
+  const pending = full(); part.send(pending).verb = 'pr-signin'; assert.equal(response(pending), undefined);
+  pending.actions[1].card.actions[0] = signInButton(signInStates()[0]!); assert.equal(response(pending), undefined);
+});
+
 // The projection is a security boundary: an invoke response carries only what the builder can produce.
 const full = () => buildPullRequestCard({ ...proposalFixture(), body: longBody, files: fiveFiles, fileCount: 300, filesComplete: false }, 'sender', true) as any;
 const part = { head: (c: any) => c.body[1], box: (c: any) => box(c), set: (c: any) => c.body[c.body.indexOf(box(c)) + 1], more: (c: any) => part.set(c).actions[0], expanded: (c: any) => part.set(c).actions[0].card,

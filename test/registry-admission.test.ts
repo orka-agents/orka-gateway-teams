@@ -8,6 +8,7 @@ import test from 'node:test';
 import type { KubernetesContext } from '../src/registry/kubernetes.js';
 import { snapshotRegistry } from '../src/registry/config.js';
 import { createRegistryAdmission } from '../src/registry/admission.js';
+import { cardInvokeResponse } from '../src/teams/pull-request-card.js';
 import { BindingCheckError } from '../src/directory/provision.js';
 import { bindingName } from '../src/directory/codec.js';
 import { openDirectory } from '../src/directory/store.js';
@@ -53,9 +54,9 @@ async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<ty
     check: async (c: ConnectionRecord, _ctx: KubernetesContext) => { checks.push('check:' + target.id); await checkGate; if (failCheck) throw new BindingCheckError(failureCategory); return evidence(c); },
     revision: async () => ({ ...agent }) } }));
   const authority = { allowed: () => allowed, revalidate: async () => allowed, lost: new AbortController().signal };
-  const logs: string[] = [];
+  const logs: string[] = []; let github: Parameters<typeof createRegistryAdmission>[0]['github'];
   const makeSink = () => createRegistryAdmission({ config, directory, slots, authority, active: () => allowed,
-    ...(delegated ? { delegated } : {}), ...(proposals ? { proposals } : {}), ...(safeOutput ? { safeOutput } : {}),
+    ...(delegated ? { delegated } : {}), ...(github ? { github } : {}), ...(proposals ? { proposals } : {}), ...(safeOutput ? { safeOutput } : {}),
     logProposalText: line => texts.push({ line, cardsBefore: sent.length }),
     authorizer: { authorize: async (...args) => { authorized++; return policyAuthorizer ? policyAuthorizer.authorize(...args) : eligible; } }, log: (category, target, detail) => logs.push(category + ':' + target + (detail ? ' ' + JSON.stringify(detail) : '')) });
   const sink = makeSink();
@@ -77,6 +78,8 @@ async function fixture(t: test.TestContext, count = 2, delegated?: Parameters<ty
   };
   return { sink, restart: () => { const s = makeSink(); bindSender(s); return s; }, directory, scope, config, slots, event, route, run, provision, sent, admitted, turns, checks, logs, texts, authorized: () => authorized,
     authorizeWith: (value: typeof policyAuthorizer) => { policyAuthorizer = value; },
+    /** Applies to the next `restart()`. */
+    github: (value: typeof github) => { github = value; },
     policy: (value: PolicyAdmission) => { eligible = value; }, outcome: (value: ProviderResult) => { outcome = value; },
     fail: (value: boolean, category: BindingCheckError['category'] = 'binding-conflict') => { failCheck = value; failureCategory = category; }, checkGate: (value: Promise<void>) => { checkGate = value; },
     sendGate: (value: Promise<void>) => { sendGate = value; }, revoke: () => { allowed = false; },
@@ -268,7 +271,7 @@ function delegatedFixture() {
   const ch = { id: 'opaque-challenge', objectId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', conversationId: expectedEvent.contextId,
     activityId: 'work', generation: 1, expiresAt: Date.now() + 600000, state: 'open' as const };
   let linked = false; let claimed = false; let done = false; let exchanges = 0; let verifies = 0; let disconnects = 0;
-  let gate: Promise<void> | undefined; let consumed = false;
+  let gate: Promise<void> | undefined; let consumed = false; const issued: (string | undefined)[][] = [];
   const attempt = { challenge: ch, state: 'synthetic-private-state', nonce: 'synthetic-private-nonce', verifier: 'synthetic-private-verifier' };
   const accounts = {
     providerIdentity: async () => undefined,
@@ -291,7 +294,10 @@ function delegatedFixture() {
     },
     published: async (_ch: AccountChallenge) => done && linked,
     inspect: async (_subject?: unknown, _ctx?: unknown, _forDisconnect?: boolean) => ({ generation: 1, linked }),
-    challenge: async () => ch, getChallenge: async (id: string) => id === ch.id ? ch : undefined,
+    // Like the store, the challenge is bound to the activity that asked for it.
+    challenge: async (subject?: { objectId: string }, conversationId?: string, activityId?: string) => {
+      issued.push([subject?.objectId, conversationId, activityId]); if (activityId !== undefined) ch.activityId = activityId; return ch; },
+    getChallenge: async (id: string) => id === ch.id ? ch : undefined,
     claim: async () => done ? 'done' as const : claimed ? 'unavailable' as const : (claimed = true, 'claimed' as const),
     complete: async () => { done = true; linked = true; return true; },
     acquire: async () => linked ? { kind: 'token' as const, accessToken: 'synthetic-private-workiq' } : { kind: 'signin-required' as const },
@@ -305,7 +311,7 @@ function delegatedFixture() {
     verify: async (raw: string, oid: string) => { verifies++; if (raw !== 'synthetic-private-assertion' || oid !== ch.objectId) throw new Error('Rejected');
     return { assertionExpiresAt: Date.now() + 600000 }; },
     exchange: async () => { exchanges++; await gate; return { accessToken: 'synthetic-private-workiq', expiresAt: Date.now() + 60000 }; }, close: async () => {} };
-  return { delegated: { accounts, auth, apiUri: 'api://gateway', connectionName: 'workiq' }, ch,
+  return { delegated: { accounts, auth, apiUri: 'api://gateway', connectionName: 'workiq' }, ch, issued,
     exchanges: () => exchanges, verifies: () => verifies, disconnects: () => disconnects,
     gate: (value: Promise<void>) => { gate = value; } };
 }
@@ -402,6 +408,135 @@ test('uncertain_card_send_never_resends_after_restart and refresh scopes identit
   d.delegated.accounts.getProposal = async () => ({ proposal: p, etag: 'W/"1"' });
   p.state = 'expired'; assert.match(JSON.stringify((await restarted.cardAction!(input, context())).body), /Expired/);
   f.policy({ kind: 'no-access', text: '' }); assert.equal((await restarted.cardAction!(input, context())).status, 403);
+});
+
+// The "Sign in" button on a pull request card: a card action that sends the sender today's sign-in message.
+const OTHER = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const signInButton = (p: Proposal) => ({ type: 'Action.Execute', title: 'Sign in', verb: 'pr-signin', data: { proposal: p.id, rev: 1, digest: p.payloadDigest } });
+const unsentNote = (p: Proposal) => ({ state: 'revise-requested' as const, revisionAdmission: 'signin-required' as const, outcome: undefined,
+  claim: { decision: 'revise' as const, tenantId: p.tenantId, objectId: p.objectId, invokeActivityId: 'revise-invoke', decidedAt: Date.now(), note: 'Cap retries at 5', revisionReplyTarget: 'saved-reply' } });
+/** A card in a sign-in state ("expired": the approval found the sign-in expired; "note": the note wasn't sent), in a connected chat. Nobody is signed in yet. */
+async function signInFixture(t: test.TestContext, kind: 'personal' | 'groupChat' = 'personal', state: 'expired' | 'note' = 'expired') {
+  const d = delegatedFixture(); const f = await fixture(t, 2, { ...d.delegated, publicOrigin: 'https://signin.example.invalid' }, kind);
+  await f.provision('primary', f.event.contextId, kind); let sink = f.sink;
+  const p: Proposal = { ...proposalFixture(), ...f.scope, objectId: d.ch.objectId, conversationId: f.event.contextId, route: f.route,
+    targetId: 'primary', targetDigest: f.config.targets[0]!.identityDigest!, state: 'failed', outcome: { kind: 'signin-required' } };
+  if (state === 'note') Object.assign(p, unsentNote(p));
+  d.delegated.accounts.getProposal = async () => ({ proposal: p, etag: 'W/"1"' });
+  const who = (objectId = p.objectId, mri = p.senderMRI) => ({ ...context(), subject: { ...context().subject, objectId, chatKind: kind }, delegatedTenant: true,
+    controlRecipient: { id: mri, ...(kind === 'groupChat' ? { isTargeted: true as const } : {}) } });
+  const invoke = (verb: string, id: string) => ({ type: 'invoke', name: 'adaptiveCard/action', id, channelId: 'msteams', serviceUrl: f.route.serviceUrl, recipient: f.route.bot,
+    conversation: { ...f.route.conversation }, from: { id: p.senderMRI, aadObjectId: p.objectId }, value: { action: { type: 'Action.Execute', verb, data: { proposal: p.id, rev: 1, digest: p.payloadDigest } } } });
+  /** One card action. A returned card must also pass the allowlist every invoke response goes through. */
+  const act = async (verb = 'pr-signin', id: string = randomUUID(), ctx: ReturnType<typeof who> = who(), changed: Record<string, unknown> = {}) => {
+    const r = await sink.cardAction!({ ...invoke(verb, id), ...changed }, ctx); if (r.status !== 200) return { status: r.status, card: undefined, buttons: [] as string[] };
+    const card = (r.body as any).cardInvokeResponse.value; assert.ok(cardInvokeResponse((r.body as any).cardInvokeResponse), 'passes the allowlist');
+    return { status: r.status, card, buttons: (card.actions ?? []).map((a: any) => a.title) as string[] };
+  };
+  const signedIn = { state: 'synthetic-private-state', code: 'synthetic-private-code' };
+  return { d, f, p, who, act, invoke, signedIn, use: (value: typeof sink) => { sink = value; } };
+}
+for (const state of ['expired', 'note'] as const) test(`personal chat, ${state}: "Sign in" sends the sender one sign-in message, and the card holds no link`, async t => {
+  const { d, f, p, act, signedIn } = await signInFixture(t, 'personal', state);
+  const shown = await act('pr-refresh'); assert.deepEqual(shown.buttons, ['Sign in', 'View changes']); assert.deepEqual(shown.card.actions[0], signInButton(p));
+  assert.equal(f.sent.length, 0, 'showing the button starts nothing'); assert.deepEqual(d.issued, []);
+  const pressed = await act('pr-signin', 'press-1'); assert.equal(pressed.status, 200); assert.equal(f.sent.length, 1);
+  // The same message a chat request gets, to the sender, from a challenge bound to them, this chat and this press.
+  const message = JSON.parse(f.sent[0]!.text); assert.deepEqual(message.recipient, { id: p.senderMRI });
+  assert.equal(message.attachments[0].contentType, 'application/vnd.microsoft.card.signin');
+  assert.equal(message.attachments[0].content.buttons[0].value, 'https://signin.example.invalid/signin?challenge=' + d.ch.id);
+  assert.deepEqual(d.issued, [[p.objectId, p.conversationId, 'press-1']]);
+  const saved = await f.directory.getControl({ kind: 'control', conversationId: p.conversationId, activityId: 'press-1' }, context());
+  assert.equal(saved?.state, 'delivered'); assert.deepEqual(saved?.reply, { kind: 'signin', targetId: 'primary', challengeId: d.ch.id, recipient: { id: p.senderMRI } });
+  // The link is in that message only. The card keeps its button.
+  assert.deepEqual(pressed.buttons, ['Sign in', 'View changes']); assert.doesNotMatch(JSON.stringify([shown.card, pressed.card]), /signin\.example|challenge/u);
+  assert.match(f.logs.at(-1)!, /^card-action:primary .*"verb":"pr-signin".*"status":200/u);
+  // Teams repeating that press finds the same challenge and its saved record, and sends nothing more.
+  assert.equal((await act('pr-signin', 'press-1')).status, 200); assert.equal(f.sent.length, 1); assert.deepEqual(d.issued[1], d.issued[0]);
+  // The sign-in completes from that message. The button then goes, and a press of a stale card is refused.
+  assert.equal(typeof await f.sink.browser!.begin(d.ch.id, context()), 'string');
+  assert.equal(await f.sink.browser!.callback(new URLSearchParams(signedIn), context()), true); assert.equal(f.sent.length, 2);
+  assert.deepEqual((await act('pr-refresh')).buttons, ['View changes']);
+  assert.equal((await act('pr-signin', 'press-2')).status, 403); assert.equal(f.sent.length, 2); assert.equal(d.issued.length, 2);
+  assert.match(f.logs.at(-1)!, /"verb":"pr-signin".*"outcome":"denied-decision"/u);
+});
+test('group chat: the sign-in goes to the sender alone; another member has no button and no working press', async t => {
+  const { d, f, p, who, act } = await signInFixture(t, 'groupChat');
+  const other = who(OTHER, '29:other'); const fromOther = { from: { id: '29:other', aadObjectId: OTHER } };
+  const room = await act('pr-refresh', 'room', other, fromOther); assert.equal(room.status, 200); assert.deepEqual(room.buttons, ['View changes']);
+  assert.doesNotMatch(JSON.stringify(room.card), /pr-signin|signin\.example|challenge/u);
+  const refused: [string, ReturnType<typeof who>, Record<string, unknown>][] = [
+    ['another member', other, fromOther], ['another member naming the sender in the activity', other, {}], ['the sender named only by the token', who(), fromOther],
+    ['another Teams user id', who(p.objectId, '29:other'), {}], ['another tenant', { ...who(), delegatedTenant: false }, {}],
+    ['another service', who(), { serviceUrl: 'https://other.example.invalid/' }], ['another bot', who(), { recipient: { id: '28:other' } }],
+    ['another kind of chat', who(), { conversation: { ...f.route.conversation, conversationType: 'personal' } }], ['another chat', who(), { conversation: { ...f.route.conversation, id: 'other-chat' } }]];
+  for (const [name, ctx, changed] of refused) assert.equal((await act('pr-signin', randomUUID(), ctx, changed)).status, 403, name);
+  assert.equal(f.sent.length, 0); assert.deepEqual(d.issued, []);
+  // The sender's press: a message Teams shows to that one person, which can finish by single sign-on.
+  assert.deepEqual((await act('pr-refresh')).buttons, ['Sign in', 'View changes']);
+  assert.equal((await act('pr-signin', 'press-1')).status, 200); assert.equal(f.sent.length, 1);
+  const message = JSON.parse(f.sent[0]!.text); assert.deepEqual(message.recipient, { id: p.senderMRI, isTargeted: true });
+  assert.equal(message.attachments[0].contentType, 'application/vnd.microsoft.card.oauth'); assert.equal(message.attachments[0].content.tokenExchangeResource.id, d.ch.id);
+  const exchange = { type: 'invoke', name: 'signin/tokenExchange', channelData: { tenant: { id: f.scope.tenantId } }, conversation: { ...f.route.conversation },
+    from: { id: p.senderMRI, aadObjectId: p.objectId }, recipient: f.route.bot, serviceUrl: f.route.serviceUrl, value: { id: d.ch.id, connectionName: 'workiq', token: 'synthetic-private-assertion' } };
+  assert.equal((await f.sink.exchange!({ ...exchange, from: { id: '29:other', aadObjectId: OTHER } }, other)).status, 412, 'the challenge is the sender\'s');
+  assert.equal((await f.sink.exchange!(exchange, who())).status, 200); assert.deepEqual((await act('pr-refresh')).buttons, ['View changes']);
+});
+test('a sign-in started from the card is refused once its challenge has expired or been used', async t => {
+  for (const kind of ['personal', 'groupChat'] as const) {
+    const { d, f, p, who, act, signedIn } = await signInFixture(t, kind); assert.equal((await act('pr-signin', 'press-1')).status, 200);
+    d.ch.expiresAt = Date.now() - 1;
+    assert.equal(await f.sink.browser!.begin(d.ch.id, context()), undefined); assert.equal(await f.sink.browser!.callback(new URLSearchParams(signedIn), context()), false);
+    assert.equal((await f.sink.exchange!({ channelData: { tenant: { id: f.scope.tenantId } }, conversation: { ...f.route.conversation }, from: { id: p.senderMRI, aadObjectId: p.objectId },
+      recipient: f.route.bot, serviceUrl: f.route.serviceUrl, value: { id: d.ch.id, connectionName: 'workiq', token: 'synthetic-private-assertion' } }, who())).status, 412);
+    assert.equal((await d.delegated.accounts.inspect()).linked, false); assert.equal(f.sent.length, 1);
+  }
+  const { d, f, signedIn, act } = await signInFixture(t); await act('pr-signin', 'press-1');
+  assert.equal(await f.sink.browser!.callback(new URLSearchParams(signedIn), context()), true);
+  assert.equal(await f.sink.browser!.callback(new URLSearchParams(signedIn), context()), false); assert.equal(await f.sink.browser!.begin(d.ch.id, context()), undefined);
+});
+test('"Sign in" is refused on a card that is not in a sign-in state, and a failed send leaves the next press working', async t => {
+  const { d, f, p, act } = await signInFixture(t); const expired = { state: p.state, outcome: p.outcome };
+  const others: Record<string, unknown>[] = [{ state: 'pending', outcome: undefined }, { state: 'failed', outcome: { kind: 'permission' } }, { state: 'failed', outcome: { kind: 'failed' } },
+    { state: 'uncertain', outcome: { kind: 'uncertain' } }, { state: 'expired', outcome: undefined }, { ...unsentNote(p), revisionAdmission: 'conflict' }, { ...unsentNote(p), revisionAdmission: 'delivered' }];
+  for (const changed of others) { Object.assign(p, changed);
+    assert.ok(!(await act('pr-refresh')).buttons.includes('Sign in'), JSON.stringify(changed)); assert.equal((await act()).status, 403); }
+  assert.equal(f.sent.length, 0); assert.deepEqual(d.issued, []);
+  Object.assign(p, { ...expired, claim: undefined, revisionAdmission: undefined });
+  f.outcome({ kind: 'retryable' }); assert.equal((await act('pr-signin', 'press-1')).status, 403);
+  f.outcome({ kind: 'delivered', providerMessageId: 'receipt' }); assert.equal((await act('pr-signin', 'press-2')).status, 200); assert.match(f.sent.at(-1)!.text, /card\.signin/u);
+  assert.equal((await f.directory.getControl({ kind: 'control', conversationId: p.conversationId, activityId: 'press-2' }, context()))?.state, 'delivered');
+});
+test('with Microsoft signed in, an expired approval starts the GitHub link; an unsent note needs no GitHub sign-in', async t => {
+  const { d, f, p, act, use } = await signInFixture(t); await d.delegated.accounts.complete();
+  const g = delegatedFixture(); g.ch.id = 'github-challenge';
+  f.github({ accounts: g.delegated.accounts, auth: { safeOutput: () => true } } as unknown as Parameters<typeof f.github>[0]); use(f.restart());
+  assert.deepEqual((await act('pr-refresh')).buttons, ['Sign in', 'View changes']); assert.equal((await act('pr-signin', 'press-1')).status, 200);
+  const content = JSON.parse(f.sent[0]!.text).attachments[0].content; assert.equal(content.text, 'Sign in with Microsoft, then link your GitHub account.');
+  assert.equal(content.buttons[0].value, 'https://signin.example.invalid/signin?challenge=github-challenge');
+  assert.deepEqual(g.issued, [[p.objectId, p.conversationId, 'press-1']]); assert.deepEqual(d.issued, []);
+  assert.equal((await f.directory.getControl({ kind: 'control', conversationId: p.conversationId, activityId: 'press-1' }, context()))?.reply.kind, 'github-signin');
+  Object.assign(p, unsentNote(p)); assert.deepEqual((await act('pr-refresh')).buttons, ['View changes']); assert.equal((await act()).status, 403); assert.equal(f.sent.length, 1);
+  Object.assign(p, { state: 'failed', outcome: { kind: 'signin-required' }, claim: undefined, revisionAdmission: undefined });
+  await g.delegated.accounts.complete(); assert.deepEqual((await act('pr-refresh')).buttons, ['View changes']);
+});
+test('after the account changed, the sender\'s card is the fixed notice with "Sign in"; the notice posted to the chat has no button and no link', async t => {
+  for (const state of ['expired', 'note'] as const) {
+    const { d, f, p, who, act } = await signInFixture(t, 'groupChat', state);
+    d.delegated.accounts.inspect = async () => ({ generation: 2, linked: false }); d.delegated.accounts.safeOutput = async (_s, generation) => generation === 2;
+    const shown = await act('pr-refresh'); assert.equal(shown.status, 200);
+    assert.deepEqual(shown.card.body.map((b: any) => b.text), ['Pull request', ...(state === 'expired' ? ['Not opened', 'Your sign-in expired. Sign in again, then ask Orka for a new card.'] :
+      ['Changes not sent', 'Your sign-in expired. Sign in, then send your note to Orka in the chat. Details are hidden because you signed in again.'])]);
+    assert.deepEqual(shown.card.actions, [signInButton(p)]); assert.deepEqual(shown.card.refresh.userIds, [p.senderMRI]);
+    for (const privateValue of [p.title, p.body, p.head, p.displayName, p.githubLogin, 'Cap retries']) assert.ok(!JSON.stringify(shown.card).includes(privateValue), privateValue);
+    assert.equal((await act('pr-refresh', 'room', who(OTHER, '29:other'), { from: { id: '29:other', aadObjectId: OTHER } })).status, 403);
+    assert.equal((await act('pr-signin', 'press-1')).status, 200); assert.equal(f.sent.length, 1);
+    if (state === 'note') continue;
+    // Everyone reads the posted notice. It refreshes for the sender, whose copy is the one above.
+    await f.sink.postDecision(p, context()); assert.equal(f.sent.length, 2); const posted = JSON.parse(f.sent[1]!.text).attachments[0].content;
+    assert.equal(posted.actions, undefined); assert.deepEqual(posted.refresh, { action: { type: 'Action.Execute', verb: 'pr-refresh', data: signInButton(p).data }, userIds: [p.senderMRI] });
+    assert.doesNotMatch(f.sent[1]!.text, /pr-signin|signin\.example|challenge/u);
+  }
 });
 
 // What an operator needs to tell which client sent a card action and what it got back.

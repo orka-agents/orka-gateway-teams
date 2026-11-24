@@ -467,7 +467,7 @@ Every card action Teams sends, including a card's automatic refresh, logs one li
 teams-ingress: card-action (primary) verb=pr-approve trigger=manual proposal=<id> service=smba.trafficmanager.net platform=iOS status=200 outcome=approving ms=212 extra=data:trigger
 ```
 
-- `verb` is `pr-refresh`, `pr-approve`, `pr-reject`, `pr-revise` or `unknown`. `trigger` is Teams' `automatic` or `manual`, when sent.
+- `verb` is `pr-refresh`, `pr-approve`, `pr-reject`, `pr-revise`, `pr-signin` or `unknown`. `trigger` is Teams' `automatic` or `manual`, when sent.
 - `proposal` is the proposal id from the card and the name in brackets is its target, once the gateway has read the proposal.
 - `service` is the host of the request's service URL. `platform` is the client platform Teams reports, when sent: `Web`, `Windows`, `Mac`, `iOS`,
   `Android`, `Linux` or `other`.
@@ -526,6 +526,14 @@ generation change; send a new ordinary message with the requested changes instea
 A saved sign-in challenge also retains its original ten-minute expiry. If that
 link expires, send a new ordinary message to get a fresh sign-in prompt, then
 send the requested changes again. Refreshing the old card does not renew the link.
+
+When a card says the sender's sign-in expired (**Changes not sent**, or **Not opened** after an approval),
+the sender's own copy carries a **Sign in** button while they are still signed out. Pressing it is a card
+action, checked like the others and for the sender only. The gateway then sends that person the same
+sign-in message a chat request gets, from a new ten-minute challenge bound to them, the chat and that press.
+In a group chat it is the same message only they see. No card holds a link to the sign-in page, and other
+members' copies have no button. With Microsoft signed in and GitHub not linked, the button on a **Not opened**
+card starts the GitHub link instead.
 
 The revision uses current policy, sign-in and a fresh normal grant in the same
 conversation/session, without the old Task's pass or tool authority. Command
