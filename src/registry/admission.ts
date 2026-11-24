@@ -4,7 +4,7 @@ import { proposalOutput, proposalHash } from '../accounts/pull-request-proposal.
 import { createExternalEventId } from '../teams/ids.js';
 import type { Proposal, RevisionAdmission } from '../accounts/pull-request-proposal.js';
 import { object } from '../storage/table/codec.js';
-import { buildPullRequestCard, pullRequestNotice } from '../teams/pull-request-card.js';
+import { buildPullRequestCard, pullRequestNotice, signInState } from '../teams/pull-request-card.js';
 import { MAX_OUTGOING_MESSAGE_BYTES } from '../teams/format.js';
 import { identity } from '../delivery/identity.js';
 import { AccountError } from '../accounts/store.js';
@@ -177,8 +177,8 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     const p = (await options.delegated.accounts.getProposal(reply.proposal, ctx))?.proposal;
     if (!p || reply.kind === 'pr-approval' && p.state !== 'pending' || reply.kind === 'pr-decision' && reply.outcome !== proposalHash(p.outcome ?? p.state) || p.payloadDigest !== reply.digest || p.revision !== reply.rev || p.conversationId !== saved.conversationId || p.targetId !== reply.targetId) throw new DirectoryError('unready');
     const signin = p.outcome?.kind === 'signin-required';
-    // Revocation fences private previews. This fixed notice copies no old account/proposal strings.
-    const card = signin ? pullRequestNotice('signin-expired') : buildPullRequestCard(p, 'room', !!options.proposals);
+    // Revocation fences private previews. This fixed notice copies no old account or proposal text; it refreshes for the sender, like any card.
+    const card = signin ? pullRequestNotice('signin-expired', p) : buildPullRequestCard(p, 'room', !!options.proposals);
     const message: ProviderMessage = { type: 'message', replyToId: p.activityId, attachments: [{ contentType: 'application/vnd.microsoft.card.adaptive', content: card }] };
     const wire = JSON.stringify(message);
     const safe = signin ? options.safeOutput?.(wire) !== false && (!options.github || options.github.auth.safeOutput(wire)) :
@@ -230,6 +230,30 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
     }
     finally { consumers--; }
   }
+  /** The sign-in the sender's card can start, or nothing: the card isn't in a sign-in state, or they have signed in since. */
+  async function cardSignIn(p: Proposal, ctx: DirectoryContext): Promise<'signin' | 'github-signin' | undefined> {
+    if (!signInState(p)) return undefined;
+    const subject = { objectId: p.objectId };
+    const linked = (await options.delegated!.accounts.inspect(subject, ctx)).linked; assertActive(ctx);
+    if (!linked) return 'signin';
+    // A note needs only the Microsoft sign-in.
+    if (p.state === 'revise-requested' || !options.github) return undefined;
+    const github = (await options.github.accounts.inspect(subject, ctx)).linked; assertActive(ctx);
+    return github ? undefined : 'github-signin';
+  }
+  /** Sends the sender the same sign-in message a chat request gets, from a new ten-minute challenge bound to them, the chat and this press.
+   * A repeat of one press finds its saved record and sends nothing more. */
+  async function startSignIn(p: Proposal, kind: 'signin' | 'github-signin', activityId: string, recipient: NonNullable<ExchangeContext['controlRecipient']>,
+    bound: NonNullable<Awaited<ReturnType<typeof proposalConnection>>>, ctx: DirectoryContext): Promise<boolean> {
+    const accounts = kind === 'signin' ? options.delegated!.accounts : options.github!.accounts;
+    const challenge = await accounts.challenge({ objectId: p.objectId }, p.conversationId, activityId, ctx); assertActive(ctx);
+    const digest = bound.connection.identityDigest;
+    const result = await control({ schema: 1, kind: 'control', scope, conversationId: p.conversationId, chatKind: bound.connection.chatKind, activityId,
+      fingerprint: controlFingerprint(scope, p.conversationId, activityId, p.objectId, `pr-signin-v1:${p.id}`, null), currentTargetDigest: digest, desiredTargetDigest: null,
+      route: { serviceUrl: p.route.serviceUrl, channelId: 'msteams', bot: p.route.bot, conversation: { id: p.conversationId, tenantId: p.tenantId, conversationType: bound.connection.chatKind } },
+      reply: { kind, targetId: p.targetId, challengeId: challenge.id, recipient }, state: 'ready' }, bound.targets, false, ctx, bound.connection);
+    return result.kind === 'accepted' || result.kind === 'duplicate';
+  }
   // One line per card invoke: fixed words, the proposal id and field names only, never what the person or the agent wrote.
   async function cardAction(input: unknown, supplied: ExchangeContext): Promise<{ status: number; body: unknown }> {
     const started = performance.now(); const seen: CardActionSeen = { stage: options.delegated ? 'busy' : 'unavailable', extra: [] };
@@ -263,8 +287,15 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
         !supplied.subject.objectId || input.from.aadObjectId !== supplied.subject.objectId) return denied;
       seen.stage = 'proposal'; const version = await options.delegated.accounts.getProposal(data.proposal, ctx); let p = version?.proposal;
       if (!p || p.conversationId !== input.conversation.id || input.conversation.tenantId !== undefined && p.tenantId !== input.conversation.tenantId || p.payloadDigest !== data.digest || p.revision !== data.rev) return denied;
-      seen.targetId = p.targetId; seen.stage = 'connection'; if (!await proposalConnection(p, supplied.subject, ctx)) return denied;
-      if (action.verb !== 'pr-refresh') {
+      seen.targetId = p.targetId; seen.stage = 'connection'; const bound = await proposalConnection(p, supplied.subject, ctx); if (!bound) return denied;
+      // Only the sender's own card carries "Sign in", and only while they still have to.
+      const signIn = supplied.subject.objectId === p.objectId ? await cardSignIn(p, ctx) : undefined;
+      if (action.verb === 'pr-signin') {
+        seen.stage = 'decision';
+        if (!signIn || !supplied.delegatedTenant || supplied.controlRecipient?.id !== p.senderMRI || input.serviceUrl !== p.route.serviceUrl ||
+          !record(input.recipient) || input.recipient.id !== p.route.bot.id || input.conversation.conversationType !== p.route.conversation.conversationType ||
+          !await startSignIn(p, signIn, identity(input.id), supplied.controlRecipient, bound, ctx)) return denied;
+      } else if (action.verb !== 'pr-refresh') {
         seen.stage = 'decision';
         if (!options.proposals || supplied.subject.objectId !== p.objectId) return denied;
         if (revise && (!supplied.delegatedTenant || supplied.controlRecipient?.id !== p.senderMRI || typeof data.note !== 'string' ||
@@ -273,14 +304,16 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
         p = await options.proposals.decide(p, revise ? 'revise' : action.verb === 'pr-approve' ? 'approve' : 'reject', identity(input.id), ctx, revise ? data.note as string : undefined);
       }
       if (action.verb === 'pr-refresh' && supplied.subject.objectId === p.objectId) options.proposals?.refresh(p, ctx);
-      seen.stage = 'output'; let card = buildPullRequestCard(p, supplied.subject.objectId === p.objectId ? 'sender' : 'room', !!options.proposals, version?.newerCard);
+      seen.stage = 'output'; let card = buildPullRequestCard(p, supplied.subject.objectId === p.objectId ? 'sender' : 'room', !!options.proposals, version?.newerCard, !!signIn);
       if (!await safeProposal(p, proposalOutput(p), ctx) || !await safeProposal(p, JSON.stringify(card), ctx)) {
-        if (p.state !== 'revise-requested' || supplied.subject.objectId !== p.objectId || !supplied.controlRecipient) return denied;
+        const expired = p.outcome?.kind === 'signin-required';
+        if (p.state !== 'revise-requested' && !expired || supplied.subject.objectId !== p.objectId || !supplied.controlRecipient) return denied;
         const subject = { objectId: p.objectId }; const current = await options.delegated.accounts.inspect(subject, ctx);
         const github = await options.github?.accounts.inspect(subject, ctx);
         if (current.generation === p.generation && (!github || github.generation === p.githubGeneration)) return denied;
         // A fresh sign-in can resume the saved turn, but cannot restore revoked private preview facts.
-        card = { ...pullRequestNotice(p.revisionAdmission),
+        // The account changed, so the sender's card is the fixed notice. It keeps the button: this is when they most need it.
+        card = { ...pullRequestNotice(expired ? 'signin-expired' : p.revisionAdmission, p, !!signIn),
           ...(card.refresh ? { refresh: { ...card.refresh, userIds: [supplied.controlRecipient.id] } } : {}) };
         if (!await safeProposal(p, JSON.stringify(card), ctx, current.generation, github?.generation ?? p.githubGeneration)) return denied;
       }
@@ -598,7 +631,7 @@ export function createRegistryAdmission(options: Options): AdmissionSink & {
 }
 
 function record(v: unknown): v is Record<string, unknown> { return v !== null && typeof v === 'object' && !Array.isArray(v); }
-const cardVerbs = ['pr-refresh', 'pr-approve', 'pr-reject', 'pr-revise'];
+const cardVerbs = ['pr-refresh', 'pr-approve', 'pr-reject', 'pr-revise', 'pr-signin'];
 const clientPlatforms = ['Web', 'Windows', 'Mac', 'iOS', 'Android', 'Linux'];
 interface CardActionSeen { stage: 'unavailable' | 'busy' | 'activity' | 'action' | 'proposal' | 'connection' | 'decision' | 'output';
   verb?: string; trigger?: string; proposal?: string; targetId?: string; state?: string; extra: string[] }
